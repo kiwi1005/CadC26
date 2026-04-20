@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from puzzleplace.actions import ActionPrimitive, TypedAction
+from puzzleplace.actions.schema import ActionPrimitive, TypedAction
 from puzzleplace.data import ConstraintColumns, FloorSetCase
 from puzzleplace.roles import RoleLabel, WeakRoleEvidence, label_case_roles
 

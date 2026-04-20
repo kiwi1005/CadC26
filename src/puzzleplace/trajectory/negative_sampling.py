@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from puzzleplace.actions import ActionPrimitive, TypedAction
+from puzzleplace.actions.schema import ActionPrimitive, TypedAction
 
 
 def generate_negative_actions(actions: list[TypedAction]) -> list[TypedAction]:
