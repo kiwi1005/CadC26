@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from puzzleplace.actions import ExecutionState, replay_actions
+from puzzleplace.actions.executor import ExecutionState, replay_actions
 from puzzleplace.data import FloorSetCase
 
 from .pseudo import PseudoTrace
