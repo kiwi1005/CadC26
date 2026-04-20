@@ -1,0 +1,11 @@
+.omx/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+artifacts/
+external/FloorSet/LiteTensorData/
+external/FloorSet/LiteTensorDataTest/
+*.pt
+*.ckpt
