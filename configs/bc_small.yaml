@@ -1,0 +1,7 @@
+seed: 0
+case_limit: 5
+max_traces_per_case: 2
+hidden_dim: 64
+lr: 0.001
+epochs: 40
+output_path: artifacts/reports/agent8_bc_overfit_validation0_4.json
