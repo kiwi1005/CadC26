@@ -103,3 +103,27 @@
 - `.omx/context/team-intake-20260420T111200Z.md` — team intake snapshot
 - `~/.codex/skills/karpathy-guidelines/SKILL.md` — 行為約束來源
 - root directory listing / manifest search / source-dir search / `git status` 結果
+
+## 2026-04-21 實作注意事項（新增）
+1. **OMX team runtime 在這個專案上多次出現 lane drift / stalled。**
+   - 現況：Agent 0–6 最終大多改為 leader 本地接手完成。
+   - 建議：後續如果任務邊界仍容易漂移，優先用單 lane 或直接本地實作，不要過度依賴 long-running worker pane。
+
+2. **目前 milestone 1 的最大風險不是 bootstrap，而是 candidate coverage。**
+   - 現況：Agent 6 報告顯示 `heuristic coverage = 0.1667`，而 `offline teacher-hint augmented coverage = 1.0`。
+   - 解讀：測量/報告管線已建立，但 inference-time candidate family 還不夠好。
+
+3. **validation/test 的 target positions 只能作為 offline supervision / pseudo-label source。**
+   - 現況：Agent 1/2/5/6/7 都必須維持這個邊界。
+   - 建議：executor / rollout / candidate inference path 不應直接讀 target positions 作答案。
+
+4. **目前 package 匯入依賴 `PYTHONPATH=src` 或 editable install。**
+   - 現況：測試與腳本都以 `PYTHONPATH=src ...` 驗證。
+   - 建議：後續 commands 若遇到 import 問題，先檢查是否帶了 `PYTHONPATH=src`。
+
+5. **Agent 0 training smoke 會觸發大體積下載。**
+   - 現況：已成功，但會花時間與磁碟空間。
+   - 建議：後續 smoke / report 先重用已下載資料，不要反覆重抓。
+
+6. **目前最適合先證明的是 small-scope learnability，不是 final score。**
+   - 建議順序：Agent 7 encoder/decoder → Agent 8 BC overfit → Agent 9 greedy rollout → 再回頭看 candidate heuristic 是否要補強。
