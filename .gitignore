@@ -13,3 +13,5 @@ external/FloorSet/LiteTensorDataTest/
 .codex
 
 external/FloorSet/
+
+floorset_puzzle.egg-info/
