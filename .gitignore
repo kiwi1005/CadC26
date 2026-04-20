@@ -11,3 +11,5 @@ external/FloorSet/LiteTensorDataTest/
 *.ckpt
 
 .codex
+
+external/FloorSet/
