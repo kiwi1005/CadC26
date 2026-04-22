@@ -1,0 +1,1972 @@
+{
+  "audit_mode": "tracked-source reconstruction using current research reports plus code inspection",
+  "source_files": [
+    "AGENT_step4.md",
+    "artifacts/research/cost_semantics_and_trained_vs_untrained_delta.json",
+    "artifacts/research/generalization_followup_smallcheckpoints.json",
+    "src/puzzleplace/repair/finalizer.py",
+    "src/puzzleplace/repair/intent_preserver.py",
+    "src/puzzleplace/repair/shape_normalizer.py",
+    "src/puzzleplace/repair/overlap_resolver.py",
+    "src/puzzleplace/repair/shelf_packer.py",
+    "src/puzzleplace/rollout/semantic.py"
+  ],
+  "consistency_check": {
+    "agent_step4_expected_best_untrained_mean_cost": 19.784,
+    "agent_step4_expected_best_trained_mean_cost": 23.651,
+    "current_report_best_untrained_mean_cost": 19.78409972124002,
+    "current_report_best_trained_mean_cost": 23.650788643086692,
+    "agent_step4_top5_case_ids": [
+      "validation-14",
+      "validation-18",
+      "validation-17",
+      "validation-15",
+      "validation-11"
+    ],
+    "current_report_top5_case_ids": [
+      "validation-14",
+      "validation-18",
+      "validation-17",
+      "validation-15",
+      "validation-11"
+    ]
+  },
+  "per_case_stage_metrics": {
+    "validation-14": {
+      "untrained_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 30.543960437465323,
+            "hpwl_gap": 1.488874530296497,
+            "area_gap_bbox": 1.9230210602759623,
+            "violations_relative": 0.8571428571428571,
+            "boundary_violation_count": 17,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 24,
+            "mean_displacement": 14.4,
+            "max_displacement": 58.0,
+            "preserved_x_order_fraction": 0.9126050420168067
+          }
+        }
+      },
+      "bc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 56.610481800913256,
+            "hpwl_gap": 4.301452084111005,
+            "area_gap_bbox": 7.959331880900509,
+            "violations_relative": 0.6785714285714286,
+            "boundary_violation_count": 12,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 19,
+            "mean_displacement": 5.742857142857143,
+            "max_displacement": 54.0,
+            "preserved_x_order_fraction": 0.9327731092436975
+          }
+        }
+      },
+      "bc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 54.44516240696672,
+            "hpwl_gap": 3.781473318273391,
+            "area_gap_bbox": 6.091503267973856,
+            "violations_relative": 0.75,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 21,
+            "mean_displacement": 8.914285714285715,
+            "max_displacement": 60.0,
+            "preserved_x_order_fraction": 0.9126050420168067
+          }
+        }
+      },
+      "awbc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 66.02632680530354,
+            "hpwl_gap": 5.496842549725433,
+            "area_gap_bbox": 10.379327039457758,
+            "violations_relative": 0.6428571428571429,
+            "boundary_violation_count": 11,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 18,
+            "mean_displacement": 0.6857142857142857,
+            "max_displacement": 11.0,
+            "preserved_x_order_fraction": 0.9798319327731092
+          }
+        }
+      },
+      "awbc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 47.090511806294856,
+            "hpwl_gap": 3.1482914543647125,
+            "area_gap_bbox": 5.7932703945775845,
+            "violations_relative": 0.7142857142857143,
+            "boundary_violation_count": 13,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 20,
+            "mean_displacement": 13.2,
+            "max_displacement": 89.0,
+            "preserved_x_order_fraction": 0.9142857142857143
+          }
+        }
+      }
+    },
+    "validation-18": {
+      "untrained_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 24.309843737092955,
+            "hpwl_gap": 1.7014211387904294,
+            "area_gap_bbox": 1.577913043478261,
+            "violations_relative": 0.7666666666666667,
+            "boundary_violation_count": 16,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 23,
+            "mean_displacement": 17.28205128205128,
+            "max_displacement": 65.0,
+            "preserved_x_order_fraction": 0.8974358974358975
+          }
+        }
+      },
+      "bc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 93.20106266096953,
+            "hpwl_gap": 7.19431492605051,
+            "area_gap_bbox": 11.133565217391304,
+            "violations_relative": 0.7666666666666667,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 9,
+            "mib_violation_count": 0,
+            "total_soft_violations": 23,
+            "mean_displacement": 3.1794871794871793,
+            "max_displacement": 42.0,
+            "preserved_x_order_fraction": 0.9595141700404858
+          }
+        }
+      },
+      "bc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 32.77409330501452,
+            "hpwl_gap": 2.365780338618252,
+            "area_gap_bbox": 2.24,
+            "violations_relative": 0.8,
+            "boundary_violation_count": 15,
+            "grouping_violation_count": 9,
+            "mib_violation_count": 0,
+            "total_soft_violations": 24,
+            "mean_displacement": 22.128205128205128,
+            "max_displacement": 88.0,
+            "preserved_x_order_fraction": 0.8609986504723347
+          }
+        }
+      },
+      "awbc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 92.7406079087623,
+            "hpwl_gap": 7.339438643679178,
+            "area_gap_bbox": 13.784695652173912,
+            "violations_relative": 0.7,
+            "boundary_violation_count": 12,
+            "grouping_violation_count": 9,
+            "mib_violation_count": 0,
+            "total_soft_violations": 21,
+            "mean_displacement": 1.3076923076923077,
+            "max_displacement": 21.0,
+            "preserved_x_order_fraction": 0.9554655870445344
+          }
+        }
+      },
+      "awbc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 38.18972958949745,
+            "hpwl_gap": 2.806909961759716,
+            "area_gap_bbox": 3.3617391304347826,
+            "violations_relative": 0.7666666666666667,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 9,
+            "mib_violation_count": 0,
+            "total_soft_violations": 23,
+            "mean_displacement": 15.846153846153847,
+            "max_displacement": 100.0,
+            "preserved_x_order_fraction": 0.8798920377867746
+          }
+        }
+      }
+    },
+    "validation-17": {
+      "untrained_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 29.531280421743542,
+            "hpwl_gap": 1.6427683522003675,
+            "area_gap_bbox": 2.287865423387097,
+            "violations_relative": 0.8181818181818182,
+            "boundary_violation_count": 19,
+            "grouping_violation_count": 8,
+            "mib_violation_count": 0,
+            "total_soft_violations": 27,
+            "mean_displacement": 20.026315789473685,
+            "max_displacement": 89.0,
+            "preserved_x_order_fraction": 0.8677098150782361
+          }
+        }
+      },
+      "bc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 62.38183623699257,
+            "hpwl_gap": 5.2918837303050354,
+            "area_gap_bbox": 9.458417338709678,
+            "violations_relative": 0.6666666666666666,
+            "boundary_violation_count": 12,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 22,
+            "mean_displacement": 2.3684210526315788,
+            "max_displacement": 36.0,
+            "preserved_x_order_fraction": 0.968705547652916
+          }
+        }
+      },
+      "bc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 40.25665611333617,
+            "hpwl_gap": 2.4545526531661315,
+            "area_gap_bbox": 3.076045866935484,
+            "violations_relative": 0.8484848484848485,
+            "boundary_violation_count": 18,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 28,
+            "mean_displacement": 20.210526315789473,
+            "max_displacement": 85.0,
+            "preserved_x_order_fraction": 0.9075391180654339
+          }
+        }
+      },
+      "awbc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 66.41131178416495,
+            "hpwl_gap": 4.776346739211149,
+            "area_gap_bbox": 10.134072580645162,
+            "violations_relative": 0.696969696969697,
+            "boundary_violation_count": 13,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 23,
+            "mean_displacement": 3.473684210526316,
+            "max_displacement": 37.0,
+            "preserved_x_order_fraction": 0.9359886201991465
+          }
+        }
+      },
+      "awbc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 41.020549329052194,
+            "hpwl_gap": 2.348927602528362,
+            "area_gap_bbox": 3.846459173387097,
+            "violations_relative": 0.8181818181818182,
+            "boundary_violation_count": 18,
+            "grouping_violation_count": 9,
+            "mib_violation_count": 0,
+            "total_soft_violations": 27,
+            "mean_displacement": 13.81578947368421,
+            "max_displacement": 69.0,
+            "preserved_x_order_fraction": 0.9274537695590327
+          }
+        }
+      }
+    },
+    "validation-15": {
+      "untrained_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 19.48872690462693,
+            "hpwl_gap": 1.5357681271215256,
+            "area_gap_bbox": 1.4514428412874585,
+            "violations_relative": 0.65625,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 7,
+            "mib_violation_count": 0,
+            "total_soft_violations": 21,
+            "mean_displacement": 26.22222222222222,
+            "max_displacement": 76.0,
+            "preserved_x_order_fraction": 0.8777777777777778
+          }
+        }
+      },
+      "bc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 33.28896945461238,
+            "hpwl_gap": 1.990406656962403,
+            "area_gap_bbox": 3.554661487236404,
+            "violations_relative": 0.71875,
+            "boundary_violation_count": 15,
+            "grouping_violation_count": 8,
+            "mib_violation_count": 0,
+            "total_soft_violations": 23,
+            "mean_displacement": 15.63888888888889,
+            "max_displacement": 70.0,
+            "preserved_x_order_fraction": 0.873015873015873
+          }
+        }
+      },
+      "bc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 25.848933439151725,
+            "hpwl_gap": 1.7716915220513532,
+            "area_gap_bbox": 1.3915094339622642,
+            "violations_relative": 0.78125,
+            "boundary_violation_count": 17,
+            "grouping_violation_count": 8,
+            "mib_violation_count": 0,
+            "total_soft_violations": 25,
+            "mean_displacement": 45.583333333333336,
+            "max_displacement": 126.0,
+            "preserved_x_order_fraction": 0.8142857142857143
+          }
+        }
+      },
+      "awbc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 45.510152463093576,
+            "hpwl_gap": 2.8103295931857226,
+            "area_gap_bbox": 6.17582315945246,
+            "violations_relative": 0.6875,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 8,
+            "mib_violation_count": 0,
+            "total_soft_violations": 22,
+            "mean_displacement": 5.583333333333333,
+            "max_displacement": 37.0,
+            "preserved_x_order_fraction": 0.9523809523809523
+          }
+        }
+      },
+      "awbc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 28.05309479491323,
+            "hpwl_gap": 1.6175993845693764,
+            "area_gap_bbox": 1.6089530151683316,
+            "violations_relative": 0.8125,
+            "boundary_violation_count": 18,
+            "grouping_violation_count": 8,
+            "mib_violation_count": 0,
+            "total_soft_violations": 26,
+            "mean_displacement": 38.583333333333336,
+            "max_displacement": 112.0,
+            "preserved_x_order_fraction": 0.8634920634920635
+          }
+        }
+      }
+    },
+    "validation-11": {
+      "untrained_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 21.554994156396766,
+            "hpwl_gap": 1.895206410021764,
+            "area_gap_bbox": 1.6060731253873166,
+            "violations_relative": 0.7857142857142857,
+            "boundary_violation_count": 13,
+            "grouping_violation_count": 9,
+            "mib_violation_count": 0,
+            "total_soft_violations": 22,
+            "mean_displacement": 19.3125,
+            "max_displacement": 61.0,
+            "preserved_x_order_fraction": 0.8870967741935484
+          }
+        }
+      },
+      "bc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 46.275689839294294,
+            "hpwl_gap": 3.4756888774532295,
+            "area_gap_bbox": 6.329580665151828,
+            "violations_relative": 0.7857142857142857,
+            "boundary_violation_count": 12,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 22,
+            "mean_displacement": 10.21875,
+            "max_displacement": 51.0,
+            "preserved_x_order_fraction": 0.9032258064516129
+          }
+        }
+      },
+      "bc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 29.887340022750895,
+            "hpwl_gap": 2.1720481942545025,
+            "area_gap_bbox": 2.3947531501755837,
+            "violations_relative": 0.8571428571428571,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 24,
+            "mean_displacement": 32.90625,
+            "max_displacement": 127.0,
+            "preserved_x_order_fraction": 0.7701612903225806
+          }
+        }
+      },
+      "awbc_seed_0": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 57.98912540602945,
+            "hpwl_gap": 4.297978967945712,
+            "area_gap_bbox": 9.44205742615162,
+            "violations_relative": 0.75,
+            "boundary_violation_count": 11,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 21,
+            "mean_displacement": 2.75,
+            "max_displacement": 34.0,
+            "preserved_x_order_fraction": 0.9133064516129032
+          }
+        }
+      },
+      "awbc_seed_1": {
+        "A_semantic_proposal": {
+          "status": "missing",
+          "why": "tracked reports do not persist semantic proposal positions or pre-repair HPWL/bbox snapshots",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/rollout/semantic.py"
+          ]
+        },
+        "B_shape_normalized": {
+          "status": "missing",
+          "why": "finalizer runs normalize_shapes() but does not emit a stage snapshot artifact",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): normalize_shapes(case, proposed_positions)"
+        },
+        "C_overlap_resolved": {
+          "status": "missing",
+          "why": "finalizer runs resolve_overlaps() but does not emit stage metrics",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py"
+          ],
+          "code_path": "finalize_layout(): resolve_overlaps(normalized, ...)"
+        },
+        "D_shelf_or_final_pack": {
+          "status": "missing",
+          "why": "finalizer runs shelf_pack_missing() + a second resolve_overlaps() pass but does not persist intermediate geometry",
+          "instrumentation_needed": [
+            "src/puzzleplace/repair/finalizer.py",
+            "src/puzzleplace/repair/shelf_packer.py"
+          ],
+          "code_path": "finalize_layout(): shelf_pack_missing(...); resolve_overlaps(packed, ...)"
+        },
+        "E_strict_final_layout": {
+          "status": "missing",
+          "why": "tracked reports expose only final evaluated metrics, not the final coordinate dump needed for a fresh stage-E audit",
+          "instrumentation_needed": [
+            "scripts/run_generalization_followup.py",
+            "src/puzzleplace/repair/finalizer.py"
+          ]
+        },
+        "F_official_final": {
+          "status": "observed",
+          "source_artifact": "artifacts/research/generalization_followup_smallcheckpoints.json",
+          "metrics": {
+            "semantic_completed": true,
+            "semantic_placed_fraction": 1.0,
+            "fallback_fraction": 0.0,
+            "hard_feasible": true,
+            "overlap_pair_count": 0,
+            "official_cost": 29.84848997607186,
+            "hpwl_gap": 2.299763253379549,
+            "area_gap_bbox": 2.1856021483164634,
+            "violations_relative": 0.8571428571428571,
+            "boundary_violation_count": 14,
+            "grouping_violation_count": 10,
+            "mib_violation_count": 0,
+            "total_soft_violations": 24,
+            "mean_displacement": 31.5,
+            "max_displacement": 95.0,
+            "preserved_x_order_fraction": 0.8004032258064516
+          }
+        }
+      }
+    }
+  },
+  "per_case_drift_decomposition": {
+    "validation-14": {
+      "proposal_quality_delta": {
+        "status": "missing",
+        "why": "no tracked pre-repair stage metrics were persisted for this case"
+      },
+      "repair_delta": {
+        "status": "partial",
+        "tracked_signals_only": {
+          "trained_mean_displacement": 13.2,
+          "untrained_mean_displacement": 14.4,
+          "delta_mean_displacement": -1.200000000000001
+        },
+        "why_partial": "tracked reports expose displacement but not stage-B/C/D HPWL or bbox deltas"
+      },
+      "final_delta": {
+        "official_cost": 16.546551368829533,
+        "hpwl_gap": 1.6594169240682155,
+        "area_gap": 3.870249334301622,
+        "violations_relative": -0.1428571428571428,
+        "runtime_factor": 0.532547712326048,
+        "mean_displacement": -1.200000000000001
+      },
+      "quality_driver": "finalizer_preserves_bad_structure",
+      "evidence": [
+        "trained final quality is worse on both HPWL and bbox even though repair displacement is not higher",
+        "tracked finalizer code is legality-oriented and does not optimize HPWL/bbox, so it is likely preserving poor proposal geometry rather than correcting it"
+      ]
+    },
+    "validation-18": {
+      "proposal_quality_delta": {
+        "status": "missing",
+        "why": "no tracked pre-repair stage metrics were persisted for this case"
+      },
+      "repair_delta": {
+        "status": "partial",
+        "tracked_signals_only": {
+          "trained_mean_displacement": 15.846153846153847,
+          "untrained_mean_displacement": 17.28205128205128,
+          "delta_mean_displacement": -1.4358974358974343
+        },
+        "why_partial": "tracked reports expose displacement but not stage-B/C/D HPWL or bbox deltas"
+      },
+      "final_delta": {
+        "official_cost": 13.879885852404499,
+        "hpwl_gap": 1.1054888229692865,
+        "area_gap": 1.7838260869565217,
+        "violations_relative": 0.0,
+        "runtime_factor": 0.5124094486236572,
+        "mean_displacement": -1.4358974358974343
+      },
+      "quality_driver": "finalizer_preserves_bad_structure",
+      "evidence": [
+        "trained final quality is worse on both HPWL and bbox even though repair displacement is not higher",
+        "tracked finalizer code is legality-oriented and does not optimize HPWL/bbox, so it is likely preserving poor proposal geometry rather than correcting it"
+      ]
+    },
+    "validation-17": {
+      "proposal_quality_delta": {
+        "status": "missing",
+        "why": "no tracked pre-repair stage metrics were persisted for this case"
+      },
+      "repair_delta": {
+        "status": "partial",
+        "tracked_signals_only": {
+          "trained_mean_displacement": 13.81578947368421,
+          "untrained_mean_displacement": 20.026315789473685,
+          "delta_mean_displacement": -6.210526315789474
+        },
+        "why_partial": "tracked reports expose displacement but not stage-B/C/D HPWL or bbox deltas"
+      },
+      "final_delta": {
+        "official_cost": 11.489268907308652,
+        "hpwl_gap": 0.7061592503279945,
+        "area_gap": 1.55859375,
+        "violations_relative": 0.0,
+        "runtime_factor": 0.15837574005126953,
+        "mean_displacement": -6.210526315789474
+      },
+      "quality_driver": "finalizer_preserves_bad_structure",
+      "evidence": [
+        "trained final quality is worse on both HPWL and bbox even though repair displacement is not higher",
+        "tracked finalizer code is legality-oriented and does not optimize HPWL/bbox, so it is likely preserving poor proposal geometry rather than correcting it"
+      ]
+    },
+    "validation-15": {
+      "proposal_quality_delta": {
+        "status": "missing",
+        "why": "no tracked pre-repair stage metrics were persisted for this case"
+      },
+      "repair_delta": {
+        "status": "partial",
+        "tracked_signals_only": {
+          "trained_mean_displacement": 38.583333333333336,
+          "untrained_mean_displacement": 26.22222222222222,
+          "delta_mean_displacement": 12.361111111111114
+        },
+        "why_partial": "tracked reports expose displacement but not stage-B/C/D HPWL or bbox deltas"
+      },
+      "final_delta": {
+        "official_cost": 8.564367890286299,
+        "hpwl_gap": 0.0818312574478508,
+        "area_gap": 0.15751017388087307,
+        "violations_relative": 0.15625,
+        "runtime_factor": 0.19588875770569203,
+        "mean_displacement": 12.361111111111114
+      },
+      "quality_driver": "soft_violation_driver",
+      "evidence": [
+        "soft-violation growth dominates while HPWL/bbox deltas stay comparatively small"
+      ]
+    },
+    "validation-11": {
+      "proposal_quality_delta": {
+        "status": "missing",
+        "why": "no tracked pre-repair stage metrics were persisted for this case"
+      },
+      "repair_delta": {
+        "status": "partial",
+        "tracked_signals_only": {
+          "trained_mean_displacement": 31.5,
+          "untrained_mean_displacement": 19.3125,
+          "delta_mean_displacement": 12.1875
+        },
+        "why_partial": "tracked reports expose displacement but not stage-B/C/D HPWL or bbox deltas"
+      },
+      "final_delta": {
+        "official_cost": 8.293495819675094,
+        "hpwl_gap": 0.40455684335778486,
+        "area_gap": 0.5795290229291468,
+        "violations_relative": 0.0714285714285714,
+        "runtime_factor": 0.3157050609588623,
+        "mean_displacement": 12.1875
+      },
+      "quality_driver": "proposal_bbox_bad",
+      "evidence": [
+        "bbox-area degradation is materially larger than the HPWL delta"
+      ]
+    }
+  },
+  "action_histograms": {
+    "status": "missing",
+    "why": "no tracked artifact persists semantic action traces for validation-14/18/17/15/11",
+    "instrumentation_needed": [
+      "scripts/run_generalization_followup.py",
+      "src/puzzleplace/rollout/semantic.py"
+    ]
+  },
+  "repair_metrics": {
+    "validation-14": {
+      "tracked_observation": {
+        "trained_mean_displacement": 13.2,
+        "untrained_mean_displacement": 14.4,
+        "trained_runtime_factor": 11.174068450927733,
+        "untrained_runtime_factor": 10.641520738601685
+      },
+      "interpretation": "trained displacement is not a reliable quality proxy here"
+    },
+    "validation-18": {
+      "tracked_observation": {
+        "trained_mean_displacement": 15.846153846153847,
+        "untrained_mean_displacement": 17.28205128205128,
+        "trained_runtime_factor": 10.383898735046385,
+        "untrained_runtime_factor": 9.871489286422728
+      },
+      "interpretation": "trained displacement is not a reliable quality proxy here"
+    },
+    "validation-17": {
+      "tracked_observation": {
+        "trained_mean_displacement": 13.81578947368421,
+        "untrained_mean_displacement": 20.026315789473685,
+        "trained_runtime_factor": 9.246862173080444,
+        "untrained_runtime_factor": 9.088486433029175
+      },
+      "interpretation": "trained displacement is not a reliable quality proxy here"
+    },
+    "validation-15": {
+      "tracked_observation": {
+        "trained_mean_displacement": 38.583333333333336,
+        "untrained_mean_displacement": 26.22222222222222,
+        "trained_runtime_factor": 12.121502161026005,
+        "untrained_runtime_factor": 11.925613403320312
+      },
+      "interpretation": "trained displacement and quality both worsen together on this case"
+    },
+    "validation-11": {
+      "tracked_observation": {
+        "trained_mean_displacement": 31.5,
+        "untrained_mean_displacement": 19.3125,
+        "trained_runtime_factor": 5.39150834083557,
+        "untrained_runtime_factor": 5.075803279876708
+      },
+      "interpretation": "trained displacement and quality both worsen together on this case"
+    }
+  },
+  "intent_preservation_metrics": {
+    "status": "missing",
+    "why": "tracked reports only persist mean/max displacement and preserved_x_order_fraction, not attach/boundary/pin/group intent counters requested by AGENT_step4.md",
+    "instrumentation_needed": [
+      "src/puzzleplace/repair/finalizer.py",
+      "src/puzzleplace/repair/intent_preserver.py"
+    ]
+  },
+  "aggregate_diagnosis": {
+    "case_count": 5,
+    "trained_variant_under_audit": "awbc seed 1",
+    "best_untrained_reference": "untrained seed 0",
+    "driver_counts": {
+      "finalizer_preserves_bad_structure": 3,
+      "soft_violation_driver": 1,
+      "proposal_bbox_bad": 1
+    },
+    "cases_with_lower_trained_displacement_but_higher_trained_cost": 3,
+    "cases_with_higher_trained_soft_violations": 2,
+    "mean_delta_trained_minus_untrained": {
+      "official_cost": 11.754713967700814,
+      "hpwl_gap": 0.7914906196342264,
+      "area_gap": 1.5899416736136325,
+      "violations_relative": 0.01696428571428572,
+      "mean_displacement": 3.140437471884841
+    }
+  },
+  "final_recommendation": {
+    "final_diagnosis": "Most top-loss cases are consistent with a proposal-quality / objective-mismatch failure: trained checkpoints finish with worse HPWL and bbox-area gaps even when mean repair displacement is lower, and the tracked finalizer is legality-oriented rather than cost-aware.",
+    "confidence": "medium",
+    "recommended_immediate_next_experiment": "Instrument and persist stage A-E snapshots for the same top-5 cases, then compare semantic proposal vs post-finalizer HPWL/bbox drift before attempting any new training run.",
+    "experiments_to_avoid": [
+      "Do not use mean repair displacement as the primary model-selection metric.",
+      "Do not spend another training cycle on the same AWBC objective before stagewise HPWL/bbox evidence is available.",
+      "Do not interpret lower repair motion as proof that the trained proposal is better."
+    ],
+    "exact_code_files_to_change_next": [
+      "src/puzzleplace/repair/finalizer.py",
+      "src/puzzleplace/rollout/semantic.py",
+      "scripts/run_generalization_followup.py",
+      "scripts/generate_cost_semantics_and_trained_vs_untrained_delta.py"
+    ]
+  },
+  "missing_metrics": [
+    {
+      "metric_name": "stagewise_positions_A_to_E",
+      "why_unavailable": "tracked reports only persist final evaluated metrics, not per-stage coordinates",
+      "instrumentation_needed": [
+        "scripts/run_generalization_followup.py",
+        "src/puzzleplace/repair/finalizer.py"
+      ]
+    },
+    {
+      "metric_name": "stagewise_HPWL_total_HPWLint_HPWLext",
+      "why_unavailable": "HPWL is only persisted after the final evaluator call",
+      "instrumentation_needed": [
+        "src/puzzleplace/eval/official.py",
+        "src/puzzleplace/repair/finalizer.py"
+      ]
+    },
+    {
+      "metric_name": "bbox_width_height_whitespace_aspect_per_stage",
+      "why_unavailable": "no tracked artifact saves intermediate stage geometry snapshots",
+      "instrumentation_needed": [
+        "src/puzzleplace/repair/finalizer.py"
+      ]
+    },
+    {
+      "metric_name": "max_overlap_area_and_overlap_area_per_stage",
+      "why_unavailable": "tracked reports only keep final overlap-pair count after repair",
+      "instrumentation_needed": [
+        "src/puzzleplace/repair/finalizer.py",
+        "src/puzzleplace/eval/violation.py"
+      ]
+    },
+    {
+      "metric_name": "moved_block_count_changed_block_fraction_shelf_fallback_block_count_anchor_moved_count",
+      "why_unavailable": "finalizer report is not serialized in the current research artifacts",
+      "instrumentation_needed": [
+        "src/puzzleplace/repair/finalizer.py",
+        "scripts/run_generalization_followup.py"
+      ]
+    },
+    {
+      "metric_name": "attach_boundary_pin_pull_group_compactness_intent_counters",
+      "why_unavailable": "measure_intent_preservation currently exposes only displacement and x-order preservation",
+      "instrumentation_needed": [
+        "src/puzzleplace/repair/intent_preserver.py",
+        "src/puzzleplace/rollout/semantic.py"
+      ]
+    },
+    {
+      "metric_name": "primitive_histogram_placement_order_first_hub_and_boundary_steps",
+      "why_unavailable": "semantic action traces are not persisted in tracked reports",
+      "instrumentation_needed": [
+        "scripts/run_generalization_followup.py",
+        "src/puzzleplace/rollout/semantic.py"
+      ]
+    }
+  ],
+  "commands_used": [
+    "python - <<PY ... read current research JSON artifacts and tracked code references ... PY",
+    "sed -n 200,485p AGENT_step4.md",
+    "sed -n 1,260p src/puzzleplace/repair/finalizer.py",
+    "sed -n 1,260p src/puzzleplace/rollout/semantic.py"
+  ]
+}
