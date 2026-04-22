@@ -3,6 +3,7 @@
 ## Validation status
 - `top5_loss_drift_audit.md` is present in the leader workspace and is consistent with `AGENT_step4.md`, `generalization_followup_smallcheckpoints.md`, and `cost_semantics_and_trained_vs_untrained_delta.md` on the locked facts: best untrained mean cost `19.784`, best trained mean cost `23.651`, and the top-5 loss cases `validation-14/18/17/15/11`.
 - `best_of_k_oracle_reranking.md` is **not present yet** in the leader workspace, so the oracle/reranking lane cannot be fully integrated or cross-validated in this pass.
+- Validation pass executed from this worker: `python scripts/validate_step4_outputs.py` currently returns `overall_status=partial` because top-5 is consistent but the best-of-K artifact is still pending.
 
 ## What the current evidence says
 - The top-5 audit is directionally aligned with Step4: the trained failure signal is still dominated by HPWL + bbox quality terms, and lower repair displacement is not rescuing official cost.
