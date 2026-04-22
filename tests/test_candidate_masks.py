@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import torch
 
-from puzzleplace.actions import ExecutionState, TypedAction, check_action_mask, compute_expert_candidate_coverage, generate_candidate_actions
+from puzzleplace.actions import (
+    ExecutionState,
+    TypedAction,
+    check_action_mask,
+    compute_expert_candidate_coverage,
+    generate_candidate_actions,
+)
 from puzzleplace.actions.schema import ActionPrimitive
 from puzzleplace.data.schema import FloorSetCase
 from puzzleplace.trajectory import generate_pseudo_traces
@@ -16,16 +22,20 @@ def _make_case() -> FloorSetCase:
         b2b_edges=torch.tensor([[0.0, 1.0, 2.0], [1.0, 2.0, 1.0]]),
         p2b_edges=torch.tensor([[0.0, 1.0, 1.0]]),
         pins_pos=torch.empty((0, 2)),
-        constraints=torch.tensor([
-            [1.0, 0.0, 0.0, 0.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 1.0],
-            [0.0, 0.0, 0.0, 0.0, 0.0],
-        ]),
-        target_positions=torch.tensor([
-            [0.0, 0.0, 2.0, 3.0],
-            [2.0, 0.0, 3.0, 2.0],
-            [0.0, 3.0, 2.0, 2.0],
-        ]),
+        constraints=torch.tensor(
+            [
+                [1.0, 0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0],
+            ]
+        ),
+        target_positions=torch.tensor(
+            [
+                [0.0, 0.0, 2.0, 3.0],
+                [2.0, 0.0, 3.0, 2.0],
+                [0.0, 3.0, 2.0, 2.0],
+            ]
+        ),
         metrics=torch.tensor([12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]),
     )
 

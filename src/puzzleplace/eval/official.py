@@ -24,7 +24,9 @@ from iccad2026_evaluate import evaluate_solution  # noqa: E402
 
 
 def _boxes_from_polygons(polygons: torch.Tensor) -> list[tuple[float, float, float, float]]:
-    case = adapt_validation_batch(((torch.empty(1, 0),) * 5, (polygons.unsqueeze(0), torch.empty(1, 8))))
+    case = adapt_validation_batch(
+        ((torch.empty(1, 0),) * 5, (polygons.unsqueeze(0), torch.empty(1, 8)))
+    )
     return positions_from_case_targets(case)
 
 
@@ -61,7 +63,9 @@ def evaluate_positions(
         case.p2b_edges,
         case.pins_pos,
         case.area_targets,
-        target_positions=positions_from_case_targets(case) if case.target_positions is not None else None,
+        target_positions=(
+            positions_from_case_targets(case) if case.target_positions is not None else None
+        ),
         median_runtime=median_runtime,
     )
     legality = summarize_hard_legality(case, positions)
@@ -71,7 +75,8 @@ def evaluate_positions(
 class OfficialEvaluatorWrapper:
     def evaluate_validation_batch(
         self,
-        batch: tuple[list[torch.Tensor], list[torch.Tensor]] | tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]],
+        batch: tuple[list[torch.Tensor], list[torch.Tensor]]
+        | tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]],
         *,
         case_id: str | int = "validation-case",
         runtime: float = 1.0,

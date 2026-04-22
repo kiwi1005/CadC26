@@ -35,31 +35,42 @@ def compute_bc_loss(policy: TypedActionPolicy, record: BCStepRecord) -> BCLossBr
     output = policy(record.case, role_evidence=record.role_evidence, placements=record.placements)
     targets = action_to_targets(record.action)
     ce = nn.CrossEntropyLoss()
+    primitive_id = targets["primitive_id"]
+    block_index = targets["block_index"]
+    target_index = targets["target_index"]
+    geometry_target = targets["geometry"]
+    if not isinstance(primitive_id, int) or not isinstance(block_index, int):
+        raise TypeError("BC targets must provide integer primitive and block ids")
 
-    primitive_target = torch.tensor([targets["primitive_id"]], dtype=torch.long)
+    primitive_target = torch.tensor([primitive_id], dtype=torch.long)
     primitive_loss = ce(output.primitive_logits.unsqueeze(0), primitive_target)
 
-    block_target = torch.tensor([targets["block_index"]], dtype=torch.long)
+    block_target = torch.tensor([block_index], dtype=torch.long)
     block_loss = ce(output.block_logits.unsqueeze(0), block_target)
 
-    if targets["target_index"] is None:
+    if target_index is None:
         target_loss = torch.zeros((), dtype=torch.float32)
     else:
-        row = output.target_logits[targets["block_index"]].unsqueeze(0)
-        target_loss = ce(row, torch.tensor([targets["target_index"]], dtype=torch.long))
+        row = output.target_logits[block_index].unsqueeze(0)
+        target_loss = ce(row, torch.tensor([target_index], dtype=torch.long))
 
-    boundary_class = int(targets["boundary_class"])
+    boundary_class_raw = targets["boundary_class"]
+    if not isinstance(boundary_class_raw, int):
+        raise TypeError("BC targets must provide an integer boundary class")
+    boundary_class = boundary_class_raw
     if record.action.primitive is ActionPrimitive.ALIGN_BOUNDARY:
-        row = output.boundary_logits[targets["block_index"]].unsqueeze(0)
+        row = output.boundary_logits[block_index].unsqueeze(0)
         boundary_loss = ce(row, torch.tensor([boundary_class], dtype=torch.long))
     else:
         boundary_loss = torch.zeros((), dtype=torch.float32)
 
-    if targets["geometry"] is None:
+    if geometry_target is None:
         geometry_loss = torch.zeros((), dtype=torch.float32)
     else:
-        pred_geometry = output.geometry[targets["block_index"]]
-        geometry_loss = nn.functional.mse_loss(pred_geometry, targets["geometry"])
+        if not isinstance(geometry_target, torch.Tensor):
+            raise TypeError("BC targets must provide a tensor geometry target")
+        pred_geometry = output.geometry[block_index]
+        geometry_loss = nn.functional.mse_loss(pred_geometry, geometry_target)
 
     total = primitive_loss + block_loss + target_loss + boundary_loss + geometry_loss
     return BCLossBreakdown(
@@ -76,10 +87,18 @@ def _accuracy(policy: TypedActionPolicy, dataset: list[BCStepRecord]) -> tuple[f
     primitive_hits = 0
     block_hits = 0
     for record in dataset:
-        output = policy(record.case, role_evidence=record.role_evidence, placements=record.placements)
+        output = policy(
+            record.case,
+            role_evidence=record.role_evidence,
+            placements=record.placements,
+        )
         targets = action_to_targets(record.action)
-        primitive_hits += int(int(output.primitive_logits.argmax().item()) == int(targets["primitive_id"]))
-        block_hits += int(int(output.block_logits.argmax().item()) == int(targets["block_index"]))
+        primitive_id = targets["primitive_id"]
+        block_index = targets["block_index"]
+        if not isinstance(primitive_id, int) or not isinstance(block_index, int):
+            raise TypeError("BC accuracy targets must provide integer primitive and block ids")
+        primitive_hits += int(int(output.primitive_logits.argmax().item()) == primitive_id)
+        block_hits += int(int(output.block_logits.argmax().item()) == block_index)
     denom = max(len(dataset), 1)
     return primitive_hits / denom, block_hits / denom
 
@@ -97,7 +116,7 @@ def run_bc_overfit(
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
 
     initial_loss = None
-    for epoch in range(epochs):
+    for _epoch in range(epochs):
         epoch_loss = 0.0
         for record in dataset:
             optimizer.zero_grad(set_to_none=True)

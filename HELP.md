@@ -127,3 +127,55 @@
 
 6. **目前最適合先證明的是 small-scope learnability，不是 final score。**
    - 建議順序：Agent 7 encoder/decoder → Agent 8 BC overfit → Agent 9 greedy rollout → 再回頭看 candidate heuristic 是否要補強。
+
+7. **Agent 11 的 verifier feedback 若只看 legality，容易對 shifted negative 不敏感。**
+   - 現況：最初的 step feedback 對 toy case 的負樣本仍給出與正樣本相同分數，因為偏移後仍合法且面積不變。
+   - 修正：目前 feedback score 額外加入對 target reference 的 alignment penalty，才把正負樣本 advantage 拉開。
+   - 影響：AWBC 現在仍屬 weak-but-usable weighting，不代表已經得到高品質 value model。
+
+8. **Contest evaluator 要求的是“檔案型 optimizer entrypoint”，不是單純 package class。**
+   - 現況：官方 `validate_submission()` / `ContestEvaluator` 直接吃 Python 檔案路徑，並在模組層找 `FloorplanOptimizer` 子類。
+   - 修正：目前以 repo root 的 `contest_optimizer.py` 作為提交入口，再委派到 `src/puzzleplace/optimizer/contest.py`。
+
+9. **Contest solve 需要完整位置列表；但目前 rollout baseline 仍常停在 partial placements。**
+   - 現況：beam rollout 雖優於 greedy，但仍會留下未放完的 blocks。
+   - 修正：contest optimizer 目前帶有 deterministic fallback packing，確保 submission format 完整。
+   - 風險：這只是格式與 smoke robustness 補丁，不代表 final quality 已足夠。
+
+10. **所有 contest / training scripts 都同時依賴 `src/` 和 `external/FloorSet/iccad2026contest/` import path。**
+    - 現況：若少任一個 path，`puzzleplace.*` 或 `iccad2026_evaluate` 都會失敗。
+    - 建議：後續新增 script 時，先檢查 path injection 與 `PYTHONPATH=src` 是否一致。
+
+11. **AWBC checkpoint 載入是 soft dependency。**
+    - 現況：若 `artifacts/models/agent11_awbc_policy.pt` 不存在，contest optimizer 會回退到 heuristic policy。
+    - 建議：評估成績時要註明是 checkpoint mode 還是 heuristic fallback，避免混淆結果。
+
+12. **全 repo 的 `ruff` 目前仍有既有 style debt，不適合直接當作 agent13 gate。**
+    - 現況：初版 regression matrix 用 `ruff check src/puzzleplace tests`，結果被多個舊測試檔的長行/import 排序問題擋住。
+    - 判斷：那些問題不是 Agent 11-14 這一輪引入，也不影響本輪功能 correctness。
+    - 修正：agent13 matrix 改為檢查本輪實際變更與關聯檔案，避免把 pre-existing formatting debt 當作功能回歸。
+
+13. **preplaced anchors seeded into rollout state 之後，不能再把 `FREEZE` 當成一般候選動作。**
+    - 現況：architect review 發現 candidate generator 會對所有 placed blocks 都產生 `FREEZE`，包含已在 initial state 中 frozen 的 preplaced anchors。
+    - 風險：beam/greedy 可能浪費 rollout budget 在 no-op freeze，然後把完成責任推給 fallback packing。
+    - 修正：candidate generator 現在會跳過已在 `state.frozen_blocks` 中的 block。
+
+14. **regression matrix 不應硬編碼 `.venv/bin/python`。**
+    - 現況：architect review 指出這會讓 readiness check 綁死 repo-local venv，而不是使用使用者當前啟動的 interpreter。
+    - 修正：matrix script 改用 `sys.executable`，讓驗證環境與實際執行環境一致。
+
+15. **Sprint 2 的 semantic coverage 不能再用 strict exact-action equality 來算。**
+    - 現況：一開始 semantic / relaxed candidate 其實已經生成了高 recall 的 intent candidates，但 coverage script 還是拿 teacher pseudo trace 的 exact `(x, y, w, h)` action 做逐字比對，導致 coverage 假性偏低。
+    - 修正：現在 semantic / relaxed coverage 改成 `same block + compatible shape/intent family` 的 matching；strict / teacher-hint 仍維持 exact match。
+
+16. **semantic candidate 的 violation estimation 若每個 candidate 都跑完整 profile，會讓 coverage script 非常慢。**
+    - 現況：最初每個 candidate 都呼叫整體 `summarize_violation_profile()`，形成 `O(candidates × blocks^2)`。
+    - 修正：現在只估 local overlap / boundary / connectivity proxy，而不是整個 provisional layout profile。
+
+17. **`slots=True` dataclass 不能直接用 `.__dict__` 出報表。**
+    - 現況：`ViolationProfile` / `RepairReport` 在 script 輸出時都踩到這個問題。
+    - 修正：改用 `dataclasses.asdict()`。
+
+18. **semantic rollout smoke 的主要耗時不是 rollout 本身，而是腳本內先做的小型 BC 訓練。**
+    - 現況：`scripts/rollout_validate.py` 在 rollout 前會先訓練 policy；若 epochs 太高，整體 smoke 時間會明顯變慢。
+    - 建議：Sprint 2 smoke 預設應採用較小 epoch，例如 `ROLLOUT_EPOCHS=5`，把 heavy training 留給單獨實驗腳本。

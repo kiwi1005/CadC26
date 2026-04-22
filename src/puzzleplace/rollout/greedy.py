@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 
 import torch
 
@@ -25,8 +24,15 @@ class RolloutResult:
 
 
 def _geometry_vector(candidate: TypedAction) -> torch.Tensor | None:
-    if candidate.primitive is ActionPrimitive.PLACE_ABSOLUTE and None not in (candidate.x, candidate.y, candidate.w, candidate.h):
-        return torch.tensor([candidate.x, candidate.y, candidate.w, candidate.h], dtype=torch.float32)
+    if candidate.primitive is ActionPrimitive.PLACE_ABSOLUTE and None not in (
+        candidate.x,
+        candidate.y,
+        candidate.w,
+        candidate.h,
+    ):
+        return torch.tensor(
+            [candidate.x, candidate.y, candidate.w, candidate.h], dtype=torch.float32
+        )
     return None
 
 
@@ -37,7 +43,11 @@ def score_action_with_policy(output: DecoderOutput, action: TypedAction) -> floa
         score += float(output.target_logits[action.block_index, action.target_index].item())
     if action.primitive is ActionPrimitive.ALIGN_BOUNDARY and action.boundary_code is not None:
         boundary_map = {1: 1, 2: 2, 4: 3, 8: 4}
-        score += float(output.boundary_logits[action.block_index, boundary_map.get(int(action.boundary_code), 0)].item())
+        score += float(
+            output.boundary_logits[
+                action.block_index, boundary_map.get(int(action.boundary_code), 0)
+            ].item()
+        )
     geom = _geometry_vector(action)
     if geom is not None:
         pred = output.geometry[action.block_index]
@@ -50,10 +60,18 @@ def greedy_rollout(
     policy: TypedActionPolicy,
     *,
     role_evidence: list[WeakRoleEvidence] | None = None,
+    initial_state: ExecutionState | None = None,
     max_steps: int | None = None,
 ) -> RolloutResult:
     role_evidence = role_evidence or label_case_roles(case)
-    state = ExecutionState()
+    state = (
+        ExecutionState(
+            placements=dict(initial_state.placements),
+            frozen_blocks=set(initial_state.frozen_blocks),
+        )
+        if initial_state is not None
+        else ExecutionState()
+    )
     executor = ActionExecutor(case)
     actions: list[TypedAction] = []
     total_score = 0.0
@@ -66,8 +84,18 @@ def greedy_rollout(
         output = policy(case, role_evidence=role_evidence, placements=state.placements)
         candidates = generate_candidate_actions(case, state, remaining_blocks=remaining)
         if not candidates:
-            return RolloutResult(actions, dict(state.placements), len(state.placements), False, "no_legal_candidates", total_score, False)
-        scored = [(score_action_with_policy(output, candidate), candidate) for candidate in candidates]
+            return RolloutResult(
+                actions,
+                dict(state.placements),
+                len(state.placements),
+                False,
+                "no_legal_candidates",
+                total_score,
+                False,
+            )
+        scored = [
+            (score_action_with_policy(output, candidate), candidate) for candidate in candidates
+        ]
         score, chosen = max(scored, key=lambda item: item[0])
         executor.apply(state, chosen)
         actions.append(chosen)
@@ -76,7 +104,9 @@ def greedy_rollout(
     all_blocks_placed = len(state.placements) == case.block_count
     feasible = None
     if all_blocks_placed:
-        summary = summarize_hard_legality(case, [state.placements[idx] for idx in range(case.block_count)])
+        summary = summarize_hard_legality(
+            case, [state.placements[idx] for idx in range(case.block_count)]
+        )
         feasible = summary.is_feasible
     return RolloutResult(
         actions=actions,

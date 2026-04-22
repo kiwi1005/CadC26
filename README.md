@@ -65,3 +65,20 @@ Consumers may assume the following bootstrap contract:
 - training batches follow the official structure:
   - `(area_target, b2b_connectivity, p2b_connectivity, pins_pos, placement_constraints, tree_sol, fp_sol, metrics)`
 - all upstream datasets and artifacts remain local-only and untracked
+
+## Current milestone scripts
+
+- `python scripts/report_candidate_coverage.py`
+- `python scripts/train_bc_small.py`
+- `python scripts/rollout_validate.py`
+- `python scripts/run_agent10_ablation.py`
+- `python scripts/train_awbc_small.py`
+- `python scripts/evaluate_contest_optimizer.py`
+- `python scripts/run_smoke_regression_matrix.py`
+
+## Contest entrypoint
+
+- The repository-level submission file is `contest_optimizer.py`.
+- It delegates to `src/puzzleplace/optimizer/contest.py`.
+- If `artifacts/models/agent11_awbc_policy.pt` exists, the contest optimizer loads it.
+- Otherwise it falls back to a deterministic heuristic policy so the validator/evaluator path remains runnable.

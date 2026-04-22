@@ -1,0 +1,53 @@
+name: sprint2-smoke
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install base deps
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e .[dev]
+      - name: Lint
+        run: |
+          python -m ruff check src/puzzleplace tests scripts
+      - name: Typecheck
+        run: |
+          python -m mypy src/puzzleplace/feedback src/puzzleplace/optimizer
+      - name: Synthetic smoke tests
+        run: |
+          python -m pytest -q \
+            tests/test_geometry.py \
+            tests/test_candidate_masks.py \
+            tests/test_rollout_smoke.py \
+            tests/test_feedback_awbc.py \
+            tests/test_contest_optimizer.py \
+            tests/test_repair_finalizer.py
+  sprint2-pivot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Clone official FloorSet
+        run: |
+          git clone https://github.com/IntelLabs/FloorSet.git external/FloorSet
+      - name: Install full deps
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r external/FloorSet/iccad2026contest/requirements.txt
+          pip install -e .[dev]
+      - name: Run Sprint 2 smoke bundle
+        run: |
+          chmod +x scripts/run_sprint2_pivot_smoke.sh
+          PYTHON=python scripts/run_sprint2_pivot_smoke.sh

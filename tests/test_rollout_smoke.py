@@ -16,7 +16,11 @@ class FakePolicy:
         block_logits = torch.arange(block_count, dtype=torch.float32) * -1.0
         target_logits = torch.zeros((block_count, block_count), dtype=torch.float32)
         boundary_logits = torch.zeros((block_count, 5), dtype=torch.float32)
-        geometry = case.target_positions.clone() if case.target_positions is not None else torch.zeros((block_count, 4))
+        geometry = (
+            case.target_positions.clone()
+            if case.target_positions is not None
+            else torch.zeros((block_count, 4))
+        )
         return DecoderOutput(
             primitive_logits=primitive_logits,
             block_logits=block_logits,

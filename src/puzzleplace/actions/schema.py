@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
+from enum import Enum
 from typing import Any
 
 
-class ActionPrimitive(StrEnum):
+class ActionPrimitive(str, Enum):
     PLACE_ABSOLUTE = "place_absolute"
     MOVE = "move"
     RESIZE = "resize"
@@ -31,4 +31,6 @@ class TypedAction:
     def require(self, *fields: str) -> None:
         missing = [name for name in fields if getattr(self, name) is None]
         if missing:
-            raise ValueError(f"Action {self.primitive} missing required fields: {', '.join(missing)}")
+            raise ValueError(
+                f"Action {self.primitive} missing required fields: {', '.join(missing)}"
+            )

@@ -109,6 +109,8 @@ def adapt_training_batch(
         fp_sol,
         metrics,
     ) = batch
+    target_positions = _squeeze_batch_dim(fp_sol).to(torch.float32)
+    target_positions = target_positions[..., [2, 3, 0, 1]]
     return _base_case(
         area_targets,
         b2b_edges,
@@ -116,7 +118,7 @@ def adapt_training_batch(
         pins_pos,
         constraints,
         case_id=case_id,
-        target_positions=fp_sol,
+        target_positions=target_positions,
         metrics=metrics,
         raw=raw,
     )
