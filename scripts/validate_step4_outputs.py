@@ -56,7 +56,10 @@ def _close_enough(value: float, expected: float, *, tol: float = 1e-3) -> bool:
     return abs(value - expected) <= tol
 
 
-def _best_of_k_checks(best_of_k_text: str, best_of_k_json: dict[str, Any] | None) -> dict[str, bool]:
+def _best_of_k_checks(
+    best_of_k_text: str,
+    best_of_k_json: dict[str, Any] | None,
+) -> dict[str, bool]:
     if not best_of_k_text or best_of_k_json is None:
         return {
             'best_of_k_has_required_sections': False,
