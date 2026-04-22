@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from collections import defaultdict
@@ -17,7 +18,7 @@ WORKTREE_ROOT = Path(__file__).resolve().parents[1]
 
 def _resolve_shared_root(start: Path) -> Path:
     for candidate in (start, *start.parents):
-        if (candidate / ".venv").exists() and (candidate / "external" / "FloorSet").exists():
+        if (candidate / ".venv").exists() and (candidate / "artifacts").exists():
             return candidate
     return start
 
@@ -34,18 +35,18 @@ for path in (
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
 
-from puzzleplace.data import ConstraintColumns
-from puzzleplace.eval.official import evaluate_positions
+from puzzleplace.data import ConstraintColumns, adapt_validation_batch
 from puzzleplace.eval.violation import summarize_violation_profile
 from puzzleplace.feedback import load_policy_checkpoint
-from puzzleplace.geometry import summarize_hard_legality
+from puzzleplace.geometry import positions_from_case_targets, summarize_hard_legality
 from puzzleplace.models import TypedActionPolicy
 from puzzleplace.repair.intent_preserver import measure_intent_preservation
 from puzzleplace.repair.overlap_resolver import resolve_overlaps
 from puzzleplace.repair.shape_normalizer import normalize_shapes
 from puzzleplace.repair.shelf_packer import shelf_pack_missing
 from puzzleplace.rollout import semantic_rollout
-from puzzleplace.train import load_validation_cases
+from shapely.geometry import box
+from shapely.ops import unary_union
 
 INPUT_RESEARCH_DIR = SHARED_ROOT / "artifacts" / "research"
 OUTPUT_RESEARCH_DIR = WORKTREE_ROOT / "artifacts" / "research"
@@ -62,6 +63,202 @@ STAGE_ORDER = [
     "overlap_resolved_2",
     "strict_final",
 ]
+
+
+ALPHA = 0.5
+BETA = 2.0
+GAMMA = 0.3
+
+
+def _resolve_validation_root() -> Path:
+    candidates = [
+        SHARED_ROOT / "LiteTensorDataTest",
+        SHARED_ROOT.parent / "LiteTensorDataTest",
+        WORKTREE_ROOT / "LiteTensorDataTest",
+        WORKTREE_ROOT.parent / "LiteTensorDataTest",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError("Could not locate LiteTensorDataTest dataset")
+
+
+VALIDATION_ROOT = _resolve_validation_root()
+
+
+def _load_validation_cases_from_raw(*, case_limit: int) -> list[Any]:
+    cases: list[Any] = []
+    configs = sorted(
+        VALIDATION_ROOT.glob("config_*"),
+        key=lambda path: int(path.name.split("_")[1]),
+    )
+    for index, config in enumerate(configs[:case_limit]):
+        data = torch.load(config / "litedata_1.pth", map_location="cpu")[0]
+        label = torch.load(config / "litelabel_1.pth", map_location="cpu")[0]
+        inputs = (
+            data[0][:, 0].unsqueeze(0),
+            data[1].unsqueeze(0),
+            data[2].unsqueeze(0),
+            data[3].unsqueeze(0),
+            data[0][:, 1:].unsqueeze(0),
+        )
+        labels = (label[1].unsqueeze(0), label[0].unsqueeze(0))
+        cases.append(adapt_validation_batch((inputs, labels), case_id=f"validation-{index}"))
+    return cases
+
+
+def _calculate_hpwl_b2b(
+    positions: list[tuple[float, float, float, float]],
+    b2b_connectivity: torch.Tensor,
+) -> float:
+    total = 0.0
+    for edge in b2b_connectivity.tolist():
+        src, dst, weight = int(edge[0]), int(edge[1]), float(edge[2])
+        if src == -1 or dst == -1 or src >= len(positions) or dst >= len(positions):
+            continue
+        x1, y1, w1, h1 = positions[src]
+        x2, y2, w2, h2 = positions[dst]
+        total += weight * (abs((x1 + w1 / 2.0) - (x2 + w2 / 2.0)) + abs((y1 + h1 / 2.0) - (y2 + h2 / 2.0)))
+    return total
+
+
+def _calculate_hpwl_p2b(
+    positions: list[tuple[float, float, float, float]],
+    p2b_connectivity: torch.Tensor,
+    pins_pos: torch.Tensor,
+) -> float:
+    total = 0.0
+    for edge in p2b_connectivity.tolist():
+        pin_idx, block_idx, weight = int(edge[0]), int(edge[1]), float(edge[2])
+        if pin_idx == -1 or block_idx == -1 or block_idx >= len(positions) or pin_idx >= len(pins_pos):
+            continue
+        px, py = [float(v) for v in pins_pos[pin_idx].tolist()]
+        x, y, w, h = positions[block_idx]
+        total += weight * (abs(px - (x + w / 2.0)) + abs(py - (y + h / 2.0)))
+    return total
+
+
+def _calculate_bbox_area(positions: list[tuple[float, float, float, float]]) -> float:
+    x_min = min(x for x, _y, _w, _h in positions)
+    y_min = min(y for _x, y, _w, _h in positions)
+    x_max = max(x + w for x, _y, w, _h in positions)
+    y_max = max(y + h for _x, y, _w, h in positions)
+    return float((x_max - x_min) * (y_max - y_min))
+
+
+def _extract_validation_baseline_metrics(case) -> dict[str, float]:
+    if case.target_positions is None:
+        raise ValueError("validation baseline extraction requires target_positions")
+    positions = positions_from_case_targets(case)
+    bbox_area = _calculate_bbox_area(positions)
+    hpwl_baseline = 0.0
+    if case.metrics is not None and case.metrics.numel() >= 8:
+        hpwl_baseline = float(case.metrics[-2].item() + case.metrics[-1].item())
+        if case.metrics[0].item() > 0:
+            bbox_area = float(case.metrics[0].item())
+    return {"area_baseline": bbox_area, "hpwl_baseline": hpwl_baseline}
+
+
+def _soft_violations(case, positions: list[tuple[float, float, float, float]]) -> dict[str, float]:
+    constraints = case.constraints
+    block_count = case.block_count
+    ncols = constraints.shape[1] if constraints is not None else 0
+    mib_const = constraints[:, 2] if ncols > 2 else torch.zeros(block_count)
+    clust_const = constraints[:, 3] if ncols > 3 else torch.zeros(block_count)
+    bound_const = constraints[:, 4] if ncols > 4 else torch.zeros(block_count)
+
+    n_boundary = int((bound_const != 0).sum().item())
+    n_soft = n_boundary
+
+    n_mib_groups = int(mib_const.max().item()) if mib_const.numel() > 0 else 0
+    for group in range(1, n_mib_groups + 1):
+        group_size = int((mib_const == group).sum().item())
+        n_soft += max(0, group_size - 1)
+
+    n_clust_groups = int(clust_const.max().item()) if clust_const.numel() > 0 else 0
+    for group in range(1, n_clust_groups + 1):
+        group_size = int((clust_const == group).sum().item())
+        n_soft += max(0, group_size - 1)
+
+    grouping_violations = 0
+    pred_polys = [box(x, y, x + w, y + h) for x, y, w, h in positions]
+    for group in range(1, n_clust_groups + 1):
+        group_indices = torch.where(clust_const == group)[0].tolist()
+        if not group_indices:
+            continue
+        union_result = unary_union([pred_polys[idx] for idx in group_indices])
+        if union_result.geom_type == "MultiPolygon":
+            grouping_violations += len(union_result.geoms) - 1
+
+    mib_violations = 0
+    for group in range(1, n_mib_groups + 1):
+        group_indices = torch.where(mib_const == group)[0].tolist()
+        shapes = {(round(positions[idx][2], 4), round(positions[idx][3], 4)) for idx in group_indices}
+        mib_violations += max(0, len(shapes) - 1)
+
+    boundary_violations = 0
+    if n_boundary > 0:
+        x_min = min(p[0] for p in positions)
+        y_min = min(p[1] for p in positions)
+        x_max = max(p[0] + p[2] for p in positions)
+        y_max = max(p[1] + p[3] for p in positions)
+        eps = 1e-6
+        for idx, (x, y, w, h) in enumerate(positions):
+            code = int(bound_const[idx].item())
+            if code == 0:
+                continue
+            touches = {
+                1: abs(x - x_min) < eps,
+                2: abs(x + w - x_max) < eps,
+                4: abs(y + h - y_max) < eps,
+                8: abs(y - y_min) < eps,
+            }
+            required = [bit for bit in (1, 2, 4, 8) if code & bit]
+            if not all(touches[bit] for bit in required):
+                boundary_violations += 1
+
+    total_soft = boundary_violations + grouping_violations + mib_violations
+    violations_relative = total_soft / max(n_soft, 1)
+    return {
+        "boundary_violations": boundary_violations,
+        "grouping_violations": grouping_violations,
+        "mib_violations": mib_violations,
+        "total_soft_violations": total_soft,
+        "max_possible_violations": n_soft,
+        "violations_relative": violations_relative,
+    }
+
+
+def _evaluate_positions(case, positions: list[tuple[float, float, float, float]], *, runtime: float, median_runtime: float) -> dict[str, float]:
+    baseline = _extract_validation_baseline_metrics(case)
+    hpwl_b2b = _calculate_hpwl_b2b(positions, case.b2b_edges)
+    hpwl_p2b = _calculate_hpwl_p2b(positions, case.p2b_edges, case.pins_pos)
+    hpwl_total = hpwl_b2b + hpwl_p2b
+    hpwl_gap = (hpwl_total - baseline["hpwl_baseline"]) / max(baseline["hpwl_baseline"], 1e-6)
+    bbox_area = _calculate_bbox_area(positions)
+    area_gap = (bbox_area - baseline["area_baseline"]) / max(baseline["area_baseline"], 1e-6)
+    hard = summarize_hard_legality(case, positions)
+    soft = _soft_violations(case, positions)
+    runtime_factor = runtime / max(median_runtime, 1e-6)
+    if not hard.is_feasible:
+        cost = 10.0
+    else:
+        quality_factor = 1 + ALPHA * (max(0.0, hpwl_gap) + max(0.0, area_gap))
+        violation_factor = math.exp(BETA * soft["violations_relative"])
+        runtime_adjustment = max(0.7, math.pow(max(0.01, runtime_factor), GAMMA))
+        cost = quality_factor * violation_factor * runtime_adjustment
+    return {
+        "cost": float(cost),
+        "hpwl_b2b": float(hpwl_b2b),
+        "hpwl_p2b": float(hpwl_p2b),
+        "hpwl_total": float(hpwl_total),
+        "hpwl_gap": float(hpwl_gap),
+        "bbox_area": float(bbox_area),
+        "bbox_area_baseline": float(baseline["area_baseline"]),
+        "area_gap": float(area_gap),
+        "runtime_seconds": float(runtime),
+        **soft,
+    }
 
 
 @dataclass(frozen=True)
@@ -109,7 +306,7 @@ def _stage_row(
     profile = summarize_violation_profile(case, positions_dict)
     ordered = _ordered_positions(case, positions_dict)
     hard = summarize_hard_legality(case, ordered)
-    official = evaluate_positions(case, ordered, runtime=1.0, median_runtime=1.0)["official"]
+    official = _evaluate_positions(case, ordered, runtime=1.0, median_runtime=1.0)
     intent = measure_intent_preservation(proposal_positions, positions_dict)
     changed_count = _changed_block_count(proposal_positions, positions_dict)
     return {
@@ -621,7 +818,7 @@ def _render_markdown(
 def main() -> None:
     best_untrained, best_trained, variants = _select_variants()
     case_ids = _collect_case_ids(best_trained)
-    cases_by_id = {str(case.case_id): case for case in load_validation_cases(case_limit=20)}
+    cases_by_id = {str(case.case_id): case for case in _load_validation_cases_from_raw(case_limit=20)}
     cases = [cases_by_id[case_id] for case_id in case_ids]
 
     trace_rows: list[dict[str, Any]] = []
