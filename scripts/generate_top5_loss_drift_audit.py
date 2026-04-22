@@ -12,9 +12,24 @@ from typing import Any
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-for path in (ROOT, SRC):
+WORKTREE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_shared_root(start: Path) -> Path:
+    for candidate in (start, *start.parents):
+        if (candidate / ".venv").exists() and (candidate / "external" / "FloorSet").exists():
+            return candidate
+    return start
+
+
+SHARED_ROOT = _resolve_shared_root(WORKTREE_ROOT)
+SRC = WORKTREE_ROOT / "src"
+for path in (
+    WORKTREE_ROOT,
+    SRC,
+    SHARED_ROOT / "external" / "FloorSet" / "iccad2026contest",
+    SHARED_ROOT / "external" / "FloorSet",
+):
     path_str = str(path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
@@ -32,11 +47,12 @@ from puzzleplace.repair.shelf_packer import shelf_pack_missing
 from puzzleplace.rollout import semantic_rollout
 from puzzleplace.train import load_validation_cases
 
-RESEARCH_DIR = ROOT / "artifacts" / "research"
-FOLLOWUP_PATH = RESEARCH_DIR / "generalization_followup_smallcheckpoints.json"
-DELTA_PATH = RESEARCH_DIR / "cost_semantics_and_trained_vs_untrained_delta.json"
-OUTPUT_JSON = RESEARCH_DIR / "top5_loss_drift_audit.json"
-OUTPUT_MD = RESEARCH_DIR / "top5_loss_drift_audit.md"
+INPUT_RESEARCH_DIR = SHARED_ROOT / "artifacts" / "research"
+OUTPUT_RESEARCH_DIR = WORKTREE_ROOT / "artifacts" / "research"
+FOLLOWUP_PATH = INPUT_RESEARCH_DIR / "generalization_followup_smallcheckpoints.json"
+DELTA_PATH = INPUT_RESEARCH_DIR / "cost_semantics_and_trained_vs_untrained_delta.json"
+OUTPUT_JSON = OUTPUT_RESEARCH_DIR / "top5_loss_drift_audit.json"
+OUTPUT_MD = OUTPUT_RESEARCH_DIR / "top5_loss_drift_audit.md"
 
 STAGE_ORDER = [
     "semantic_output",
@@ -178,7 +194,7 @@ def _load_policy(variant: VariantSpec):
         return TypedActionPolicy(hidden_dim=32)
     if variant.checkpoint_path is None:
         raise ValueError(f"checkpoint required for trained variant {variant.label}")
-    return load_policy_checkpoint(ROOT / variant.checkpoint_path)
+    return load_policy_checkpoint(SHARED_ROOT / variant.checkpoint_path)
 
 
 def _collect_case_ids(best_trained: VariantSpec) -> list[str]:
@@ -618,12 +634,12 @@ def main() -> None:
 
     payload = {
         "source_artifacts": [
-            str(FOLLOWUP_PATH.relative_to(ROOT)),
-            str(DELTA_PATH.relative_to(ROOT)),
+            str(FOLLOWUP_PATH.relative_to(SHARED_ROOT)),
+            str(DELTA_PATH.relative_to(SHARED_ROOT)),
         ],
         "output_files": [
-            str(OUTPUT_JSON.relative_to(ROOT)),
-            str(OUTPUT_MD.relative_to(ROOT)),
+            str(OUTPUT_JSON.relative_to(WORKTREE_ROOT)),
+            str(OUTPUT_MD.relative_to(WORKTREE_ROOT)),
         ],
         "best_untrained": {
             "label": best_untrained.label,
@@ -654,6 +670,7 @@ def main() -> None:
         "stage_means": stage_means,
         "trace_rows": trace_rows,
     }
+    OUTPUT_RESEARCH_DIR.mkdir(parents=True, exist_ok=True)
     OUTPUT_JSON.write_text(json.dumps(payload, indent=2))
     OUTPUT_MD.write_text(
         _render_markdown(
@@ -672,8 +689,8 @@ def main() -> None:
                 "cases": len(case_ids),
                 "variants": len(variants),
                 "trace_rows": len(trace_rows),
-                "output_json": str(OUTPUT_JSON.relative_to(ROOT)),
-                "output_md": str(OUTPUT_MD.relative_to(ROOT)),
+                "output_json": str(OUTPUT_JSON.relative_to(WORKTREE_ROOT)),
+                "output_md": str(OUTPUT_MD.relative_to(WORKTREE_ROOT)),
             },
             indent=2,
         )
