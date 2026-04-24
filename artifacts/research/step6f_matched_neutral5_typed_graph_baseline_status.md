@@ -22,9 +22,9 @@ PYTHONPATH=src /home/hwchen/PROJ/CadC26/.venv/bin/python \
 
 `--workers 1` is the required smoke/default mode after the worker-policy audit. A later `--workers 48` rerun would be valid only after this smoke/import gate succeeds, because the independent work would be the 10 case/seed collection jobs plus 5 LOCO split jobs.
 
-## Current blocker
+## Worker-time blocker
 
-The runner cannot start in this worktree because the Step6E runner imports `canonical_action_key` from `puzzleplace.actions`, but `src/puzzleplace/actions/__init__.py` does not export that symbol.
+The worker task could not start in its worktree because the Step6E runner imported `canonical_action_key` from `puzzleplace.actions`, but that worktree did not export the symbol yet.
 
 Attempted command:
 
@@ -33,13 +33,13 @@ PYTHONPATH=src /home/hwchen/PROJ/CadC26/.venv/bin/python \
   scripts/run_step6e_majority_advantage_ranker.py --help
 ```
 
-Observed failure:
+Observed worker-time failure:
 
 ```text
 ImportError: cannot import name 'canonical_action_key' from 'puzzleplace.actions' (.../src/puzzleplace/actions/__init__.py)
 ```
 
-This same import blocker also prevents `tests/test_hierarchical_policy.py` from collecting.
+Leader follow-up fixed this import/export seam at commit `a23fa5d`; `tests/test_hierarchical_policy.py` now collects and passes in the targeted suite. This artifact still records that the matched neutral5 baseline itself was not rerun during task 6.
 
 ## Existing evidence only, not a fresh refresh
 
@@ -58,4 +58,4 @@ However, the referenced primary artifact path `artifacts/research/step6e_typed_g
 
 ## Next unblock action
 
-A model/code owner should restore the runner import contract by defining/exporting `canonical_action_key` or by updating the Step6E scripts to import it from its actual home. After that, rerun the smoke command above with `--workers 1`; only then launch the matched neutral5 command with `--workers 48` for the independent collection/LOCO jobs.
+Rerun the smoke command above with `--workers 1` on the leader checkpoint. Only after it produces the matched neutral5 artifact should we launch the wider independent collection/LOCO jobs with `--workers 48`.
