@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 STEP6_WORKER_SCRIPTS = [
     ROOT / "scripts" / "run_step6_hierarchical_rollout_control_audit.py",
