@@ -66,3 +66,42 @@ def test_frozen_preplaced_anchor_is_not_reoffered_as_freeze_candidate() -> None:
         candidate.primitive is ActionPrimitive.FREEZE and candidate.block_index == 0
         for candidate in candidates
     )
+
+
+def test_objective_selection_hook_chooses_best_finalized_candidate(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import puzzleplace.optimizer.contest as contest_mod
+
+    bad_policy = object()
+    good_policy = object()
+    optimizer = ContestOptimizer(objective_selection_k=2)
+    optimizer._candidate_policies = lambda: [("bad", bad_policy), ("good", good_policy)]  # type: ignore[method-assign]
+
+    def fake_semantic_rollout(case, policy, *, role_evidence=None):
+        del case, role_evidence
+        if policy is bad_policy:
+            proposed = {0: (0.0, 0.0, 2.0, 2.0), 1: (100.0, 0.0, 2.0, 2.0)}
+        else:
+            proposed = {0: (0.0, 0.0, 2.0, 2.0), 1: (2.0, 0.0, 2.0, 2.0)}
+        return SimpleNamespace(
+            proposed_positions=proposed,
+            semantic_completed=True,
+            semantic_placed_fraction=1.0,
+            fallback_fraction=0.0,
+        )
+
+    monkeypatch.setattr(contest_mod, "semantic_rollout", fake_semantic_rollout)
+
+    positions, report = optimizer.solve_with_report(
+        2,
+        torch.tensor([4.0, 4.0]),
+        torch.tensor([[0.0, 1.0, 1.0]]),
+        torch.empty((0, 3)),
+        torch.empty((0, 2)),
+        torch.zeros((2, 5)),
+    )
+
+    assert positions == [(0.0, 0.0, 2.0, 2.0), (2.0, 0.0, 2.0, 2.0)]
+    assert report["objective_selection_used"] is True
+    assert report["selected_candidate_source"] == "good"
