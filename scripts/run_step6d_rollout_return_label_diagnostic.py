@@ -67,7 +67,12 @@ def _parse_args() -> argparse.Namespace:
         default=8,
         help="Maximum greedy continuation actions after the candidate action.",
     )
-    parser.add_argument("--workers", type=int, default=48)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parallel worker cap for independent case/seed or LOCO split jobs. Keep at 1 for smoke; use 48 only after the relevant smoke/neutral gate passes.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
