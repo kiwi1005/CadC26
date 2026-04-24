@@ -97,7 +97,9 @@ def test_payload_validator_fails_closed_for_denied_fields(field: str) -> None:
 def test_payload_validator_fails_for_missing_and_unknown_fields() -> None:
     payload = _legal_payload()
     payload.pop("post_typed_edges")
-    with pytest.raises(ValueError, match="missing required transition payload fields: post_typed_edges"):
+    with pytest.raises(
+        ValueError, match="missing required transition payload fields: post_typed_edges"
+    ):
         validate_transition_payload(payload)
 
     payload = _legal_payload()
@@ -159,7 +161,9 @@ def test_shared_encoder_comparator_has_no_manual_delta_input() -> None:
     payload = _legal_payload()
     block_features = payload["pre_block_features"]
     assert isinstance(block_features, torch.Tensor)
-    model = SharedEncoderTransitionComparator(block_feature_dim=block_features.shape[1], hidden_dim=16)
+    model = SharedEncoderTransitionComparator(
+        block_feature_dim=block_features.shape[1], hidden_dim=16
+    )
 
     assert model.pre_encoder is model.post_encoder
     assert "manual_delta" not in inspect.signature(model.forward).parameters

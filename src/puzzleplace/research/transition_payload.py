@@ -96,8 +96,16 @@ def validate_transition_payload(payload: Mapping[str, Any]) -> None:
     post_edges = payload["post_typed_edges"]
     if not isinstance(pre_edges, torch.Tensor) or not isinstance(post_edges, torch.Tensor):
         raise TypeError("pre_typed_edges and post_typed_edges must be torch.Tensor")
-    if pre_edges.ndim != 2 or post_edges.ndim != 2 or pre_edges.shape[1] != 4 or post_edges.shape[1] != 4:
-        raise ValueError("pre/post typed edges must be rank-2 tensors with columns relation_id, src, dst, weight")
+    if (
+        pre_edges.ndim != 2
+        or post_edges.ndim != 2
+        or pre_edges.shape[1] != 4
+        or post_edges.shape[1] != 4
+    ):
+        raise ValueError(
+            "pre/post typed edges must be rank-2 tensors with columns "
+            "relation_id, src, dst, weight"
+        )
     if pre_edges.shape[1] != post_edges.shape[1]:
         raise ValueError("pre/post typed edge schemas must match")
 
@@ -105,7 +113,9 @@ def validate_transition_payload(payload: Mapping[str, Any]) -> None:
     if not isinstance(action_token, torch.Tensor):
         raise TypeError("action_token must be a torch.Tensor")
     if action_token.numel() != 4:
-        raise ValueError("action_token must contain block_index, target_index, primitive_id, has_target")
+        raise ValueError(
+            "action_token must contain block_index, target_index, primitive_id, has_target"
+        )
 
 
 def build_typed_edges(case: FloorSetCase) -> torch.Tensor:
@@ -204,7 +214,9 @@ def build_transition_payload(
     if action.metadata:
         denied = _scan_denied_keys(action.metadata, path="action.metadata")
         if denied:
-            raise ValueError(f"denied transition action metadata fields: {', '.join(sorted(denied))}")
+            raise ValueError(
+                f"denied transition action metadata fields: {', '.join(sorted(denied))}"
+            )
 
     pre_placements = dict(placements or {})
     pre_block_features, _roles = build_relation_aware_block_features(
@@ -267,13 +279,22 @@ class SharedEncoderTransitionComparator(nn.Module):
             nn.Linear(hidden_dim, 1),
         )
 
-    def _encode_graph(self, block_features: torch.Tensor, typed_edges: torch.Tensor) -> torch.Tensor:
-        del typed_edges  # The contract keeps typed edges available; this smoke seam only pools node features.
+    def _encode_graph(
+        self, block_features: torch.Tensor, typed_edges: torch.Tensor
+    ) -> torch.Tensor:
+        # The contract keeps typed edges available; this smoke seam only pools node features.
+        del typed_edges
         return self.graph_encoder(block_features.to(torch.float32)).mean(dim=0)
 
     def forward(self, payload: Mapping[str, Any]) -> torch.Tensor:
         validate_transition_payload(payload)
-        pre_graph = self._encode_graph(payload["pre_block_features"], payload["pre_typed_edges"])
-        post_graph = self._encode_graph(payload["post_block_features"], payload["post_typed_edges"])
-        action = self.action_encoder(payload["action_token"].to(torch.float32).reshape(1, -1)).squeeze(0)
+        pre_graph = self._encode_graph(
+            payload["pre_block_features"], payload["pre_typed_edges"]
+        )
+        post_graph = self._encode_graph(
+            payload["post_block_features"], payload["post_typed_edges"]
+        )
+        action = self.action_encoder(
+            payload["action_token"].to(torch.float32).reshape(1, -1)
+        ).squeeze(0)
         return self.comparator(torch.cat([pre_graph, post_graph, action], dim=-1)).squeeze(-1)
