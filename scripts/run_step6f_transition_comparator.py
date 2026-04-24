@@ -35,10 +35,10 @@ from puzzleplace.data import FloorSetCase  # noqa: E402
 from puzzleplace.eval import evaluate_positions  # noqa: E402
 from puzzleplace.models import (  # noqa: E402
     DENIED_TRANSITION_PAYLOAD_FIELDS,
+    HierarchicalSetPolicy,  # noqa: E402
     SharedEncoderTransitionComparator,
     build_transition_payload,
 )
-from puzzleplace.models import HierarchicalSetPolicy  # noqa: E402
 from puzzleplace.repair.finalizer import finalize_layout  # noqa: E402
 from puzzleplace.roles import label_case_roles  # noqa: E402
 from puzzleplace.rollout.semantic import (  # noqa: E402
@@ -46,7 +46,11 @@ from puzzleplace.rollout.semantic import (  # noqa: E402
     _seed_first_action,
     _semantic_heuristic_score,
 )
-from puzzleplace.train import BCStepRecord, build_bc_dataset_from_cases, load_validation_cases  # noqa: E402
+from puzzleplace.train import (  # noqa: E402
+    BCStepRecord,
+    build_bc_dataset_from_cases,
+    load_validation_cases,
+)
 from puzzleplace.train.dataset_bc import action_to_targets  # noqa: E402
 
 
@@ -182,7 +186,9 @@ def _acceptable_primitive_set(record: BCStepRecord) -> list[int]:
         candidate for candidate in candidates if candidate.block_index == record.action.block_index
     ]
     semantic_matches = [
-        candidate for candidate in candidates if actions_match(candidate, record.action, mode="semantic")
+        candidate
+        for candidate in candidates
+        if actions_match(candidate, record.action, mode="semantic")
     ]
     target_primitive = list(ActionPrimitive).index(record.action.primitive)
     return sorted(
@@ -353,9 +359,7 @@ def _choose_continuation_action(
         chosen = min(
             limited,
             key=lambda action: float(
-                _quality_after_action(eval_case, blind_case, state, action)[
-                    "quality_cost_runtime1"
-                ]
+                _quality_after_action(eval_case, blind_case, state, action)["quality_cost_runtime1"]
             ),
         )
         return chosen, False
@@ -403,7 +407,9 @@ def _continue_after_action(
         and trial.step < blind_case.block_count * 4
         and actions_taken < horizon + 1
     ):
-        remaining = [idx for idx in range(blind_case.block_count) if idx not in trial.semantic_placed]
+        remaining = [
+            idx for idx in range(blind_case.block_count) if idx not in trial.semantic_placed
+        ]
         if not remaining:
             break
         chosen, forced = _choose_continuation_action(
@@ -467,8 +473,12 @@ def _pair_targets(pool: dict[str, Any], policies: list[str]) -> torch.Tensor:
                 continue
             wins = 0
             for policy in policies:
-                qi = float(rows[i]["rollout_return_by_policy"][policy]["quality"]["quality_cost_runtime1"])
-                qj = float(rows[j]["rollout_return_by_policy"][policy]["quality"]["quality_cost_runtime1"])
+                qi = float(
+                    rows[i]["rollout_return_by_policy"][policy]["quality"]["quality_cost_runtime1"]
+                )
+                qj = float(
+                    rows[j]["rollout_return_by_policy"][policy]["quality"]["quality_cost_runtime1"]
+                )
                 wins += int(qi < qj)
             targets[i, j] = wins / max(len(policies), 1)
     return targets
@@ -514,7 +524,9 @@ def _collect_case_seed(args_dict: dict[str, Any]) -> dict[str, Any]:
         and state.step < blind_case.block_count * 4
         and step < max_steps
     ):
-        remaining = [idx for idx in range(blind_case.block_count) if idx not in state.semantic_placed]
+        remaining = [
+            idx for idx in range(blind_case.block_count) if idx not in state.semantic_placed
+        ]
         candidates = generate_candidate_actions(
             blind_case,
             state,
@@ -562,7 +574,9 @@ def _collect_case_seed(args_dict: dict[str, Any]) -> dict[str, Any]:
                     "action_key": _canonical_action_key(candidate),
                     "primitive": candidate.primitive.value,
                     "block_index": int(candidate.block_index),
-                    "target_index": None if candidate.target_index is None else int(candidate.target_index),
+                    "target_index": None
+                    if candidate.target_index is None
+                    else int(candidate.target_index),
                     "source": candidate.metadata.get("source"),
                     "intent_type": candidate.metadata.get("intent_type"),
                     "rollout_return_by_policy": per_policy,
@@ -661,7 +675,9 @@ def _evaluate(ranker, pools: list[dict[str, Any]]) -> dict[str, Any]:
     for pool in pools:
         scores = ranker.score_candidates(pool["transition_payloads"]).detach()
         pred = int(scores.argmax().item())
-        order = sorted(range(len(pool["quality_values"])), key=lambda idx: float(pool["quality_values"][idx]))
+        order = sorted(
+            range(len(pool["quality_values"])), key=lambda idx: float(pool["quality_values"][idx])
+        )
         rank = order.index(pred) + 1
         regret = float(pool["quality_values"][pred]) - float(pool["quality_values"][order[0]])
         ranks.append(rank)
@@ -715,7 +731,9 @@ def _run_loco_split_job(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _run_loco_splits(pools: list[dict[str, Any]], args: argparse.Namespace) -> dict[str, Any] | None:
+def _run_loco_splits(
+    pools: list[dict[str, Any]], args: argparse.Namespace
+) -> dict[str, Any] | None:
     case_ids = sorted({int(pool["case_index"]) for pool in pools})
     if len(case_ids) < 2:
         return None
@@ -726,14 +744,22 @@ def _run_loco_splits(pools: list[dict[str, Any]], args: argparse.Namespace) -> d
         splits = [_run_loco_split_job(job) for job in jobs]
     else:
         splits = []
-        with ProcessPoolExecutor(max_workers=max_workers, mp_context=mp.get_context("spawn")) as executor:
+        with ProcessPoolExecutor(
+            max_workers=max_workers, mp_context=mp.get_context("spawn")
+        ) as executor:
             futures = [executor.submit(_run_loco_split_job, job) for job in jobs]
             for future in as_completed(futures):
                 splits.append(future.result())
         splits.sort(key=lambda item: int(item["heldout_case_index"]))
-    mean_rank = sum(split["evaluation"]["mean_selected_quality_rank"] for split in splits) / max(len(splits), 1)
-    mean_regret = sum(split["evaluation"]["mean_selected_quality_regret"] for split in splits) / max(len(splits), 1)
-    mean_top1 = sum(split["evaluation"]["oracle_top1_selected_fraction"] for split in splits) / max(len(splits), 1)
+    mean_rank = sum(split["evaluation"]["mean_selected_quality_rank"] for split in splits) / max(
+        len(splits), 1
+    )
+    mean_regret = sum(
+        split["evaluation"]["mean_selected_quality_regret"] for split in splits
+    ) / max(len(splits), 1)
+    mean_top1 = sum(split["evaluation"]["oracle_top1_selected_fraction"] for split in splits) / max(
+        len(splits), 1
+    )
     gate = {
         "mean_selected_quality_rank_lt_4": mean_rank < 4.0,
         "oracle_top1_selected_fraction_gt_0_30": mean_top1 > 0.30,
@@ -753,6 +779,22 @@ def _run_loco_splits(pools: list[dict[str, Any]], args: argparse.Namespace) -> d
 def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
     ev = payload["evaluation"]
     gate = payload["micro_gate"]
+    payload_guardrails = {
+        "target_positions": payload["target_positions_used_by_model_payload"],
+        "candidate_features": payload["candidate_features_used_by_model_payload"],
+        "manual_delta_rows": payload["manual_delta_rows_used_by_model_payload"],
+    }
+    loco = payload.get("leave_one_case_out")
+    loco_lines = (
+        [
+            f"- mean selected quality rank: `{loco['mean_selected_quality_rank']:.4f}`",
+            f"- mean selected quality regret: `{loco['mean_selected_quality_regret']:.4f}`",
+            f"- oracle top1 selected fraction: `{loco['oracle_top1_selected_fraction']:.4f}`",
+            f"- LOCO gate pass: `{loco['gate']['pass']}`",
+        ]
+        if loco is not None
+        else ["- skipped: eval mode did not request LOCO or fewer than two cases"]
+    )
     lines = [
         "# Step6F Shared Pre/Post Transition Comparator",
         "",
@@ -764,9 +806,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- ranker input: `{payload['ranker_input']}`",
         f"- pool count: `{payload['pool_count']}`",
         f"- model input keys: `{payload['model_input_keys']}`",
-        f"- target positions used by model payload: `{payload['target_positions_used_by_model_payload']}`",
-        f"- candidate features used by model payload: `{payload['candidate_features_used_by_model_payload']}`",
-        f"- manual delta rows used by model payload: `{payload['manual_delta_rows_used_by_model_payload']}`",
+        f"- payload guardrails: `{payload_guardrails}`",
         f"- micro mean selected quality rank: `{ev['mean_selected_quality_rank']:.4f}`",
         f"- micro mean selected quality regret: `{ev['mean_selected_quality_regret']:.4f}`",
         f"- micro oracle top1 selected fraction: `{ev['oracle_top1_selected_fraction']:.4f}`",
@@ -774,22 +814,14 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         "",
         "## Leave-One-Case-Out",
         "",
-        *(
-            [
-                f"- mean selected quality rank: `{payload['leave_one_case_out']['mean_selected_quality_rank']:.4f}`",
-                f"- mean selected quality regret: `{payload['leave_one_case_out']['mean_selected_quality_regret']:.4f}`",
-                f"- oracle top1 selected fraction: `{payload['leave_one_case_out']['oracle_top1_selected_fraction']:.4f}`",
-                f"- LOCO gate pass: `{payload['leave_one_case_out']['gate']['pass']}`",
-            ]
-            if payload.get("leave_one_case_out") is not None
-            else ["- skipped: eval mode did not request LOCO or fewer than two cases"]
-        ),
+        *loco_lines,
         "",
         "## Guardrail",
         "",
         "- payloads contain only pre/post typed graph tensors, action token, and pairwise target",
         "- model scoring ignores the pairwise target and consumes only the legal model input keys",
-        "- target-position, candidate-feature, raw-logit, heuristic-score, case-id, and manual-delta fields are denied by validator",
+        "- target-position, candidate-feature, raw-logit, heuristic-score, case-id, and",
+        "  manual-delta fields are denied by validator",
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 

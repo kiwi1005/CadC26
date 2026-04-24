@@ -103,8 +103,7 @@ def validate_transition_payload(payload: Mapping[str, Any]) -> None:
         or post_edges.shape[1] != 4
     ):
         raise ValueError(
-            "pre/post typed edges must be rank-2 tensors with columns "
-            "relation_id, src, dst, weight"
+            "pre/post typed edges must be rank-2 tensors with columns relation_id, src, dst, weight"
         )
     if pre_edges.shape[1] != post_edges.shape[1]:
         raise ValueError("pre/post typed edge schemas must match")
@@ -288,12 +287,8 @@ class SharedEncoderTransitionComparator(nn.Module):
 
     def forward(self, payload: Mapping[str, Any]) -> torch.Tensor:
         validate_transition_payload(payload)
-        pre_graph = self._encode_graph(
-            payload["pre_block_features"], payload["pre_typed_edges"]
-        )
-        post_graph = self._encode_graph(
-            payload["post_block_features"], payload["post_typed_edges"]
-        )
+        pre_graph = self._encode_graph(payload["pre_block_features"], payload["pre_typed_edges"])
+        post_graph = self._encode_graph(payload["post_block_features"], payload["post_typed_edges"])
         action = self.action_encoder(
             payload["action_token"].to(torch.float32).reshape(1, -1)
         ).squeeze(0)

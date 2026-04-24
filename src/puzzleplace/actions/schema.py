@@ -34,3 +34,26 @@ class TypedAction:
             raise ValueError(
                 f"Action {self.primitive} missing required fields: {', '.join(missing)}"
             )
+
+
+def canonical_action_key(action: TypedAction) -> tuple[object, ...]:
+    """Return a stable, metadata-free key for comparing/logging actions.
+
+    Step6 research diagnostics compare candidate choices across rollout
+    continuations.  Metadata may contain heuristic/debug fields and must not
+    affect those comparisons, so the canonical key is limited to the typed
+    action contract itself.
+    """
+
+    return (
+        action.primitive.value,
+        int(action.block_index),
+        None if action.target_index is None else int(action.target_index),
+        None if action.boundary_code is None else int(action.boundary_code),
+        action.x,
+        action.y,
+        action.w,
+        action.h,
+        action.dx,
+        action.dy,
+    )

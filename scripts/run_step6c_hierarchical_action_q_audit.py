@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ruff: noqa: E402
+# ruff: noqa: E402,E501,I001
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,6 @@ import math
 import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -44,8 +43,6 @@ from scripts.run_step6_hierarchical_rollout_control_audit import (  # noqa: E402
     _seed_first_action,
     _train_hierarchical_policy,
 )
-from scripts.run_step6c_hierarchical_quality_alignment_audit import _quality_after_action  # noqa: E402
-
 
 FEATURE_NAMES = [
     "policy_score",
@@ -873,6 +870,17 @@ def _quality_from_positions(case, positions: dict[int, tuple[float, float, float
     return evaluation["quality"]
 
 
+def _quality_after_action(case, state: ExecutionState, action) -> dict[str, Any]:
+    trial = _clone_execution_state(state)
+    ActionExecutor(case).apply(trial, action)
+    quality = _quality_from_positions(case, trial.proposed_positions)
+    return {
+        "quality": quality,
+        "proposed_positions": dict(trial.proposed_positions),
+        "semantic_placed_fraction": len(trial.semantic_placed) / max(case.block_count, 1),
+    }
+
+
 def _rollout_return_after_action(
     case,
     state: ExecutionState,
@@ -1551,7 +1559,6 @@ def _aggregate(collections: list[dict[str, Any]], workers: int, args: argparse.N
             "component_loss_weight": float(args.component_loss_weight),
             "component_score_weight": float(args.component_score_weight),
             "target_kind": str(args.target_kind),
-            "label_kind": str(getattr(args, "label_kind", "immediate")),
             "quality_temperature": float(args.quality_temperature),
             "pairwise_loss_weight_kind": str(args.pairwise_loss_weight_kind),
             "pairwise_listwise_loss_weight": float(args.pairwise_listwise_loss_weight),

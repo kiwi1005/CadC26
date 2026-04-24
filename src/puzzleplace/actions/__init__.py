@@ -12,7 +12,7 @@ from .masks import (
     estimate_action_violations,
     filter_legal_actions,
 )
-from .schema import ActionPrimitive, TypedAction
+from .schema import ActionPrimitive, TypedAction, canonical_action_key
 
 __all__ = [
     "ActionExecutor",
@@ -23,6 +23,7 @@ __all__ = [
     "MaskDecision",
     "TypedAction",
     "actions_match",
+    "canonical_action_key",
     "check_action_mask",
     "compute_expert_candidate_coverage",
     "estimate_action_violations",

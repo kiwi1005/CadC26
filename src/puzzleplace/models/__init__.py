@@ -1,10 +1,15 @@
-from .encoders import GraphStateEncoder, RelationAwareGraphStateEncoder, TypedConstraintGraphStateEncoder, build_block_features
+from .encoders import (
+    GraphStateEncoder,
+    RelationAwareGraphStateEncoder,
+    TypedConstraintGraphStateEncoder,
+    build_block_features,
+)
 from .hierarchical import (
     CandidateComponentRanker,
+    CandidateConstraintTokenRanker,
     CandidateLateFusionRanker,
     CandidateQualityRanker,
     CandidateRelationalActionQRanker,
-    CandidateConstraintTokenRanker,
     CandidateSetPairwiseRanker,
     HierarchicalDecoderOutput,
     HierarchicalSetPolicy,

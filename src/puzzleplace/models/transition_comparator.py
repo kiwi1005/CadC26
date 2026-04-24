@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 
 import torch
 from torch import nn
@@ -10,7 +11,6 @@ from puzzleplace.actions import ActionExecutor, ActionPrimitive, ExecutionState,
 from puzzleplace.data import ConstraintColumns, FloorSetCase
 from puzzleplace.models.encoders import build_relation_aware_block_features
 from puzzleplace.roles import WeakRoleEvidence
-
 
 ALLOWED_TRANSITION_PAYLOAD_FIELDS = frozenset(
     {
@@ -76,7 +76,7 @@ class Step6FTransitionPayload:
         }
 
     @classmethod
-    def from_mapping(cls, payload: Mapping[str, Any]) -> "Step6FTransitionPayload":
+    def from_mapping(cls, payload: Mapping[str, Any]) -> Step6FTransitionPayload:
         validated = validate_transition_payload(payload)
         return cls(
             pre_block_features=validated["pre_block_features"].tolist(),
@@ -349,7 +349,9 @@ class TransitionGraphEncoder(nn.Module):
                 if not (0 <= i < nodes.shape[0] and 0 <= j < nodes.shape[0]):
                     continue
                 if not 0 <= rel < self.relation_count:
-                    raise ValueError(f"relation id {rel} outside relation_count={self.relation_count}")
+                    raise ValueError(
+                        f"relation id {rel} outside relation_count={self.relation_count}"
+                    )
                 relation = self.relation_embedding(
                     torch.tensor(rel, dtype=torch.long, device=nodes.device)
                 )
@@ -416,7 +418,9 @@ class SharedEncoderTransitionComparator(nn.Module):
         )
 
     def encode_payload(self, payload: Mapping[str, Any] | Step6FTransitionPayload) -> torch.Tensor:
-        raw_payload = payload.to_mapping() if isinstance(payload, Step6FTransitionPayload) else payload
+        raw_payload = (
+            payload.to_mapping() if isinstance(payload, Step6FTransitionPayload) else payload
+        )
         validated = validate_transition_payload(raw_payload)
         pre_graph = self.encoder(
             validated["pre_block_features"],
