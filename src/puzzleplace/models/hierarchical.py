@@ -9,7 +9,7 @@ from puzzleplace.actions import ActionPrimitive
 from puzzleplace.data import FloorSetCase
 from puzzleplace.roles import WeakRoleEvidence
 
-from .encoders import GraphStateEncoder, RelationAwareGraphStateEncoder
+from .encoders import GraphStateEncoder, RelationAwareGraphStateEncoder, TypedConstraintGraphStateEncoder
 
 
 @dataclass(slots=True)
@@ -33,6 +33,20 @@ class HierarchicalSetPolicy(nn.Module):
         super().__init__()
         if encoder_kind == "relation_aware":
             self.encoder = RelationAwareGraphStateEncoder(hidden_dim=hidden_dim)
+        elif encoder_kind == "typed_constraint_graph":
+            self.encoder = TypedConstraintGraphStateEncoder(hidden_dim=hidden_dim)
+        elif encoder_kind == "typed_constraint_graph_no_anchor":
+            self.encoder = TypedConstraintGraphStateEncoder(
+                hidden_dim=hidden_dim, enabled_relation_ids={0, 1, 2, 3, 4}
+            )
+        elif encoder_kind == "typed_constraint_graph_no_boundary":
+            self.encoder = TypedConstraintGraphStateEncoder(
+                hidden_dim=hidden_dim, enabled_relation_ids={0, 1, 2, 3, 5}
+            )
+        elif encoder_kind == "typed_constraint_graph_no_groups":
+            self.encoder = TypedConstraintGraphStateEncoder(
+                hidden_dim=hidden_dim, enabled_relation_ids={0, 1, 5}
+            )
         elif encoder_kind == "graph":
             self.encoder = GraphStateEncoder(hidden_dim=hidden_dim)
         else:
@@ -269,6 +283,115 @@ class CandidateRelationalActionQRanker(nn.Module):
         encoded = self.encode(features)
         graph_context = encoded.mean(dim=0, keepdim=True).expand(encoded.shape[0], -1)
         return self.component_head(torch.cat([encoded, graph_context], dim=-1))
+
+
+class CandidateConstraintTokenRanker(nn.Module):
+    """Candidate ranker that treats constraint extras as typed relation tokens.
+
+    The previous constraint-relation trial appended scalar features directly to
+    each candidate row and regressed LOCO transfer. This sidecar keeps the same
+    evidence surface but gives the final constraint-relation feature segment its
+    own type embeddings and token attention before candidate-set attention.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int,
+        hidden_dim: int = 64,
+        num_heads: int = 4,
+        constraint_feature_count: int = 16,
+    ):
+        super().__init__()
+        if hidden_dim % num_heads != 0:
+            raise ValueError("hidden_dim must be divisible by num_heads")
+        if feature_dim <= constraint_feature_count:
+            raise ValueError("feature_dim must exceed constraint_feature_count")
+        self.constraint_feature_count = constraint_feature_count
+        base_dim = feature_dim - constraint_feature_count
+        self.base_proj = nn.Sequential(
+            nn.Linear(base_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.constraint_type_embedding = nn.Embedding(constraint_feature_count, hidden_dim)
+        self.constraint_value_proj = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.constraint_attention = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+        self.constraint_norm = nn.LayerNorm(hidden_dim)
+        self.candidate_proj = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.candidate_attention = nn.MultiheadAttention(
+            hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+        self.candidate_norm = nn.LayerNorm(hidden_dim)
+        self.score_head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.pair_head = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def encode(self, features: torch.Tensor) -> torch.Tensor:
+        base = features[:, : -self.constraint_feature_count]
+        constraint_values = features[:, -self.constraint_feature_count :]
+        base_hidden = self.base_proj(base)
+        type_ids = torch.arange(
+            self.constraint_feature_count,
+            dtype=torch.long,
+            device=features.device,
+        )
+        type_tokens = self.constraint_type_embedding(type_ids).unsqueeze(0).expand(
+            features.shape[0], -1, -1
+        )
+        value_tokens = self.constraint_value_proj(constraint_values.unsqueeze(-1))
+        constraint_tokens = type_tokens + value_tokens
+        constraint_context, _weights = self.constraint_attention(
+            constraint_tokens,
+            constraint_tokens,
+            constraint_tokens,
+            need_weights=False,
+        )
+        constraint_summary = self.constraint_norm(
+            constraint_tokens + constraint_context
+        ).mean(dim=1)
+        candidate_hidden = self.candidate_proj(torch.cat([base_hidden, constraint_summary], dim=-1))
+        attended, _weights = self.candidate_attention(
+            candidate_hidden.unsqueeze(0),
+            candidate_hidden.unsqueeze(0),
+            candidate_hidden.unsqueeze(0),
+            need_weights=False,
+        )
+        return self.candidate_norm(candidate_hidden + attended.squeeze(0))
+
+    def score_candidates(self, features: torch.Tensor) -> torch.Tensor:
+        encoded = self.encode(features)
+        graph_context = encoded.mean(dim=0, keepdim=True).expand(encoded.shape[0], -1)
+        return self.score_head(torch.cat([encoded, graph_context], dim=-1)).squeeze(-1)
+
+    def pair_logits(self, features: torch.Tensor) -> torch.Tensor:
+        encoded = self.encode(features)
+        lhs = encoded.unsqueeze(1).expand(-1, encoded.shape[0], -1)
+        rhs = encoded.unsqueeze(0).expand(encoded.shape[0], -1, -1)
+        pair_features = torch.cat([lhs, rhs, lhs - rhs, (lhs - rhs).abs()], dim=-1)
+        return self.pair_head(pair_features).squeeze(-1)
 
 
 class CandidateLateFusionRanker(nn.Module):

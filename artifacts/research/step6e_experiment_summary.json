@@ -1,0 +1,322 @@
+{
+  "diagnostics": [
+    {
+      "all_rollout_policies_agree_fraction": 0.0,
+      "case_ids": [
+        1,
+        4,
+        6
+      ],
+      "collection_count": 6,
+      "continuation_horizon": 4,
+      "continuation_policies": [
+        "policy_greedy",
+        "immediate_oracle",
+        "policy_topk_sample"
+      ],
+      "immediate_matches_rollout_policy_fraction": {
+        "immediate_oracle": 0.2916666666666667,
+        "policy_greedy": 0.25,
+        "policy_topk_sample": 0.0
+      },
+      "max_candidates_per_step": 8,
+      "max_steps": 4,
+      "mean_rollout_unique_oracle_count": 2.4583333333333335,
+      "name": "rollout_label_stability_slice",
+      "pairwise_rollout_policy_agreement_fraction": {
+        "immediate_oracle__policy_topk_sample": 0.25,
+        "policy_greedy__immediate_oracle": 0.0,
+        "policy_greedy__policy_topk_sample": 0.2916666666666667
+      },
+      "path": "artifacts/research/step6e_rollout_label_stability_slice.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "rollout_label_stable_enough": false
+    },
+    {
+      "consensus_advantage_usable": false,
+      "consensus_top_is_any_policy_oracle_fraction": 0.9166666666666666,
+      "majority_pair_fraction": 0.636904761904762,
+      "name": "consensus_advantage_diagnostic",
+      "path": "artifacts/research/step6e_consensus_advantage_diagnostic.json",
+      "pool_count": 24,
+      "split_pair_fraction": 0.02827380952380952,
+      "unanimous_pair_fraction": 0.33482142857142855
+    },
+    {
+      "name": "typed_constraint_graph_channel_ablation",
+      "path": "artifacts/research/step6e_typed_constraint_graph_channel_ablation.json",
+      "rows": [
+        {
+          "loco_gate": false,
+          "loco_rank": 3.4583333333333335,
+          "loco_regret": 0.18979808166988546,
+          "loco_top1": 0.25,
+          "micro_gate": true,
+          "micro_rank": 1.9166666666666667,
+          "micro_top1": 0.4583333333333333,
+          "path": "artifacts/research/step6e_typed_constraint_graph_advantage_micro_loco3.json",
+          "variant": "full"
+        },
+        {
+          "loco_gate": false,
+          "loco_rank": 4.125,
+          "loco_regret": 0.21768795348520034,
+          "loco_top1": 0.16666666666666666,
+          "micro_gate": false,
+          "micro_rank": 2.875,
+          "micro_top1": 0.20833333333333334,
+          "path": "artifacts/research/step6e_typed_constraint_graph_no_anchor_advantage_micro_loco3.json",
+          "variant": "no_anchor"
+        },
+        {
+          "loco_gate": false,
+          "loco_rank": 5.083333333333333,
+          "loco_regret": 0.3414903533153084,
+          "loco_top1": 0.041666666666666664,
+          "micro_gate": true,
+          "micro_rank": 1.625,
+          "micro_top1": 0.5416666666666666,
+          "path": "artifacts/research/step6e_typed_constraint_graph_no_groups_advantage_micro_loco3.json",
+          "variant": "no_groups"
+        },
+        {
+          "loco_gate": false,
+          "loco_rank": 3.4583333333333335,
+          "loco_regret": 0.2175738350750418,
+          "loco_top1": 0.25,
+          "micro_gate": false,
+          "micro_rank": 2.9166666666666665,
+          "micro_top1": 0.16666666666666666,
+          "path": "artifacts/research/step6e_typed_constraint_graph_no_boundary_advantage_micro_loco3.json",
+          "variant": "no_boundary"
+        }
+      ]
+    }
+  ],
+  "finding": "LOCO split execution is now parallelized with spawn-safe multiprocessing, and the first action-conditioned delta feature ranker was evaluated with --workers 48 over 12 case/seed collection jobs. Delta features fail micro (rank 3.8958/top1 0.2292) and LOCO (rank 3.7708/top1 0.1042), so simple hand-built next-state deltas do not rescue transfer.",
+  "next": "Do not tune weights. Either design richer learned next-state relation deltas or step back to analyze why E6 candidate-feature path remains best; future wider runs should use the spawn-safe parallel LOCO harness and 48-worker setting.",
+  "runs": [
+    {
+      "cases": 5,
+      "label_kind": "immediate",
+      "mean_rank": 2.9916666666666667,
+      "mode": "micro_overfit",
+      "name": "immediate_micro_baseline",
+      "path": "artifacts/research/step6d_relational_action_q_micro5_no_pair.json",
+      "pools": 120,
+      "regret": 0.2100253893181626,
+      "target_kind": "soft_quality",
+      "top1": 0.3
+    },
+    {
+      "cases": 5,
+      "label_kind": "rollout_return",
+      "mean_rank": 7.558333333333334,
+      "mode": "micro_overfit",
+      "name": "rollout_return_soft_micro",
+      "path": "artifacts/research/step6e_rollout_return_action_q_micro5.json",
+      "pools": 120,
+      "regret": 1.4614233624602366,
+      "target_kind": "soft_quality",
+      "top1": 0.16666666666666666
+    },
+    {
+      "cases": 5,
+      "label_kind": "rollout_return",
+      "mean_rank": 7.458333333333333,
+      "mode": "micro_overfit",
+      "name": "rollout_return_ce_micro",
+      "path": "artifacts/research/step6e_rollout_return_action_q_micro5_ce.json",
+      "pools": 120,
+      "regret": 1.5361318276978697,
+      "target_kind": "oracle_ce",
+      "top1": 0.06666666666666667
+    },
+    {
+      "cases": 5,
+      "label_kind": "rollout_return",
+      "mean_rank": 6.908333333333333,
+      "mode": "micro_overfit",
+      "name": "rollout_return_topk_micro",
+      "path": "artifacts/research/step6e_rollout_return_topk_action_q_micro5.json",
+      "pools": 120,
+      "regret": 1.7438268342291738,
+      "target_kind": "topk_quality",
+      "top1": 0.09166666666666666
+    },
+    {
+      "cases": 5,
+      "feature_mode": "constraint_relation_pool_no_raw_logits",
+      "label_kind": "immediate",
+      "mean_rank": 3.9166666666666665,
+      "mode": "micro_overfit",
+      "name": "constraint_relation_micro",
+      "path": "artifacts/research/step6e_constraint_relation_action_q_micro5.json",
+      "pools": 120,
+      "regret": 0.41213438533558105,
+      "target_kind": "soft_quality",
+      "top1": 0.30833333333333335
+    },
+    {
+      "cases": 5,
+      "feature_mode": "constraint_relation_pool_no_raw_logits",
+      "label_kind": "immediate",
+      "mean_rank": 6.083333333333333,
+      "mode": "leave_one_case_out",
+      "name": "constraint_relation_loco5",
+      "path": "artifacts/research/step6e_constraint_relation_action_q_loco5.json",
+      "pools": 120,
+      "regret": 1.07419040263906,
+      "target_kind": "soft_quality",
+      "top1": 0.15
+    },
+    {
+      "cases": 5,
+      "feature_mode": "constraint_relation_pool_no_raw_logits",
+      "label_kind": "immediate",
+      "mean_rank": 7.825,
+      "mode": "micro_overfit",
+      "name": "constraint_token_micro",
+      "path": "artifacts/research/step6e_constraint_token_action_q_micro5.json",
+      "pools": 120,
+      "ranker_kind": "constraint_token_action_q",
+      "regret": 1.7465534011288972,
+      "target_kind": "soft_quality",
+      "top1": 0.025
+    },
+    {
+      "cases": [
+        1,
+        4,
+        6
+      ],
+      "feature_mode": "relational_state_pool_no_raw_logits",
+      "feature_normalization": "per_case",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 4.5,
+      "loco_regret": 0.2819566200996228,
+      "loco_top1": 0.08333333333333333,
+      "micro_gate_pass": true,
+      "micro_mean_rank": 1.9166666666666667,
+      "micro_regret": 0.04225068011050686,
+      "micro_top1": 0.5833333333333334,
+      "mode": "micro_plus_loco3",
+      "name": "majority_advantage_ranker_micro_loco3",
+      "path": "artifacts/research/step6e_majority_advantage_ranker_micro_loco3.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "pool_count": 24
+    },
+    {
+      "cases": [
+        1,
+        4,
+        6
+      ],
+      "encoder_kind": "typed_constraint_graph",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 3.4583333333333335,
+      "loco_regret": 0.18979808166988546,
+      "loco_top1": 0.25,
+      "micro_gate_pass": true,
+      "micro_mean_rank": 1.9166666666666667,
+      "micro_regret": 0.053744332186040696,
+      "micro_top1": 0.4583333333333333,
+      "mode": "micro_plus_loco3",
+      "name": "typed_constraint_graph_advantage_micro_loco3",
+      "path": "artifacts/research/step6e_typed_constraint_graph_advantage_micro_loco3.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "pool_count": 24
+    },
+    {
+      "cases": [
+        1,
+        4,
+        6
+      ],
+      "encoder_kind": "typed_constraint_graph",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 3.7916666666666665,
+      "loco_regret": 0.24885121940481159,
+      "loco_top1": 0.25,
+      "micro_gate_pass": false,
+      "micro_mean_rank": 3.9166666666666665,
+      "micro_regret": 0.26786574622267884,
+      "micro_top1": 0.16666666666666666,
+      "mode": "micro_plus_loco3",
+      "name": "graph_action_ranker_micro_loco3",
+      "path": "artifacts/research/step6e_graph_action_ranker_micro_loco3.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "pool_count": 24,
+      "ranker_input": "graph_action_embeddings"
+    },
+    {
+      "cases": [
+        1,
+        4,
+        6
+      ],
+      "encoder_kind": "typed_constraint_graph",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 4.208333333333333,
+      "loco_regret": 0.27526771515471465,
+      "loco_top1": 0.16666666666666666,
+      "micro_gate_pass": false,
+      "micro_mean_rank": 3.7916666666666665,
+      "micro_regret": 0.24885121940481159,
+      "micro_top1": 0.25,
+      "mode": "micro_plus_loco3",
+      "name": "joint_typed_graph_action_ranker_micro_loco3",
+      "path": "artifacts/research/step6e_joint_graph_action_ranker_micro_loco3.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "pool_count": 24,
+      "ranker_input": "joint_typed_graph_action"
+    },
+    {
+      "cases": [
+        1,
+        4,
+        6
+      ],
+      "collection_count": 12,
+      "collection_workers_used": 12,
+      "encoder_kind": "typed_constraint_graph",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 3.7708333333333335,
+      "loco_parallel_workers_used": 3,
+      "loco_regret": 0.21938635937606507,
+      "loco_top1": 0.10416666666666667,
+      "micro_gate_pass": false,
+      "micro_mean_rank": 3.8958333333333335,
+      "micro_regret": 0.26927782965592945,
+      "micro_top1": 0.22916666666666666,
+      "mode": "micro_plus_loco3_parallel_loco",
+      "name": "action_delta_ranker_micro_loco3_seed4",
+      "path": "artifacts/research/step6e_action_delta_ranker_micro_loco3_seed4.json",
+      "policy_seeds": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "pool_count": 48,
+      "ranker_input": "action_delta_features",
+      "workers_requested": 48
+    }
+  ],
+  "status": "e10_action_delta_features_parallelized_failed_next_better_delta_or_rethink"
+}

@@ -66,7 +66,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--block-weight", type=float, default=1.0)
     parser.add_argument(
         "--encoder-kind",
-        choices=["graph", "relation_aware"],
+        choices=["graph", "relation_aware", "typed_constraint_graph", "typed_constraint_graph_no_anchor", "typed_constraint_graph_no_boundary", "typed_constraint_graph_no_groups"],
         default="graph",
         help="Policy state encoder used by this audit sidecar.",
     )

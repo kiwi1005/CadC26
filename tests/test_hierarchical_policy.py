@@ -17,9 +17,11 @@ from puzzleplace.models import (
     CandidateLateFusionRanker,
     CandidateQualityRanker,
     CandidateRelationalActionQRanker,
+    CandidateConstraintTokenRanker,
     CandidateSetPairwiseRanker,
     HierarchicalSetPolicy,
     RelationAwareGraphStateEncoder,
+    TypedConstraintGraphStateEncoder,
 )
 from puzzleplace.roles import label_case_roles
 from scripts.run_step6c_hierarchical_action_q_audit import FEATURE_NAMES, _aggregate
@@ -74,6 +76,49 @@ def test_relation_aware_encoder_output_shapes() -> None:
     assert encoded.graph_embedding.shape == (32,)
     assert encoded.block_mask.shape == (case.block_count,)
 
+
+
+def test_typed_constraint_graph_encoder_output_shapes() -> None:
+    case = _make_case()
+    case.constraints[0, 0] = 1.0
+    case.constraints[1, 3] = 2.0
+    case.constraints[2, 3] = 2.0
+    case.constraints[1, 4] = 1.0
+    case.constraints[2, 4] = 1.0
+    encoder = TypedConstraintGraphStateEncoder(hidden_dim=32)
+    encoded = encoder(
+        case,
+        role_evidence=label_case_roles(case),
+        placements={0: (0.0, 0.0, 2.0, 3.0)},
+        state_step=1,
+    )
+
+    assert encoded.block_embeddings.shape == (case.block_count, 32)
+    assert encoded.graph_embedding.shape == (32,)
+    assert encoded.block_mask.shape == (case.block_count,)
+
+
+
+def test_typed_constraint_graph_encoder_ablation_variants() -> None:
+    case = _make_case()
+    for encoder_kind in (
+        "typed_constraint_graph_no_anchor",
+        "typed_constraint_graph_no_boundary",
+        "typed_constraint_graph_no_groups",
+    ):
+        policy = HierarchicalSetPolicy(hidden_dim=32, encoder_kind=encoder_kind)
+        output = policy(case, role_evidence=label_case_roles(case), state_step=1)
+
+        assert output.block_logits.shape == (case.block_count,)
+        assert output.primitive_logits_by_block.shape == (case.block_count, len(ActionPrimitive))
+
+def test_hierarchical_policy_supports_typed_constraint_graph_encoder() -> None:
+    case = _make_case()
+    policy = HierarchicalSetPolicy(hidden_dim=32, encoder_kind="typed_constraint_graph")
+    output = policy(case, role_evidence=label_case_roles(case), state_step=1)
+
+    assert output.block_logits.shape == (case.block_count,)
+    assert output.primitive_logits_by_block.shape == (case.block_count, len(ActionPrimitive))
 
 def test_hierarchical_policy_supports_relation_aware_encoder() -> None:
     case = _make_case()
@@ -213,6 +258,22 @@ def test_candidate_relational_action_q_ranker_scores_candidate_pool() -> None:
     assert scores.shape == (5,)
     assert pair_logits.shape == (5, 5)
     assert component_logits.shape == (5, 3)
+
+
+def test_candidate_constraint_token_ranker_scores_candidate_pool() -> None:
+    ranker = CandidateConstraintTokenRanker(
+        feature_dim=20,
+        hidden_dim=8,
+        num_heads=2,
+        constraint_feature_count=4,
+    )
+    features = torch.zeros((5, 20), dtype=torch.float32)
+
+    scores = ranker.score_candidates(features)
+    pair_logits = ranker.pair_logits(features)
+
+    assert scores.shape == (5,)
+    assert pair_logits.shape == (5, 5)
 
 
 def test_candidate_relational_action_q_ranker_can_fit_tiny_preference() -> None:

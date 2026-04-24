@@ -23,12 +23,15 @@ for path in (ROOT, SRC):
 
 from puzzleplace.actions import ActionExecutor, ExecutionState, canonical_action_key, generate_candidate_actions  # noqa: E402
 from puzzleplace.actions.schema import ActionPrimitive  # noqa: E402
+from puzzleplace.eval import evaluate_positions  # noqa: E402
+from puzzleplace.repair.finalizer import finalize_layout  # noqa: E402
 from puzzleplace.data import ConstraintColumns  # noqa: E402
 from puzzleplace.models import (  # noqa: E402
     CandidateComponentRanker,
     CandidateLateFusionRanker,
     CandidateQualityRanker,
     CandidateRelationalActionQRanker,
+    CandidateConstraintTokenRanker,
     CandidateSetPairwiseRanker,
 )
 from puzzleplace.roles import label_case_roles  # noqa: E402
@@ -164,6 +167,27 @@ RELATIONAL_STATE_EXTRA_FEATURE_NAMES = [
     "rel_pin_pull_y_norm",
 ]
 RELATIONAL_STATE_POOL_FEATURE_NAMES = STATE_POOL_FEATURE_NAMES + RELATIONAL_STATE_EXTRA_FEATURE_NAMES
+CONSTRAINT_RELATION_EXTRA_FEATURE_NAMES = [
+    "crel_same_cluster_as_target",
+    "crel_same_mib_as_target",
+    "crel_boundary_code_match_target",
+    "crel_boundary_side_compatible_with_action",
+    "crel_boundary_touch_distance_norm",
+    "crel_nearest_preplaced_distance_norm",
+    "crel_nearest_fixed_distance_norm",
+    "crel_same_cluster_placed_fraction",
+    "crel_same_cluster_unplaced_fraction",
+    "crel_same_mib_placed_fraction",
+    "crel_same_mib_unplaced_fraction",
+    "crel_preplaced_anchor_b2b_weight_norm",
+    "crel_fixed_anchor_b2b_weight_norm",
+    "crel_boundary_group_b2b_weight_norm",
+    "crel_cluster_group_b2b_weight_norm",
+    "crel_mib_group_b2b_weight_norm",
+]
+CONSTRAINT_RELATION_POOL_FEATURE_NAMES = (
+    RELATIONAL_STATE_POOL_FEATURE_NAMES + CONSTRAINT_RELATION_EXTRA_FEATURE_NAMES
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -213,7 +237,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument(
         "--encoder-kind",
-        choices=["graph", "relation_aware"],
+        choices=["graph", "relation_aware", "typed_constraint_graph", "typed_constraint_graph_no_anchor", "typed_constraint_graph_no_boundary", "typed_constraint_graph_no_groups"],
         default="graph",
         help="Sidecar hierarchical policy state encoder.",
     )
@@ -226,6 +250,7 @@ def _parse_args() -> argparse.Namespace:
             "state_pool",
             "state_pool_no_raw_logits",
             "relational_state_pool_no_raw_logits",
+            "constraint_relation_pool_no_raw_logits",
         ],
         default="legacy",
         help=(
@@ -253,6 +278,7 @@ def _parse_args() -> argparse.Namespace:
             "hybrid_set",
             "late_fusion",
             "relational_action_q",
+            "constraint_token_action_q",
         ],
         default="scalar",
         help=(
@@ -274,7 +300,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--target-kind",
-        choices=["oracle_ce", "soft_quality"],
+        choices=["oracle_ce", "soft_quality", "topk_quality"],
         default="oracle_ce",
         help=(
             "Ranker training target. soft_quality uses a listwise distribution "
@@ -328,6 +354,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-steps", type=int, default=8)
     parser.add_argument("--max-candidates-per-step", type=int, default=16)
     parser.add_argument(
+        "--label-kind",
+        choices=["immediate", "rollout_return"],
+        default="immediate",
+        help="Quality label used to train/evaluate candidate ranking pools.",
+    )
+    parser.add_argument(
+        "--continuation-horizon",
+        type=int,
+        default=8,
+        help="Greedy continuation horizon for --label-kind rollout_return.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=ROOT / "artifacts" / "research" / "step6c_hierarchical_action_q_audit.json",
@@ -372,6 +410,8 @@ def _feature_vector(case, action, policy_score: float, components: dict[str, Any
 
 
 def _feature_names(feature_mode: str) -> list[str]:
+    if feature_mode == "constraint_relation_pool_no_raw_logits":
+        return CONSTRAINT_RELATION_POOL_FEATURE_NAMES
     if feature_mode == "relational_state_pool_no_raw_logits":
         return RELATIONAL_STATE_POOL_FEATURE_NAMES
     if feature_mode in {"state_pool", "state_pool_no_raw_logits"}:
@@ -607,6 +647,135 @@ def _relational_state_extra_features(case, state: ExecutionState, action) -> lis
     ]
 
 
+def _constraint_relation_extra_features(case, state: ExecutionState, action) -> list[float]:
+    total_area = max(float(case.area_targets.sum().item()), 1e-6)
+    case_scale = max(math.sqrt(total_area), 1e-6)
+    constraints = case.constraints[action.block_index]
+    cluster_id = int(constraints[ConstraintColumns.CLUSTER].item())
+    mib_flag = bool(constraints[ConstraintColumns.MIB].item())
+    boundary_code = int(constraints[ConstraintColumns.BOUNDARY].item())
+    target_constraints = None
+    if action.target_index is not None and 0 <= int(action.target_index) < case.block_count:
+        target_constraints = case.constraints[int(action.target_index)]
+    same_cluster_as_target = 0.0
+    same_mib_as_target = 0.0
+    boundary_code_match_target = 0.0
+    if target_constraints is not None:
+        target_cluster = int(target_constraints[ConstraintColumns.CLUSTER].item())
+        same_cluster_as_target = float(cluster_id != 0 and cluster_id == target_cluster)
+        same_mib_as_target = float(mib_flag and bool(target_constraints[ConstraintColumns.MIB].item()))
+        boundary_code_match_target = float(
+            boundary_code != 0
+            and boundary_code == int(target_constraints[ConstraintColumns.BOUNDARY].item())
+        )
+
+    box = _candidate_box_from_action(state, action)
+    if box is None:
+        x = y = w = h = center_x = center_y = 0.0
+    else:
+        x, y, w, h = box
+        center_x = x + w / 2.0
+        center_y = y + h / 2.0
+    bbox_min_x, bbox_min_y, bbox_max_x, bbox_max_y = _state_bbox(state.placements)
+    if not state.placements:
+        bbox_max_x = max(bbox_max_x, x + w)
+        bbox_max_y = max(bbox_max_y, y + h)
+    boundary_touch_distance = 0.0
+    boundary_side_compatible = 0.0
+    if boundary_code == 1:
+        boundary_touch_distance = abs(x)
+        boundary_side_compatible = float(abs(x) <= 1e-6)
+    elif boundary_code == 2:
+        boundary_touch_distance = abs(max(bbox_max_x, x + w) - (x + w))
+        boundary_side_compatible = float(boundary_touch_distance <= 1e-6)
+    elif boundary_code == 4:
+        boundary_touch_distance = abs(max(bbox_max_y, y + h) - (y + h))
+        boundary_side_compatible = float(boundary_touch_distance <= 1e-6)
+    elif boundary_code == 8:
+        boundary_touch_distance = abs(y)
+        boundary_side_compatible = float(abs(y) <= 1e-6)
+
+    same_cluster_total = same_cluster_placed = 0
+    same_mib_total = same_mib_placed = 0
+    nearest_preplaced = None
+    nearest_fixed = None
+    for idx in range(case.block_count):
+        other_constraints = case.constraints[idx]
+        if idx != action.block_index:
+            if cluster_id != 0 and int(other_constraints[ConstraintColumns.CLUSTER].item()) == cluster_id:
+                same_cluster_total += 1
+                same_cluster_placed += int(idx in state.placements)
+            if mib_flag and bool(other_constraints[ConstraintColumns.MIB].item()):
+                same_mib_total += 1
+                same_mib_placed += int(idx in state.placements)
+        if idx in state.placements:
+            ox, oy, ow, oh = state.placements[idx]
+        else:
+            tx, ty, tw, th = [float(v) for v in case.target_positions[idx].tolist()]
+            # Only use anchor-like target geometry for fixed/preplaced distance diagnostics.
+            ox, oy, ow, oh = tx, ty, tw, th
+        if bool(other_constraints[ConstraintColumns.PREPLACED].item()):
+            dist = abs(center_x - (ox + ow / 2.0)) + abs(center_y - (oy + oh / 2.0))
+            nearest_preplaced = dist if nearest_preplaced is None else min(nearest_preplaced, dist)
+        if bool(other_constraints[ConstraintColumns.FIXED].item()):
+            dist = abs(center_x - (ox + ow / 2.0)) + abs(center_y - (oy + oh / 2.0))
+            nearest_fixed = dist if nearest_fixed is None else min(nearest_fixed, dist)
+
+    preplaced_anchor_weight = 0.0
+    fixed_anchor_weight = 0.0
+    boundary_group_weight = 0.0
+    cluster_group_weight = 0.0
+    mib_group_weight = 0.0
+    for src, dst, weight in case.b2b_edges.tolist():
+        src_idx = int(src)
+        dst_idx = int(dst)
+        if src_idx == action.block_index:
+            other_idx = dst_idx
+        elif dst_idx == action.block_index:
+            other_idx = src_idx
+        else:
+            continue
+        if not (0 <= other_idx < case.block_count):
+            continue
+        edge_weight = abs(float(weight))
+        other_constraints = case.constraints[other_idx]
+        preplaced_anchor_weight += edge_weight * float(
+            bool(other_constraints[ConstraintColumns.PREPLACED].item())
+        )
+        fixed_anchor_weight += edge_weight * float(
+            bool(other_constraints[ConstraintColumns.FIXED].item())
+        )
+        boundary_group_weight += edge_weight * float(
+            boundary_code != 0
+            and boundary_code == int(other_constraints[ConstraintColumns.BOUNDARY].item())
+        )
+        cluster_group_weight += edge_weight * float(
+            cluster_id != 0 and cluster_id == int(other_constraints[ConstraintColumns.CLUSTER].item())
+        )
+        mib_group_weight += edge_weight * float(
+            mib_flag and bool(other_constraints[ConstraintColumns.MIB].item())
+        )
+    weight_denom = max(case.block_count, 1)
+    return [
+        same_cluster_as_target,
+        same_mib_as_target,
+        boundary_code_match_target,
+        boundary_side_compatible,
+        boundary_touch_distance / case_scale,
+        0.0 if nearest_preplaced is None else nearest_preplaced / case_scale,
+        0.0 if nearest_fixed is None else nearest_fixed / case_scale,
+        same_cluster_placed / max(same_cluster_total, 1),
+        (same_cluster_total - same_cluster_placed) / max(same_cluster_total, 1),
+        same_mib_placed / max(same_mib_total, 1),
+        (same_mib_total - same_mib_placed) / max(same_mib_total, 1),
+        preplaced_anchor_weight / weight_denom,
+        fixed_anchor_weight / weight_denom,
+        boundary_group_weight / weight_denom,
+        cluster_group_weight / weight_denom,
+        mib_group_weight / weight_denom,
+    ]
+
+
 def _pool_relative_features(base_rows: list[list[float]]) -> list[list[float]]:
     feature_indexes = [FEATURE_NAMES.index(name) for name in POOL_RELATIVE_BASE_FEATURES]
     values_by_feature = []
@@ -645,7 +814,11 @@ def _build_pool_features(
     if feature_mode == "legacy":
         return base_rows
     relative_rows = _pool_relative_features(base_rows)
-    if feature_mode in {"state_pool_no_raw_logits", "relational_state_pool_no_raw_logits"}:
+    if feature_mode in {
+        "state_pool_no_raw_logits",
+        "relational_state_pool_no_raw_logits",
+        "constraint_relation_pool_no_raw_logits",
+    }:
         raw_logit_indexes = [
             FEATURE_NAMES.index(name)
             for name in (
@@ -663,11 +836,92 @@ def _build_pool_features(
     for row_idx, (base, relative) in enumerate(zip(base_rows, relative_rows, strict=True)):
         candidate = selected[row_idx][1]
         row = base + relative + _state_pool_extra_features(case, state, candidate)
-        if feature_mode == "relational_state_pool_no_raw_logits":
+        if feature_mode in {"relational_state_pool_no_raw_logits", "constraint_relation_pool_no_raw_logits"}:
             row += _relational_state_extra_features(case, state, candidate)
+        if feature_mode == "constraint_relation_pool_no_raw_logits":
+            row += _constraint_relation_extra_features(case, state, candidate)
         rows.append(row)
     return rows
 
+
+
+def _clone_execution_state(state: ExecutionState) -> ExecutionState:
+    return ExecutionState(
+        placements=dict(state.placements),
+        frozen_blocks=set(state.frozen_blocks),
+        proposed_positions=dict(state.proposed_positions),
+        shape_assigned=set(state.shape_assigned),
+        semantic_placed=set(state.semantic_placed),
+        physically_placed=set(state.physically_placed),
+        step=state.step,
+        history=list(state.history),
+        last_rollout_mode=state.last_rollout_mode,
+    )
+
+
+def _quality_from_positions(case, positions: dict[int, tuple[float, float, float, float]]) -> dict[str, Any]:
+    repair = finalize_layout(case, positions)
+    evaluation = evaluate_positions(case, repair.positions, runtime=1.0, median_runtime=1.0)
+    return evaluation["quality"]
+
+
+def _rollout_return_after_action(
+    case,
+    state: ExecutionState,
+    action,
+    *,
+    policy,
+    role_evidence,
+    horizon: int,
+    max_candidates: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    trial = _clone_execution_state(state)
+    executor = ActionExecutor(case)
+    executor.apply(trial, action)
+    actions_taken = 1
+    forced_count = 0
+    no_progress = 0
+    while (
+        len(trial.semantic_placed) < case.block_count
+        and trial.step < case.block_count * 4
+        and actions_taken < horizon + 1
+    ):
+        remaining = [idx for idx in range(case.block_count) if idx not in trial.semantic_placed]
+        if not remaining:
+            break
+        candidates = generate_candidate_actions(
+            case,
+            trial,
+            remaining_blocks=remaining,
+            mode="semantic",
+            max_per_primitive=8,
+        )
+        if not candidates:
+            chosen = _forced_progress_action(case, trial, remaining[0])
+            forced_count += 1
+        else:
+            scored = []
+            for candidate in candidates[: max(max_candidates * 4, max_candidates)]:
+                policy_score, _components = _score_hierarchical_action(
+                    case, policy, role_evidence, trial, candidate
+                )
+                scored.append((policy_score, candidate))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            chosen = scored[0][1]
+            if no_progress >= 2 and chosen.block_index in trial.semantic_placed:
+                chosen = _forced_progress_action(case, trial, remaining[0])
+                forced_count += 1
+        before = len(trial.semantic_placed)
+        executor.apply(trial, chosen)
+        no_progress = 0 if len(trial.semantic_placed) > before else no_progress + 1
+        actions_taken += 1
+    quality = _quality_from_positions(case, trial.proposed_positions)
+    return quality, {
+        "continuation_actions_taken": actions_taken - 1,
+        "forced_continuation_count": forced_count,
+        "completed": len(trial.semantic_placed) >= case.block_count,
+        "semantic_placed_fraction": len(trial.semantic_placed) / max(case.block_count, 1),
+    }
 
 def _collect_pools(args_dict: dict[str, Any]) -> dict[str, Any]:
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -680,6 +934,8 @@ def _collect_pools(args_dict: dict[str, Any]) -> dict[str, Any]:
     max_steps = int(args_dict["max_steps"])
     max_candidates = int(args_dict["max_candidates_per_step"])
     feature_mode = str(args_dict["feature_mode"])
+    label_kind = str(args_dict.get("label_kind", "immediate"))
+    continuation_horizon = int(args_dict.get("continuation_horizon", 8))
     job = RolloutJob(
         case_id=case_id,
         seed=int(args_dict["seed"]),
@@ -737,7 +993,20 @@ def _collect_pools(args_dict: dict[str, Any]) -> dict[str, Any]:
         quality_values = []
         for policy_rank, (_policy_score, candidate, _components) in enumerate(selected, start=1):
             evaluated = _quality_after_action(case, state, candidate)
-            quality = evaluated["quality"]
+            immediate_quality = evaluated["quality"]
+            rollout_meta = None
+            if label_kind == "rollout_return":
+                quality, rollout_meta = _rollout_return_after_action(
+                    case,
+                    state,
+                    candidate,
+                    policy=policy,
+                    role_evidence=role_evidence,
+                    horizon=continuation_horizon,
+                    max_candidates=max_candidates,
+                )
+            else:
+                quality = immediate_quality
             q = float(quality["quality_cost_runtime1"])
             quality_values.append(q)
             candidate_rows.append(
@@ -750,9 +1019,15 @@ def _collect_pools(args_dict: dict[str, Any]) -> dict[str, Any]:
                     "source": candidate.metadata.get("source"),
                     "intent_type": candidate.metadata.get("intent_type"),
                     "quality_cost_runtime1": q,
+                    "label_kind": label_kind,
+                    "immediate_quality_cost_runtime1": float(immediate_quality["quality_cost_runtime1"]),
                     "HPWLgap": float(quality["HPWLgap"]),
                     "Areagap_bbox": float(quality["Areagap_bbox"]),
                     "Violationsrelative": float(quality["Violationsrelative"]),
+                    "immediate_HPWLgap": float(immediate_quality["HPWLgap"]),
+                    "immediate_Areagap_bbox": float(immediate_quality["Areagap_bbox"]),
+                    "immediate_Violationsrelative": float(immediate_quality["Violationsrelative"]),
+                    "rollout_meta": rollout_meta,
                     "feature": feature_rows[policy_rank - 1],
                 }
             )
@@ -812,6 +1087,13 @@ def _train_ranker(
             hidden_dim=64,
             num_heads=4,
         )
+    elif ranker_kind == "constraint_token_action_q":
+        ranker = CandidateConstraintTokenRanker(
+            feature_dim=feature_dim,
+            hidden_dim=64,
+            num_heads=4,
+            constraint_feature_count=len(CONSTRAINT_RELATION_EXTRA_FEATURE_NAMES),
+        )
     elif ranker_kind in {"pairwise_set", "hybrid_set"}:
         ranker = CandidateSetPairwiseRanker(feature_dim=feature_dim, hidden_dim=64, num_heads=4)
     elif ranker_kind == "component":
@@ -835,10 +1117,16 @@ def _train_ranker(
             features = (features - mean) / std
             target = torch.tensor([int(pool["oracle_index"])], dtype=torch.long)
             quality_values = torch.tensor(pool["quality_values"], dtype=torch.float32)
-            soft_target = torch.softmax(
-                -(quality_values - quality_values.min()) / max(float(quality_temperature), 1e-6),
-                dim=0,
-            )
+            if target_kind == "topk_quality":
+                topk_count = min(3, int(quality_values.numel()))
+                topk_indices = torch.argsort(quality_values)[:topk_count]
+                soft_target = torch.zeros_like(quality_values)
+                soft_target[topk_indices] = 1.0 / max(topk_count, 1)
+            else:
+                soft_target = torch.softmax(
+                    -(quality_values - quality_values.min()) / max(float(quality_temperature), 1e-6),
+                    dim=0,
+                )
             optimizer.zero_grad(set_to_none=True)
             if ranker_kind in {"pairwise_set", "hybrid_set", "late_fusion"}:
                 pair_logits = (
@@ -875,7 +1163,7 @@ def _train_ranker(
                         pool_scores = ranker.scalar_scores(features)
                     else:
                         pool_scores = ranker.score_candidates(features)
-                    if target_kind == "soft_quality":
+                    if target_kind in {"soft_quality", "topk_quality"}:
                         listwise_loss = -(
                             soft_target * torch.nn.functional.log_softmax(pool_scores, dim=0)
                         ).sum()
@@ -885,9 +1173,9 @@ def _train_ranker(
                             target,
                         )
                     loss = loss + scalar_loss_weight * listwise_loss
-            elif ranker_kind == "relational_action_q":
+            elif ranker_kind in {"relational_action_q", "constraint_token_action_q"}:
                 scores = ranker.score_candidates(features)
-                if target_kind == "soft_quality":
+                if target_kind in {"soft_quality", "topk_quality"}:
                     loss = -(soft_target * torch.nn.functional.log_softmax(scores, dim=0)).sum()
                 else:
                     loss = torch.nn.functional.cross_entropy(scores.unsqueeze(0), target)
@@ -914,7 +1202,7 @@ def _train_ranker(
                     ).mean()
             elif ranker_kind == "component":
                 overall_logits, component_logits = ranker(features)
-                if target_kind == "soft_quality":
+                if target_kind in {"soft_quality", "topk_quality"}:
                     loss = -(
                         soft_target * torch.nn.functional.log_softmax(overall_logits, dim=0)
                     ).sum()
@@ -935,7 +1223,7 @@ def _train_ranker(
                 loss = loss + component_loss_weight * torch.stack(component_losses).mean()
             else:
                 logits = ranker(features)
-                if target_kind == "soft_quality":
+                if target_kind in {"soft_quality", "topk_quality"}:
                     loss = -(soft_target * torch.nn.functional.log_softmax(logits, dim=0)).sum()
                 else:
                     loss = torch.nn.functional.cross_entropy(logits.unsqueeze(0), target)
@@ -978,7 +1266,7 @@ def _ranker_scores(
     component_score_weight: float,
     hybrid_pairwise_score_weight: float,
 ) -> torch.Tensor:
-    if ranker_kind == "relational_action_q":
+    if ranker_kind in {"relational_action_q", "constraint_token_action_q"}:
         return ranker.score_candidates(features)
     if ranker_kind in {"hybrid_set", "late_fusion"}:
         return ranker.hybrid_scores(features, pairwise_weight=hybrid_pairwise_score_weight)
@@ -1250,9 +1538,12 @@ def _aggregate(collections: list[dict[str, Any]], workers: int, args: argparse.N
             "feature_normalization": str(args.feature_normalization),
             "ranker_kind": str(args.ranker_kind),
             "encoder_kind": str(args.encoder_kind),
+            "label_kind": str(getattr(args, "label_kind", "immediate")),
+            "continuation_horizon": int(getattr(args, "continuation_horizon", 8)),
             "component_loss_weight": float(args.component_loss_weight),
             "component_score_weight": float(args.component_score_weight),
             "target_kind": str(args.target_kind),
+            "label_kind": str(getattr(args, "label_kind", "immediate")),
             "quality_temperature": float(args.quality_temperature),
             "pairwise_loss_weight_kind": str(args.pairwise_loss_weight_kind),
             "pairwise_listwise_loss_weight": float(args.pairwise_listwise_loss_weight),
@@ -1363,6 +1654,7 @@ def _aggregate(collections: list[dict[str, Any]], workers: int, args: argparse.N
         "component_loss_weight": float(args.component_loss_weight),
         "component_score_weight": float(args.component_score_weight),
         "target_kind": str(args.target_kind),
+        "label_kind": str(getattr(args, "label_kind", "immediate")),
         "quality_temperature": float(args.quality_temperature),
         "pairwise_loss_weight_kind": str(args.pairwise_loss_weight_kind),
         "pairwise_listwise_loss_weight": float(args.pairwise_listwise_loss_weight),
@@ -1408,6 +1700,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- encoder kind: `{payload['encoder_kind']}`",
         f"- ranker kind: `{payload['ranker_kind']}`",
         f"- target kind: `{payload['target_kind']}`",
+        f"- label kind: `{payload.get('label_kind', 'immediate')}`",
         f"- pairwise loss weight: `{payload['pairwise_loss_weight_kind']}`",
         f"- pairwise listwise loss weight: `{payload['pairwise_listwise_loss_weight']}`",
         f"- hybrid scalar loss weight: `{payload['hybrid_scalar_loss_weight']}`",
@@ -1556,6 +1849,8 @@ def main() -> None:
             "feature_mode": str(args.feature_mode),
             "feature_normalization": str(args.feature_normalization),
             "encoder_kind": str(args.encoder_kind),
+            "label_kind": str(getattr(args, "label_kind", "immediate")),
+            "continuation_horizon": int(getattr(args, "continuation_horizon", 8)),
         }
         for case_id in sorted(requested_case_ids)
         for seed in policy_seeds
@@ -1582,6 +1877,7 @@ def main() -> None:
                 "feature_mode": payload["feature_mode"],
                 "ranker_kind": payload["ranker_kind"],
                 "target_kind": payload["target_kind"],
+                "label_kind": payload.get("label_kind", "immediate"),
                 "pairwise_loss_weight_kind": payload["pairwise_loss_weight_kind"],
                 "pairwise_listwise_loss_weight": payload["pairwise_listwise_loss_weight"],
                 "hybrid_scalar_loss_weight": payload["hybrid_scalar_loss_weight"],
