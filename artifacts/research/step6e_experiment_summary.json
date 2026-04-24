@@ -94,10 +94,19 @@
           "variant": "no_boundary"
         }
       ]
+    },
+    {
+      "chance_accuracy": 0.2,
+      "feature_dim": 99,
+      "feature_row_count": 320,
+      "loco_mean_train_accuracy": 1.0,
+      "name": "case_invariance_probe_neutral5",
+      "path": "artifacts/research/step6e_case_invariance_probe_neutral5.json",
+      "random_split_eval_accuracy": 0.9791666865348816
     }
   ],
-  "finding": "LOCO split execution is now parallelized with spawn-safe multiprocessing, and the first action-conditioned delta feature ranker was evaluated with --workers 48 over 12 case/seed collection jobs. Delta features fail micro (rank 3.8958/top1 0.2292) and LOCO (rank 3.7708/top1 0.1042), so simple hand-built next-state deltas do not rescue transfer.",
-  "next": "Do not tune weights. Either design richer learned next-state relation deltas or step back to analyze why E6 candidate-feature path remains best; future wider runs should use the spawn-safe parallel LOCO harness and 48-worker setting.",
+  "finding": "A first learned case-adversarial pairwise objective failed on neutral5: micro rank 4.1500/top1 0.1000 and LOCO rank 4.1500/top1 0.1000, worse than E13 majority_pairwise. E14 case identity leakage is real, but a naive gradient-reversal objective destroys task signal rather than improving transfer.",
+  "next": "Do not tune adversarial weights. Next learned case-invariant work should use structured leave-case contrastive/meta-learning objectives or representation redesign, with the same neutral5 LOCO gate.",
   "runs": [
     {
       "cases": 5,
@@ -316,7 +325,66 @@
       "pool_count": 48,
       "ranker_input": "action_delta_features",
       "workers_requested": 48
+    },
+    {
+      "cases": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "collection_count": 10,
+      "collection_workers_used": 10,
+      "encoder_kind": "typed_constraint_graph",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 4.05,
+      "loco_parallel_workers_used": 5,
+      "loco_regret": 0.22554846299887674,
+      "loco_top1": 0.15,
+      "micro_gate_pass": true,
+      "micro_mean_rank": 1.975,
+      "micro_regret": 0.05938558229541345,
+      "micro_top1": 0.45,
+      "mode": "neutral5_micro_plus_loco",
+      "name": "typed_graph_majority_advantage_neutral5_loco",
+      "path": "artifacts/research/step6e_typed_graph_majority_advantage_neutral5_loco.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "pool_count": 40,
+      "ranker_input": "candidate_features",
+      "workers_requested": 48
+    },
+    {
+      "cases": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "encoder_kind": "typed_constraint_graph",
+      "loco_gate_pass": false,
+      "loco_mean_rank": 4.15,
+      "loco_regret": 0.2558723228598394,
+      "loco_top1": 0.1,
+      "micro_gate_pass": false,
+      "micro_mean_rank": 4.15,
+      "micro_regret": 0.2558723228598394,
+      "micro_top1": 0.1,
+      "mode": "neutral5_micro_plus_loco",
+      "name": "case_adversarial_majority_neutral5_loco",
+      "objective_kind": "case_adversarial_pairwise",
+      "path": "artifacts/research/step6e_case_adversarial_majority_neutral5_loco.json",
+      "policy_seeds": [
+        0,
+        1
+      ],
+      "pool_count": 40,
+      "ranker_input": "candidate_features"
     }
   ],
-  "status": "e10_action_delta_features_parallelized_failed_next_better_delta_or_rethink"
+  "status": "e15_case_adversarial_objective_failed_neutral5"
 }

@@ -154,3 +154,36 @@ E10 also tests a minimal action-conditioned next-state delta representation: can
 | E10 | `action_delta_features` | 3 | 4 | 48 | `3.8958` | `0.2292` | `False` | `3.7708` | `0.1042` | `False` |
 
 Interpretation: simple hand-built action deltas are not enough and underperform the E6 candidate-feature path. The useful part of this round is the execution harness fix plus the negative evidence: the next architecture needs richer learned next-state relation deltas, not manually added scalar deltas or loss/fusion tuning.
+
+## E13 Neutral 5-Case Typed-Graph Majority Advantage Validation
+
+After the no-manual/no-case-specific guardrail, E13 reruns the best active learned route on a neutral 5-case slice (`0,1,2,3,4`) instead of the hard-case-only slice. This uses typed constraint graph candidate generation plus majority cross-continuation pairwise advantage ranking; no hand-built delta features are active.
+
+| run | cases | seeds | pools | micro rank | micro top1 | micro gate | LOCO rank | LOCO top1 | LOCO gate |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
+| E13 neutral5 | 5 | 2 | 40 | `1.9750` | `0.4500` | `True` | `4.0500` | `0.1500` | `False` |
+
+Per-heldout LOCO top1: case 0 `0.0000`, case 1 `0.0000`, case 2 `0.1250`, case 3 `0.3750`, case 4 `0.2500`.
+
+Interpretation: the majority-advantage signal still learns on a neutral slice, so the label direction is not purely hard-case overfitting. However, transfer is still weak. Future work must remain learned/case-agnostic and improve LOCO, not add manual features or specialize to these heldout cases.
+
+## E14 Case-Invariance Probe on Neutral5 Features
+
+E14 is a learned diagnostic, not a manual feature edit. It trains a small probe to predict case identity from the neutral5 candidate feature rows used by E13.
+
+| probe | rows | dim | chance | eval accuracy |
+| --- | ---: | ---: | ---: | ---: |
+| random row split case-ID probe | 320 | 99 | `0.2000` | `0.9792` |
+
+Interpretation: the current candidate feature representation makes case identity almost trivially recoverable. This explains the recurring pattern: majority-advantage labels micro-fit, but LOCO transfer fails. The next valid learned direction is case-invariant representation/objective learning, such as domain-adversarial or leave-case contrastive regularization, not hand-crafted feature removal or case-specific branches.
+
+## E15 Learned Case-Adversarial Pairwise Objective
+
+E15 is the first learned invariance objective after E14 found strong case identity leakage. It adds a gradient-reversal case classifier on the ranker encoding while keeping the majority pairwise advantage task. This is not manual feature removal and does not specialize to cases.
+
+| run | objective | cases | pools | micro rank | micro top1 | micro gate | LOCO rank | LOCO top1 | LOCO gate |
+| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
+| E13 baseline | `majority_pairwise` | 5 | 40 | `1.9750` | `0.4500` | `True` | `4.0500` | `0.1500` | `False` |
+| E15 | `case_adversarial_pairwise` | 5 | 40 | `4.1500` | `0.1000` | `False` | `4.1500` | `0.1000` | `False` |
+
+Interpretation: case identity leakage is real, but a naive adversarial objective is too destructive for the task signal. The next learned-invariance attempt should not tune adversarial weights; it should use a better architecture/objective, such as leave-case contrastive/meta-learning that preserves pairwise advantage structure while reducing case-local shortcuts.

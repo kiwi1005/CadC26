@@ -106,3 +106,37 @@ Acceptance shape:
 3. only after that widen to 5-case and 10-case LOCO with `--workers 48`.
 
 If E11 fails micro, stop architecture implementation and analyze candidate generation / label-policy mismatch again. If E11 passes micro but fails LOCO, the representation still encodes case identity rather than reusable group/anchor constraints.
+
+## E13 neutral-slice guardrail check
+
+After the no-manual/no-case-specific guardrail, the typed-graph majority-advantage route was revalidated on neutral cases `[0,1,2,3,4]` with policy seeds `[0,1]`.
+
+| run | cases | pools | micro rank | micro top1 | LOCO rank | LOCO top1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| E13 neutral5 | 5 | 40 | `1.9750` | `0.4500` | `4.0500` | `0.1500` |
+
+This confirms two things:
+
+1. majority-advantage labels still provide a learnable micro signal outside the hard-case-only slice;
+2. cross-case transfer remains the real blocker.
+
+The next architecture must improve neutral LOCO without hand-authored features or case-specific branches.
+
+## E14 case-invariance probe
+
+A learned probe was trained to predict case identity from the neutral5 candidate feature rows used by E13. The probe reached `0.9792` random-split eval accuracy versus `0.2000` chance.
+
+This provides direct evidence that the current representation encodes case identity very strongly. The recurring micro-pass / LOCO-fail pattern is therefore consistent with case-specific feature leakage rather than lack of label signal.
+
+Next valid direction under the guardrail: learned case-invariant representation/objective learning. Do not manually remove selected features or specialize to failed heldout cases.
+
+## E15 learned case-adversarial objective
+
+A gradient-reversal case-adversarial objective was tested on neutral5 after E14 showed case identity leakage.
+
+| objective | micro rank | micro top1 | LOCO rank | LOCO top1 |
+| --- | ---: | ---: | ---: | ---: |
+| E13 majority pairwise | `1.9750` | `0.4500` | `4.0500` | `0.1500` |
+| E15 case adversarial | `4.1500` | `0.1000` | `4.1500` | `0.1000` |
+
+This fails both micro and LOCO. The diagnosis remains valid, but naive adversarial invariance removes useful task information. Future learned-invariance work should preserve pairwise advantage structure, for example via leave-case contrastive or meta-learning objectives, rather than tuning adversarial strength.

@@ -78,6 +78,12 @@ def _parse_args() -> argparse.Namespace:
         default="candidate_features",
         help="Use case-agnostic learned candidate features or learned graph-action embeddings. Hand-built delta features are intentionally disabled.",
     )
+    parser.add_argument(
+        "--objective-kind",
+        choices=["majority_pairwise", "case_adversarial_pairwise"],
+        default="majority_pairwise",
+        help="Learned objective. case_adversarial_pairwise discourages case identity in ranker encodings without manual feature edits.",
+    )
     parser.add_argument("--max-steps", type=int, default=4)
     parser.add_argument("--max-candidates-per-step", type=int, default=8)
     parser.add_argument("--continuation-horizon", type=int, default=4)
@@ -378,6 +384,21 @@ def _pair_targets(pool: dict[str, Any], policies: list[str]) -> torch.Tensor:
     return targets
 
 
+
+class _GradientReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: float) -> torch.Tensor:
+        ctx.scale = float(scale)
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return -ctx.scale * grad_output, None
+
+
+def _grad_reverse(x: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
+    return _GradientReverse.apply(x, scale)
+
 def _train_pairwise_ranker(pools: list[dict[str, Any]], args: argparse.Namespace):
     torch.manual_seed(int(args.policy_seeds[0] if args.policy_seeds else 0))
     policies = [str(policy) for policy in args.continuation_policies]
@@ -401,10 +422,15 @@ def _train_pairwise_ranker(pools: list[dict[str, Any]], args: argparse.Namespace
 
     feature_dim = len(pools[0]["feature_rows"][0])
     ranker = CandidateRelationalActionQRanker(feature_dim=feature_dim, hidden_dim=64, num_heads=4)
+    objective_kind = str(getattr(args, "objective_kind", "majority_pairwise"))
+    case_ids = sorted({int(pool["case_index"]) for pool in pools})
+    case_to_label = {case_id: idx for idx, case_id in enumerate(case_ids)}
+    case_head = torch.nn.Linear(64, max(len(case_ids), 1)) if objective_kind == "case_adversarial_pairwise" else None
     all_features = torch.tensor([f for pool in pools for f in pool["feature_rows"]], dtype=torch.float32)
     mean = all_features.mean(dim=0)
     std = all_features.std(dim=0).clamp_min(1e-6)
-    optimizer = torch.optim.Adam(ranker.parameters(), lr=float(args.ranker_lr))
+    parameters = list(ranker.parameters()) + ([] if case_head is None else list(case_head.parameters()))
+    optimizer = torch.optim.Adam(parameters, lr=float(args.ranker_lr))
     for _epoch in range(int(args.ranker_epochs)):
         for pool in pools:
             features = torch.tensor(pool["feature_rows"], dtype=torch.float32)
@@ -413,10 +439,19 @@ def _train_pairwise_ranker(pools: list[dict[str, Any]], args: argparse.Namespace
             mask = ~torch.eye(targets.shape[0], dtype=torch.bool)
             logits = ranker.pair_logits(features)
             loss = torch.nn.functional.binary_cross_entropy_with_logits(logits[mask], targets[mask])
+            if case_head is not None and len(case_ids) > 1:
+                encoded = ranker.encode(features).mean(dim=0, keepdim=True)
+                case_label = torch.tensor([case_to_label[int(pool["case_index"])]], dtype=torch.long)
+                # Fixed-strength adversarial objective: learn pairwise advantages while
+                # discouraging case identity in the shared encoding. This is an
+                # architecture/objective test, not a tunable sweep parameter.
+                case_logits = case_head(_grad_reverse(encoded, scale=1.0))
+                loss = loss + torch.nn.functional.cross_entropy(case_logits, case_label)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-    return ranker, {"mean": mean.tolist(), "std": std.tolist(), "kind": "feature_pairwise"}
+    stats = {"mean": mean.tolist(), "std": std.tolist(), "kind": "feature_pairwise", "objective_kind": objective_kind}
+    return ranker, stats
 
 
 def _pairwise_scores(ranker: CandidateRelationalActionQRanker, features: torch.Tensor) -> torch.Tensor:
@@ -548,6 +583,7 @@ def _write_markdown(path: Path, payload: dict[str, Any]) -> None:
         f"- continuation policies: `{payload['continuation_policies']}`",
         f"- feature mode: `{payload['feature_mode']}`",
         f"- ranker input: `{payload['ranker_input']}`",
+        f"- objective kind: `{payload['objective_kind']}`",
         f"- feature normalization: `{payload['feature_normalization']}`",
         f"- pool count: `{payload['pool_count']}`",
         f"- mean selected quality rank: `{ev['mean_selected_quality_rank']:.4f}`",
@@ -620,6 +656,7 @@ def main() -> None:
         "continuation_policies": [str(p) for p in args.continuation_policies],
         "feature_mode": str(args.feature_mode),
         "ranker_input": str(args.ranker_input),
+        "objective_kind": str(args.objective_kind),
         "feature_normalization": str(args.feature_normalization),
         "max_steps": int(args.max_steps),
         "max_candidates_per_step": int(args.max_candidates_per_step),
@@ -644,6 +681,7 @@ def main() -> None:
                 "policy_seeds": payload["policy_seeds"],
                 "pool_count": payload["pool_count"],
                 "ranker_input": payload["ranker_input"],
+                "objective_kind": payload["objective_kind"],
                 "mean_selected_quality_rank": evaluation["mean_selected_quality_rank"],
                 "mean_selected_quality_regret": evaluation["mean_selected_quality_regret"],
                 "oracle_top1_selected_fraction": evaluation["oracle_top1_selected_fraction"],
