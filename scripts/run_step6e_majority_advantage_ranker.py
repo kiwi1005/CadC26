@@ -49,7 +49,7 @@ def _parse_args() -> argparse.Namespace:
             "majority cross-continuation advantage labels instead of hard rollout top1 labels."
         )
     )
-    parser.add_argument("--case-ids", nargs="*", type=int, default=[1, 4, 6])
+    parser.add_argument("--case-ids", nargs="*", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--policy-seeds", nargs="*", type=int, default=[0, 1])
     parser.add_argument(
         "--continuation-policies",
@@ -74,9 +74,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--feature-normalization", choices=["global", "per_case"], default="per_case")
     parser.add_argument(
         "--ranker-input",
-        choices=["candidate_features", "graph_action_embeddings", "joint_typed_graph_action", "action_delta_features"],
+        choices=["candidate_features", "graph_action_embeddings", "joint_typed_graph_action"],
         default="candidate_features",
-        help="Use existing candidate feature rows or direct policy encoder block/target/graph action embeddings.",
+        help="Use case-agnostic learned candidate features or learned graph-action embeddings. Hand-built delta features are intentionally disabled.",
     )
     parser.add_argument("--max-steps", type=int, default=4)
     parser.add_argument("--max-candidates-per-step", type=int, default=8)
@@ -262,7 +262,9 @@ def _collect_case_seed(args_dict: dict[str, Any]) -> dict[str, Any]:
         if ranker_input == "graph_action_embeddings":
             feature_rows = _graph_action_feature_rows(case, policy, role_evidence, state, selected)
         elif ranker_input == "action_delta_features":
-            feature_rows = _action_delta_feature_rows(case, state, selected)
+            raise ValueError(
+                "action_delta_features is deprecated: no hand-built delta features or case-specific adjustments"
+            )
         else:
             feature_rows = _build_pool_features(case, state, selected, feature_mode=str(args_dict["feature_mode"]))
         candidate_rows = []
