@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ruff: noqa: E402
+# ruff: noqa: E402,E501,I001
 from __future__ import annotations
 
 import argparse
@@ -33,7 +33,6 @@ from puzzleplace.models import HierarchicalSetPolicy  # noqa: E402
 from puzzleplace.roles import label_case_roles  # noqa: E402
 from puzzleplace.rollout.semantic import (  # noqa: E402
     _forced_progress_action,
-    _score_action,
     _seed_first_action,
     _semantic_heuristic_score,
 )
@@ -95,7 +94,7 @@ def _state_from_record(record: BCStepRecord) -> ExecutionState:
         shape_assigned=set(placed),
         semantic_placed=set(placed),
         physically_placed=set(placed),
-        step=record.state_step,
+        step=len(placed),
         last_rollout_mode="semantic",
     )
 
@@ -134,9 +133,10 @@ def _set_cross_entropy(logits: torch.Tensor, target_ids: list[int]) -> torch.Ten
 
 
 def _masked_block_logits(record: BCStepRecord, logits: torch.Tensor) -> torch.Tensor:
-    if not record.legal_block_mask:
+    legal_block_mask = getattr(record, "legal_block_mask", None)
+    if not legal_block_mask:
         return logits
-    mask = torch.tensor(record.legal_block_mask, dtype=torch.bool, device=logits.device)
+    mask = torch.tensor(legal_block_mask, dtype=torch.bool, device=logits.device)
     if mask.ndim == 1 and mask.numel() == logits.shape[0] and mask.any():
         return logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
     return logits
@@ -160,7 +160,7 @@ def _train_hierarchical_policy(
                 record.case,
                 role_evidence=record.role_evidence,
                 placements=record.placements,
-                state_step=record.state_step,
+                state_step=len(record.placements),
             )
             targets = action_to_targets(record.action)
             block_index = int(targets["block_index"])

@@ -69,7 +69,22 @@ def evaluate_positions(
         median_runtime=median_runtime,
     )
     legality = summarize_hard_legality(case, positions)
-    return {"official": asdict(metrics), "legality": asdict(legality), "baseline": baseline}
+    official = asdict(metrics)
+    quality = {
+        "quality_cost_runtime1": float(metrics.cost),
+        "cost": float(metrics.cost),
+        "official_cost_raw": float(metrics.cost),
+        "HPWLgap": float(metrics.hpwl_gap),
+        "Areagap_bbox": float(metrics.area_gap),
+        "Violationsrelative": float(metrics.violations_relative),
+        "feasible": bool(metrics.is_feasible),
+    }
+    return {
+        "official": official,
+        "legality": asdict(legality),
+        "baseline": baseline,
+        "quality": quality,
+    }
 
 
 class OfficialEvaluatorWrapper:
