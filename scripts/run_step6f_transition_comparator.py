@@ -10,7 +10,7 @@ import os
 import random
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,8 +25,10 @@ for path in (ROOT, SRC):
 
 from puzzleplace.actions import (  # noqa: E402
     ActionExecutor,
+    ActionPrimitive,
     ExecutionState,
-    canonical_action_key,
+    TypedAction,
+    actions_match,
     generate_candidate_actions,
 )
 from puzzleplace.data import FloorSetCase  # noqa: E402
@@ -36,17 +38,28 @@ from puzzleplace.models import (  # noqa: E402
     SharedEncoderTransitionComparator,
     build_transition_payload,
 )
+from puzzleplace.models import HierarchicalSetPolicy  # noqa: E402
 from puzzleplace.repair.finalizer import finalize_layout  # noqa: E402
 from puzzleplace.roles import label_case_roles  # noqa: E402
-from puzzleplace.train import build_bc_dataset_from_cases, load_validation_cases  # noqa: E402
-
-from scripts.run_step6_hierarchical_rollout_control_audit import (  # noqa: E402
-    RolloutJob,
+from puzzleplace.rollout.semantic import (  # noqa: E402
     _forced_progress_action,
-    _score_hierarchical_action,
     _seed_first_action,
-    _train_hierarchical_policy,
+    _semantic_heuristic_score,
 )
+from puzzleplace.train import BCStepRecord, build_bc_dataset_from_cases, load_validation_cases  # noqa: E402
+from puzzleplace.train.dataset_bc import action_to_targets  # noqa: E402
+
+
+@dataclass(frozen=True, slots=True)
+class RolloutJob:
+    case_id: int
+    seed: int
+    hidden_dim: int
+    epochs: int
+    lr: float
+    primitive_set_weight: float
+    block_weight: float
+    encoder_kind: str = "typed_constraint_graph"
 
 
 def _parse_args() -> argparse.Namespace:
@@ -111,6 +124,18 @@ def _thread_limit() -> None:
     torch.set_num_threads(1)
 
 
+def _canonical_action_key(action: TypedAction) -> str:
+    parts = [
+        action.primitive.value,
+        str(int(action.block_index)),
+        "none" if action.target_index is None else str(int(action.target_index)),
+        "none" if action.boundary_code is None else str(int(action.boundary_code)),
+    ]
+    for value in (action.x, action.y, action.w, action.h, action.dx, action.dy):
+        parts.append("none" if value is None else f"{float(value):.6g}")
+    return "|".join(parts)
+
+
 def _clone_state(state: ExecutionState) -> ExecutionState:
     return ExecutionState(
         placements=dict(state.placements),
@@ -129,6 +154,133 @@ def _target_blind_case(case: FloorSetCase) -> FloorSetCase:
     """Return a case view for policy/candidate/payload paths with no targets."""
 
     return replace(case, target_positions=None)
+
+
+def _state_from_record(record: BCStepRecord) -> ExecutionState:
+    placed = dict(record.placements)
+    return ExecutionState(
+        placements=placed,
+        proposed_positions=placed,
+        shape_assigned=set(placed),
+        semantic_placed=set(placed),
+        physically_placed=set(placed),
+        step=len(placed),
+        last_rollout_mode="semantic",
+    )
+
+
+def _acceptable_primitive_set(record: BCStepRecord) -> list[int]:
+    state = _state_from_record(record)
+    remaining = [idx for idx in range(record.case.block_count) if idx not in state.placements]
+    candidates = generate_candidate_actions(
+        record.case,
+        state,
+        remaining_blocks=remaining,
+        mode="semantic",
+    )
+    target_block_candidates = [
+        candidate for candidate in candidates if candidate.block_index == record.action.block_index
+    ]
+    semantic_matches = [
+        candidate for candidate in candidates if actions_match(candidate, record.action, mode="semantic")
+    ]
+    target_primitive = list(ActionPrimitive).index(record.action.primitive)
+    return sorted(
+        {
+            list(ActionPrimitive).index(candidate.primitive)
+            for candidate in (semantic_matches or target_block_candidates)
+        }
+        or {target_primitive}
+    )
+
+
+def _set_cross_entropy(logits: torch.Tensor, target_ids: list[int]) -> torch.Tensor:
+    ids = sorted({int(idx) for idx in target_ids if 0 <= int(idx) < int(logits.shape[0])})
+    if not ids:
+        raise ValueError("set loss requires at least one valid target id")
+    log_probs = torch.nn.functional.log_softmax(logits, dim=0)
+    return -torch.logsumexp(log_probs[torch.tensor(ids, dtype=torch.long)], dim=0)
+
+
+def _train_hierarchical_policy(
+    dataset: list[BCStepRecord],
+    job: RolloutJob,
+) -> tuple[HierarchicalSetPolicy, dict[str, Any], list[list[int]]]:
+    torch.manual_seed(job.seed)
+    policy = HierarchicalSetPolicy(hidden_dim=job.hidden_dim, encoder_kind=job.encoder_kind)
+    primitive_sets = [_acceptable_primitive_set(record) for record in dataset]
+    optimizer = torch.optim.Adam(policy.parameters(), lr=job.lr)
+    initial_loss = 0.0
+    final_loss = 0.0
+    for epoch in range(job.epochs):
+        epoch_loss = 0.0
+        for step, record in enumerate(dataset):
+            optimizer.zero_grad(set_to_none=True)
+            output = policy(
+                record.case,
+                role_evidence=record.role_evidence,
+                placements=record.placements,
+                state_step=len(record.placements),
+            )
+            targets = action_to_targets(record.action)
+            block_index = int(targets["block_index"])
+            block_loss = torch.nn.functional.cross_entropy(
+                output.block_logits.unsqueeze(0), torch.tensor([block_index])
+            )
+            primitive_loss = _set_cross_entropy(
+                output.primitive_logits_by_block[block_index], primitive_sets[step]
+            )
+            loss = job.block_weight * block_loss + job.primitive_set_weight * primitive_loss
+            loss.backward()
+            optimizer.step()
+            epoch_loss += float(loss.item())
+        if epoch == 0:
+            initial_loss = epoch_loss / max(len(dataset), 1)
+        final_loss = epoch_loss / max(len(dataset), 1)
+    return (
+        policy,
+        {
+            "initial_loss": initial_loss,
+            "final_loss": final_loss,
+            "dataset_size": len(dataset),
+            "epochs": job.epochs,
+            "hidden_dim": job.hidden_dim,
+            "seed": job.seed,
+            "primitive_set_weight": job.primitive_set_weight,
+            "block_weight": job.block_weight,
+            "encoder_kind": job.encoder_kind,
+        },
+        primitive_sets,
+    )
+
+
+def _score_hierarchical_action(
+    case: FloorSetCase,
+    policy: HierarchicalSetPolicy | None,
+    role_evidence,
+    state: ExecutionState,
+    action: TypedAction,
+) -> tuple[float, dict[str, Any]]:
+    heuristic = _semantic_heuristic_score(action)
+    if policy is None:
+        return heuristic, {"components_used": ["semantic_heuristic"]}
+    output = policy(
+        case,
+        role_evidence=role_evidence,
+        placements=state.placements,
+        state_step=state.step,
+    )
+    primitive_id = list(ActionPrimitive).index(action.primitive)
+    block_logit = float(output.block_logits[action.block_index].item())
+    primitive_logit = float(
+        output.primitive_logits_by_block[action.block_index, primitive_id].item()
+    )
+    target_logit = 0.0
+    if action.target_index is not None:
+        target_logit = float(output.target_logits[action.block_index, action.target_index].item())
+    return block_logit + primitive_logit + target_logit + heuristic, {
+        "components_used": ["block", "primitive_by_block", "target", "semantic_heuristic"],
+    }
 
 
 def _quality_from_positions(
@@ -239,7 +391,7 @@ def _continue_after_action(
     seed: int,
     pool_step: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    candidate_key = canonical_action_key(action)
+    candidate_key = _canonical_action_key(action)
     trial = _clone_state(state)
     executor = ActionExecutor(blind_case)
     executor.apply(trial, action)
@@ -407,7 +559,7 @@ def _collect_case_seed(args_dict: dict[str, Any]) -> dict[str, Any]:
             candidate_rows.append(
                 {
                     "policy_rank": policy_rank,
-                    "action_key": canonical_action_key(candidate),
+                    "action_key": _canonical_action_key(candidate),
                     "primitive": candidate.primitive.value,
                     "block_index": int(candidate.block_index),
                     "target_index": None if candidate.target_index is None else int(candidate.target_index),
