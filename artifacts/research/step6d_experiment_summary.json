@@ -1,0 +1,520 @@
+{
+  "comparisons": {
+    "rel_action_q_vs_lane13_10case": {
+      "mean_rank": -0.8291666666666666,
+      "regret": -0.30250019978465226,
+      "top1": 0.041666666666666644
+    },
+    "rel_action_q_vs_lane13_5case": {
+      "mean_rank": -0.875,
+      "regret": -0.45393262781673965,
+      "top1": 0.04999999999999996
+    },
+    "target_soft_vs_lane13_5case": {
+      "mean_rank": 0.7916666666666661,
+      "regret": 0.09249333264571191,
+      "top1": 0.0
+    }
+  },
+  "interpretation": [
+    "Target-only soft_quality on scalar ranker worsened 5-case rank/regret, so target brittleness alone is not the main blocker.",
+    "Relational action-Q with soft_quality and no pairwise auxiliary improved both 5-case and 10-case over Lane 13 on all three aggregate metrics, but still failed the LOCO gate.",
+    "Pairwise auxiliary loss hurt same-case micro-overfit in the first implementation, so it should remain disabled until pairwise target calibration is diagnosed.",
+    "Remaining blocker is transfer/top1 reliability: 10-case still has zero-top1 held-out cases 1, 4, and 6."
+  ],
+  "runs": {
+    "lane13_loco10": {
+      "cases": 10,
+      "gate_pass": false,
+      "mean_rank": 6.254166666666666,
+      "mode": "leave_one_case_out",
+      "path": "artifacts/research/step6c_relation_aware_per_case_loco10.json",
+      "per_case": [
+        {
+          "case_id": 0,
+          "component_regret": {
+            "Areagap_bbox": 0.10848580518936184,
+            "HPWLgap": 0.09872946255784798,
+            "Violationsrelative": 0.01992753623188408
+          },
+          "rank": 7.75,
+          "regret": 0.9381337927495449,
+          "top1": 0.0
+        },
+        {
+          "case_id": 1,
+          "component_regret": {
+            "Areagap_bbox": 0.09930267027146666,
+            "HPWLgap": 0.0880165553785004,
+            "Violationsrelative": 0.012345679012345678
+          },
+          "rank": 5.333333333333333,
+          "regret": 1.0969921208578473,
+          "top1": 0.125
+        },
+        {
+          "case_id": 2,
+          "component_regret": {
+            "Areagap_bbox": 0.45191184799357836,
+            "HPWLgap": 0.0708099661769096,
+            "Violationsrelative": 0.03858024691358025
+          },
+          "rank": 7.125,
+          "regret": 2.119488300740473,
+          "top1": 0.125
+        },
+        {
+          "case_id": 3,
+          "component_regret": {
+            "Areagap_bbox": 0.30212579333178385,
+            "HPWLgap": -0.01375194436746426,
+            "Violationsrelative": 0.028846153846153837
+          },
+          "rank": 7.625,
+          "regret": 1.458894059750287,
+          "top1": 0.0
+        },
+        {
+          "case_id": 4,
+          "component_regret": {
+            "Areagap_bbox": -0.038948691541712925,
+            "HPWLgap": -0.009765665461006545,
+            "Violationsrelative": 0.00972222222222222
+          },
+          "rank": 3.5,
+          "regret": 0.19052404219365573,
+          "top1": 0.16666666666666666
+        },
+        {
+          "case_id": 5,
+          "component_regret": {
+            "Areagap_bbox": 0.06474868133237953,
+            "HPWLgap": -0.016297928511493587,
+            "Violationsrelative": 0.02355072463768115
+          },
+          "rank": 6.166666666666667,
+          "regret": 2.022328311577265,
+          "top1": 0.0
+        },
+        {
+          "case_id": 6,
+          "component_regret": {
+            "Areagap_bbox": 0.06617370189038878,
+            "HPWLgap": -0.00012691065481510813,
+            "Violationsrelative": 0.019345238095238096
+          },
+          "rank": 6.375,
+          "regret": 0.8143159141938127,
+          "top1": 0.16666666666666666
+        },
+        {
+          "case_id": 7,
+          "component_regret": {
+            "Areagap_bbox": 0.4362445585512193,
+            "HPWLgap": 0.07152452071024172,
+            "Violationsrelative": 0.03282828282828284
+          },
+          "rank": 9.458333333333334,
+          "regret": 2.4482870641716943,
+          "top1": 0.041666666666666664
+        },
+        {
+          "case_id": 8,
+          "component_regret": {
+            "Areagap_bbox": -0.15136188497834402,
+            "HPWLgap": -0.03874521535015666,
+            "Violationsrelative": 0.01785714285714285
+          },
+          "rank": 4.5,
+          "regret": 0.48722996531880663,
+          "top1": 0.25
+        },
+        {
+          "case_id": 9,
+          "component_regret": {
+            "Areagap_bbox": 0.6944237953696754,
+            "HPWLgap": 0.03807387241371072,
+            "Violationsrelative": 0.0059523809523809494
+          },
+          "rank": 4.708333333333333,
+          "regret": 0.08034991736749635,
+          "top1": 0.16666666666666666
+        }
+      ],
+      "pools": 240,
+      "ranker_kind": "scalar",
+      "regret": 1.1656543488920883,
+      "relational_pairwise_loss_weight": null,
+      "target_kind": "oracle_ce",
+      "top1": 0.10416666666666667,
+      "zero_top1_cases": [
+        0,
+        3,
+        5
+      ]
+    },
+    "lane13_loco5": {
+      "cases": 5,
+      "gate_pass": false,
+      "mean_rank": 5.683333333333334,
+      "mode": "leave_one_case_out",
+      "path": "artifacts/research/step6c_relation_aware_per_case_loco5.json",
+      "per_case": [
+        {
+          "case_id": 0,
+          "component_regret": {
+            "Areagap_bbox": -0.004710814422028707,
+            "HPWLgap": 0.08625325015371114,
+            "Violationsrelative": 0.009057971014492761
+          },
+          "rank": 5.75,
+          "regret": 0.37823932673423716,
+          "top1": 0.125
+        },
+        {
+          "case_id": 1,
+          "component_regret": {
+            "Areagap_bbox": 0.04703505929876381,
+            "HPWLgap": 0.07099227215812859,
+            "Violationsrelative": 0.0
+          },
+          "rank": 3.4583333333333335,
+          "regret": 0.2464228102158549,
+          "top1": 0.20833333333333334
+        },
+        {
+          "case_id": 2,
+          "component_regret": {
+            "Areagap_bbox": 0.45761997775389324,
+            "HPWLgap": 0.153083183839497,
+            "Violationsrelative": 0.055555555555555546
+          },
+          "rank": 9.958333333333334,
+          "regret": 2.8687721221280857,
+          "top1": 0.0
+        },
+        {
+          "case_id": 3,
+          "component_regret": {
+            "Areagap_bbox": 0.0862124246686926,
+            "HPWLgap": 0.019435860770022257,
+            "Violationsrelative": 0.016025641025641028
+          },
+          "rank": 4.541666666666667,
+          "regret": 0.6821151974147578,
+          "top1": 0.375
+        },
+        {
+          "case_id": 4,
+          "component_regret": {
+            "Areagap_bbox": 0.09272981032158856,
+            "HPWLgap": -0.005843457835785326,
+            "Violationsrelative": 0.013888888888888886
+          },
+          "rank": 4.708333333333333,
+          "regret": 0.5465494219035448,
+          "top1": 0.125
+        }
+      ],
+      "pools": 120,
+      "ranker_kind": "scalar",
+      "regret": 0.9444197756792961,
+      "relational_pairwise_loss_weight": null,
+      "target_kind": "oracle_ce",
+      "top1": 0.16666666666666669,
+      "zero_top1_cases": [
+        2
+      ]
+    },
+    "rel_action_q_loco10": {
+      "cases": 10,
+      "gate_pass": false,
+      "mean_rank": 5.425,
+      "mode": "leave_one_case_out",
+      "path": "artifacts/research/step6d_relational_action_q_loco10.json",
+      "per_case": [
+        {
+          "case_id": 0,
+          "component_regret": {
+            "Areagap_bbox": 0.07062723290286861,
+            "HPWLgap": 0.2688248902916635,
+            "Violationsrelative": 0.009057971014492757
+          },
+          "rank": 6.833333333333333,
+          "regret": 0.7847841107501935,
+          "top1": 0.041666666666666664
+        },
+        {
+          "case_id": 1,
+          "component_regret": {
+            "Areagap_bbox": 0.12639617105986276,
+            "HPWLgap": 0.012510054099939272,
+            "Violationsrelative": 0.004629629629629627
+          },
+          "rank": 5.375,
+          "regret": 0.5787449128458446,
+          "top1": 0.0
+        },
+        {
+          "case_id": 2,
+          "component_regret": {
+            "Areagap_bbox": 0.09967499364445094,
+            "HPWLgap": 0.14045948925415583,
+            "Violationsrelative": 0.023148148148148164
+          },
+          "rank": 5.208333333333333,
+          "regret": 1.1095843293884904,
+          "top1": 0.16666666666666666
+        },
+        {
+          "case_id": 3,
+          "component_regret": {
+            "Areagap_bbox": 0.014544423510873095,
+            "HPWLgap": -0.035945716825384465,
+            "Violationsrelative": 0.011217948717948711
+          },
+          "rank": 3.3333333333333335,
+          "regret": 0.28054715150704973,
+          "top1": 0.3333333333333333
+        },
+        {
+          "case_id": 4,
+          "component_regret": {
+            "Areagap_bbox": 0.09326150856112654,
+            "HPWLgap": 0.004429734274137583,
+            "Violationsrelative": 0.030555555555555548
+          },
+          "rank": 5.416666666666667,
+          "regret": 1.276290584729425,
+          "top1": 0.0
+        },
+        {
+          "case_id": 5,
+          "component_regret": {
+            "Areagap_bbox": 0.006263168529266634,
+            "HPWLgap": -0.034278147121786416,
+            "Violationsrelative": 0.021739130434782594
+          },
+          "rank": 5.166666666666667,
+          "regret": 1.7106592880440488,
+          "top1": 0.3333333333333333
+        },
+        {
+          "case_id": 6,
+          "component_regret": {
+            "Areagap_bbox": 0.1896697021054228,
+            "HPWLgap": -6.981760343867845e-05,
+            "Violationsrelative": 0.019345238095238096
+          },
+          "rank": 7.25,
+          "regret": 1.0496157114213212,
+          "top1": 0.0
+        },
+        {
+          "case_id": 7,
+          "component_regret": {
+            "Areagap_bbox": 0.10854006996853817,
+            "HPWLgap": 0.01783607578657731,
+            "Violationsrelative": 0.016414141414141437
+          },
+          "rank": 5.125,
+          "regret": 0.9292971986155744,
+          "top1": 0.125
+        },
+        {
+          "case_id": 8,
+          "component_regret": {
+            "Areagap_bbox": -0.08877247009274729,
+            "HPWLgap": -0.02008483354136829,
+            "Violationsrelative": 0.02232142857142856
+          },
+          "rank": 5.875,
+          "regret": 0.8894575607762261,
+          "top1": 0.25
+        },
+        {
+          "case_id": 9,
+          "component_regret": {
+            "Areagap_bbox": -0.10574014400103342,
+            "HPWLgap": 0.0034702510446660653,
+            "Violationsrelative": 0.0
+          },
+          "rank": 4.666666666666667,
+          "regret": 0.022560642996185837,
+          "top1": 0.20833333333333334
+        }
+      ],
+      "pools": 240,
+      "ranker_kind": "relational_action_q",
+      "regret": 0.863154149107436,
+      "relational_pairwise_loss_weight": 0.0,
+      "target_kind": "soft_quality",
+      "top1": 0.14583333333333331,
+      "zero_top1_cases": [
+        1,
+        4,
+        6
+      ]
+    },
+    "rel_action_q_loco5": {
+      "cases": 5,
+      "gate_pass": false,
+      "mean_rank": 4.808333333333334,
+      "mode": "leave_one_case_out",
+      "path": "artifacts/research/step6d_relational_action_q_loco5.json",
+      "per_case": [
+        {
+          "case_id": 0,
+          "component_regret": {
+            "Areagap_bbox": 0.07509558305787357,
+            "HPWLgap": 0.14122255723084431,
+            "Violationsrelative": 0.0054347826086956486
+          },
+          "rank": 4.791666666666667,
+          "regret": 0.49791590456640716,
+          "top1": 0.25
+        },
+        {
+          "case_id": 1,
+          "component_regret": {
+            "Areagap_bbox": 0.05080404254974074,
+            "HPWLgap": 0.04610479587293015,
+            "Violationsrelative": 0.00617283950617283
+          },
+          "rank": 4.5,
+          "regret": 0.5225845680231308,
+          "top1": 0.25
+        },
+        {
+          "case_id": 2,
+          "component_regret": {
+            "Areagap_bbox": -0.018853360010818197,
+            "HPWLgap": 0.10844943417845217,
+            "Violationsrelative": 0.004629629629629636
+          },
+          "rank": 3.2916666666666665,
+          "regret": 0.27241028922753024,
+          "top1": 0.20833333333333334
+        },
+        {
+          "case_id": 3,
+          "component_regret": {
+            "Areagap_bbox": 0.0930059500112619,
+            "HPWLgap": -0.015303985630064095,
+            "Violationsrelative": 0.024038461538461533
+          },
+          "rank": 6.75,
+          "regret": 0.869572382648335,
+          "top1": 0.08333333333333333
+        },
+        {
+          "case_id": 4,
+          "component_regret": {
+            "Areagap_bbox": 0.0860276255564107,
+            "HPWLgap": 0.06164299180501694,
+            "Violationsrelative": 0.0013888888888888885
+          },
+          "rank": 4.708333333333333,
+          "regret": 0.2899525948473794,
+          "top1": 0.2916666666666667
+        }
+      ],
+      "pools": 120,
+      "ranker_kind": "relational_action_q",
+      "regret": 0.4904871478625565,
+      "relational_pairwise_loss_weight": 0.0,
+      "target_kind": "soft_quality",
+      "top1": 0.21666666666666665,
+      "zero_top1_cases": []
+    },
+    "rel_action_q_micro5": {
+      "cases": 5,
+      "gate_pass": null,
+      "mean_rank": 2.9916666666666667,
+      "mode": "micro_overfit",
+      "path": "artifacts/research/step6d_relational_action_q_micro5_no_pair.json",
+      "per_case": [],
+      "pools": 120,
+      "ranker_kind": "relational_action_q",
+      "regret": 0.2100253893181626,
+      "relational_pairwise_loss_weight": 0.0,
+      "target_kind": "soft_quality",
+      "top1": 0.3,
+      "zero_top1_cases": []
+    },
+    "target_soft_loco5": {
+      "cases": 5,
+      "gate_pass": false,
+      "mean_rank": 6.475,
+      "mode": "leave_one_case_out",
+      "path": "artifacts/research/step6d_target_soft_quality_loco5.json",
+      "per_case": [
+        {
+          "case_id": 0,
+          "component_regret": {
+            "Areagap_bbox": 0.0816164930172271,
+            "HPWLgap": 0.19800139383024254,
+            "Violationsrelative": 0.0054347826086956486
+          },
+          "rank": 5.708333333333333,
+          "regret": 0.5959356485285302,
+          "top1": 0.20833333333333334
+        },
+        {
+          "case_id": 1,
+          "component_regret": {
+            "Areagap_bbox": 0.09352552797875713,
+            "HPWLgap": 0.17221401681131532,
+            "Violationsrelative": 0.0
+          },
+          "rank": 4.875,
+          "regret": 0.5982239241800905,
+          "top1": 0.16666666666666666
+        },
+        {
+          "case_id": 2,
+          "component_regret": {
+            "Areagap_bbox": 0.2802061461759784,
+            "HPWLgap": 0.12046404575982343,
+            "Violationsrelative": 0.049382716049382734
+          },
+          "rank": 8.583333333333334,
+          "regret": 2.2057193758797986,
+          "top1": 0.0
+        },
+        {
+          "case_id": 3,
+          "component_regret": {
+            "Areagap_bbox": 0.18476588299993382,
+            "HPWLgap": 0.00964767381250318,
+            "Violationsrelative": 0.024038461538461533
+          },
+          "rank": 6.75,
+          "regret": 1.0998822336478824,
+          "top1": 0.16666666666666666
+        },
+        {
+          "case_id": 4,
+          "component_regret": {
+            "Areagap_bbox": 0.1748435968496751,
+            "HPWLgap": 0.057379871715523355,
+            "Violationsrelative": 0.00972222222222222
+          },
+          "rank": 6.458333333333333,
+          "regret": 0.6848043593887384,
+          "top1": 0.2916666666666667
+        }
+      ],
+      "pools": 120,
+      "ranker_kind": "scalar",
+      "regret": 1.036913108325008,
+      "relational_pairwise_loss_weight": null,
+      "target_kind": "soft_quality",
+      "top1": 0.16666666666666669,
+      "zero_top1_cases": [
+        2
+      ]
+    }
+  },
+  "status": "complete_with_gate_blocker"
+}

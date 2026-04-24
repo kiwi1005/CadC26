@@ -69,6 +69,12 @@ class TypedActionPolicy(nn.Module):
         *,
         role_evidence: list[WeakRoleEvidence] | None = None,
         placements: dict[int, tuple[float, float, float, float]] | None = None,
+        state_step: int | None = None,
     ) -> DecoderOutput:
-        encoded = self.encoder(case, role_evidence=role_evidence, placements=placements)
+        encoded = self.encoder(
+            case,
+            role_evidence=role_evidence,
+            placements=placements,
+            state_step=state_step,
+        )
         return self.decoder(encoded)
