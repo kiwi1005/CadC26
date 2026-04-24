@@ -90,3 +90,34 @@ def test_bc_checkpoint_round_trip_keeps_action_scores(tmp_path) -> None:
     )
     assert torch.allclose(original.primitive_logits, restored.primitive_logits)
     assert torch.allclose(original.block_logits, restored.block_logits)
+
+
+def test_bc_checkpoint_load_tolerates_input_dim_extension(tmp_path) -> None:
+    policy, _summary = run_bc_overfit(
+        _dataset(),
+        hidden_dim=32,
+        lr=1e-2,
+        epochs=3,
+        seed=0,
+    )
+    checkpoint_path = tmp_path / "legacy_policy.pt"
+    case = _make_case()
+    state_dict = policy.state_dict()
+    state_dict["encoder.input_proj.0.weight"] = state_dict[
+        "encoder.input_proj.0.weight"
+    ][:, : state_dict["encoder.input_proj.0.weight"].shape[1] - 1]
+    torch.save(
+        {
+            "hidden_dim": 32,
+            "state_dict": state_dict,
+            "metadata": {},
+        },
+        checkpoint_path,
+    )
+    reloaded = load_policy_checkpoint(checkpoint_path)
+    replay = reloaded(
+        case,
+        role_evidence=label_case_roles(case),
+        placements={},
+    )
+    assert replay.block_logits.shape == (2,)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -325,9 +326,61 @@ def save_policy_checkpoint(
     )
 
 
+def _adapt_checkpoint_parameter(
+    checkpoint_value: torch.Tensor,
+    current_value: torch.Tensor,
+) -> torch.Tensor | None:
+    if checkpoint_value.ndim == 2 and current_value.ndim == 2:
+        if (
+            checkpoint_value.shape[0] == current_value.shape[0]
+            and checkpoint_value.shape[1] + 1 == current_value.shape[1]
+        ):
+            adapted = torch.zeros_like(current_value)
+            adapted[:, : checkpoint_value.shape[1]] = checkpoint_value
+            return adapted
+    if checkpoint_value.ndim == 1 and current_value.ndim == 1:
+        if checkpoint_value.shape[0] + 1 == current_value.shape[0]:
+            adapted = torch.zeros_like(current_value)
+            adapted[: checkpoint_value.shape[0]] = checkpoint_value
+            return adapted
+    return None
+
+
 def load_policy_checkpoint(path: str | Path) -> TypedActionPolicy:
     payload = torch.load(Path(path), map_location="cpu")
     policy = TypedActionPolicy(hidden_dim=int(payload["hidden_dim"]))
-    policy.load_state_dict(payload["state_dict"])
+    checkpoint_state = payload["state_dict"]
+    current_state = policy.state_dict()
+    compatible_state: dict[str, torch.Tensor] = {}
+    incompatible = []
+
+    for key, checkpoint_value in checkpoint_state.items():
+        if not isinstance(checkpoint_value, torch.Tensor):
+            continue
+        current_value = current_state.get(key)
+        if not isinstance(current_value, torch.Tensor):
+            continue
+        if checkpoint_value.shape == current_value.shape:
+            compatible_state[key] = checkpoint_value
+            continue
+
+        adapted_value = _adapt_checkpoint_parameter(
+            checkpoint_value,
+            current_value,
+        )
+        if adapted_value is not None:
+            compatible_state[key] = adapted_value
+            continue
+        incompatible.append(key)
+
+    if incompatible:
+        warnings.warn(
+            "load_policy_checkpoint skipped incompatible tensors: "
+            + ", ".join(incompatible),
+            UserWarning,
+            stacklevel=2,
+        )
+
+    policy.load_state_dict(compatible_state, strict=False)
     policy.eval()
     return policy
