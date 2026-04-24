@@ -21,4 +21,5 @@ Historical artifacts from E10 remain preserved as negative evidence, but that ro
 Next valid direction:
 
 - Learned relation-delta architecture with no hand-authored delta scalars and no per-case branching.
-- Acceptance gate should compare against E6 (`LOCO rank 3.4583 / top1 0.2500`) on a neutral slice before any wider run.
+- Acceptance gate should compare against the latest **primary baseline on neutral5**, not the historical E6 lane, before any wider run.
+  - Current primary neutral baseline (as of this guardrail refresh): micro rank `1.9750` / top1 `0.4500`, LOCO rank `4.0500` / top1 `0.1500`.
