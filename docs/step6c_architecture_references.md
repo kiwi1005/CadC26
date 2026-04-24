@@ -446,4 +446,4 @@ Lane 25 parallelizes LOCO split training using spawn-safe multiprocessing and te
 | E6 candidate features | `candidate_features` | 2 | 24 | `1.9167` | `0.4583` | `3.4583` | `0.2500` |
 | E10 action deltas | `action_delta_features` | 4 | 48 | `3.8958` | `0.2292` | `3.7708` | `0.1042` |
 
-Conclusion: hand-built next-state deltas fail. Future delta work should be learned and relation-aware, while continuing to use the parallelized 48-worker harness for wider validation.
+Conclusion: hand-built next-state deltas fail. Future delta work should be learned and relation-aware. Keep the parallel harness, but default to serial smoke runs and reserve `--workers 48` for independent case/seed or LOCO split jobs after the relevant gate passes.

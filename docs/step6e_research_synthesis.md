@@ -81,13 +81,20 @@ E9 and E10 failed because they used either static pre-action graph relations or 
 
 E10 fixed a practical research bottleneck: LOCO split training now uses spawn-safe multiprocessing to avoid PyTorch autograd + fork failures. The E10 run was launched with `--workers 48`; the slice exposed 12 independent collection jobs and 3 LOCO split jobs.
 
-Future wider validations should use:
+Worker policy after the Step6F transition checkpoint:
+
+1. Step6 research runners default to serial smoke mode (`--workers 1`).
+2. Use `--workers 48` only after the relevant micro/neutral smoke gate is meaningful.
+3. Use high worker counts only for independent case/seed collections or LOCO split jobs; the harness caps actual workers to the number of independent jobs.
+4. When the machine should be fully saturated, widen by adding real independent cases/seeds/splits rather than parameter-grid tuning.
+
+Future wider validations may use:
 
 ```bash
 --workers 48
 ```
 
-and should increase independent jobs via more cases/seeds/splits when the machine should be fully saturated.
+but only under that policy.
 
 ## Recommended next experiment
 

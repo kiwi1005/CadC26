@@ -8,6 +8,7 @@ New constraint from the research loop:
 - Do not specialize methods to individual cases or hard-case IDs.
 - Do not tune fusion/loss weights as the main path.
 - Future experiments must be case-agnostic learned architecture/objective changes and must validate with LOCO before widening.
+- Keep Step6 runners in serial smoke mode by default; use `--workers 48` only for independent case/seed or LOCO split jobs after the relevant smoke gate.
 
 Implementation guardrail applied:
 
