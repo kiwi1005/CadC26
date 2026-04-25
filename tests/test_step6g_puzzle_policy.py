@@ -3,8 +3,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from puzzleplace.actions import ExecutionState
+from puzzleplace.actions import ActionPrimitive, ExecutionState, TypedAction
 from puzzleplace.research.puzzle_candidate_payload import (
+    PuzzleCandidateDescriptor,
     build_puzzle_candidate_descriptors,
     choose_expert_descriptor,
     heuristic_scores,
@@ -48,3 +49,32 @@ def test_heuristic_scores_shape_and_ranking_are_pool_local() -> None:
     scores = heuristic_scores(descriptors)
     assert scores.shape == (len(descriptors),)
     assert torch.isfinite(scores).all()
+
+
+def test_step6i_heuristic_prefers_boundary_frame_satisfied_candidate() -> None:
+    def desc(satisfaction: float) -> PuzzleCandidateDescriptor:
+        features = torch.zeros(19)
+        features[10] = 1.0
+        return PuzzleCandidateDescriptor(
+            block_index=2,
+            shape_bin_id=0,
+            exact_shape_flag=False,
+            site_id=int(satisfaction),
+            contact_mode="boundary",
+            anchor_kind="boundary",
+            candidate_family="shape_bin:bin|anchor:boundary|contact:boundary",
+            legality_status="legal",
+            action_token=TypedAction(
+                ActionPrimitive.PLACE_ABSOLUTE,
+                block_index=2,
+                x=0.0,
+                y=0.0,
+                w=2.0,
+                h=2.0,
+                metadata={"boundary_frame_satisfaction": satisfaction},
+            ),
+            normalized_features=features,
+        )
+
+    scores = heuristic_scores([desc(0.0), desc(1.0)])
+    assert int(scores.argmax().item()) == 1

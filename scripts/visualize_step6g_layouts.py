@@ -11,6 +11,7 @@ from typing import Any
 
 from puzzleplace.data import ConstraintColumns, FloorSetCase
 from puzzleplace.repair import finalize_layout
+from puzzleplace.research.virtual_frame import PuzzleFrame
 from puzzleplace.train.dataset_bc import load_validation_cases
 
 Box = tuple[float, float, float, float]
@@ -81,9 +82,18 @@ def render_svg(
     title: str,
     metrics: dict[str, Any],
     draw_nets: int = 40,
+    frame: PuzzleFrame | None = None,
 ) -> str:
     min_x, min_y, bbox_w, bbox_h = _bbox(placements)
+    max_x = min_x + bbox_w
     max_y = min_y + bbox_h
+    if frame is not None:
+        min_x = min(min_x, frame.xmin)
+        min_y = min(min_y, frame.ymin)
+        max_x = max(max_x, frame.xmax)
+        max_y = max(max_y, frame.ymax)
+        bbox_w = max_x - min_x
+        bbox_h = max_y - min_y
     pad = max(max(bbox_w, bbox_h) * 0.04, 8.0)
     width = bbox_w + 2 * pad
     height = bbox_h + 2 * pad
@@ -101,6 +111,7 @@ def render_svg(
         ".net-b2b{stroke:#ef4444;stroke-opacity:.28;stroke-width:.45;fill:none}",
         ".net-p2b{stroke:#2563eb;stroke-opacity:.35;stroke-width:.45;fill:none}",
         ".block{stroke:#111827;stroke-width:.5}.bbox{fill:none;stroke:#111827;stroke-width:1.0}",
+        ".frame{fill:none;stroke:#f97316;stroke-width:1.6;stroke-dasharray:4 3}",
         "</style>",
         f'<rect x="0" y="0" width="{width:.2f}" height="{height:.2f}" fill="#ffffff"/>',
         f'<text class="title" x="{pad:.2f}" y="18">{html.escape(title)}</text>',
@@ -113,6 +124,14 @@ def render_svg(
         f'<rect class="bbox" x="{pad:.2f}" y="{bbox_y:.2f}" '
         f'width="{bbox_w:.2f}" height="{bbox_h:.2f}"/>'
     )
+    if frame is not None:
+        frame_y = _svg_y(frame.ymin, frame.height, min_y, max_y, pad)
+        parts.append(
+            f'<rect class="frame" x="{frame.xmin + shift_x:.2f}" y="{frame_y:.2f}" '
+            f'width="{frame.width:.2f}" height="{frame.height:.2f}">'
+            f"<title>virtual frame {html.escape(frame.variant)} "
+            f"relax={frame.relaxation}</title></rect>"
+        )
 
     if draw_nets > 0:
         weighted_edges = sorted(
@@ -142,6 +161,7 @@ def render_svg(
                 f'y1="{_svg_y(py, 0.0, min_y, max_y, pad):.2f}" '
                 f'x2="{bx + shift_x:.2f}" y2="{_svg_y(by, 0.0, min_y, max_y, pad):.2f}"/>'
             )
+
 
     for idx, box in sorted(placements.items()):
         x, y, w, h = box
@@ -191,6 +211,7 @@ def render_png(
     output_path: Path,
     draw_nets: int = 40,
     dpi: int = 180,
+    frame: PuzzleFrame | None = None,
 ) -> None:
     import matplotlib
 
@@ -228,6 +249,19 @@ def render_png(
             bx, by = _center(placements[block_i])
             ax.plot([px, bx], [py, by], color="#2563eb", alpha=0.35, linewidth=0.45)
 
+    if frame is not None:
+        ax.add_patch(
+            Rectangle(
+                (frame.xmin, frame.ymin),
+                frame.width,
+                frame.height,
+                facecolor="none",
+                edgecolor="#f97316",
+                linewidth=1.2,
+                linestyle="--",
+            )
+        )
+
     for idx, box in sorted(placements.items()):
         x, y, w, h = box
         kind = _constraint_class(case, idx)
@@ -250,8 +284,15 @@ def render_png(
 
     metric_text = " | ".join(f"{key}={value}" for key, value in metrics.items())
     ax.set_title(f"{title}\n{metric_text}", fontsize=9)
-    ax.set_xlim(min_x - pad, max_x + pad)
-    ax.set_ylim(min_y - pad, max_y + pad)
+    plot_min_x, plot_max_x = min_x, max_x
+    plot_min_y, plot_max_y = min_y, max_y
+    if frame is not None:
+        plot_min_x = min(plot_min_x, frame.xmin)
+        plot_max_x = max(plot_max_x, frame.xmax)
+        plot_min_y = min(plot_min_y, frame.ymin)
+        plot_max_y = max(plot_max_y, frame.ymax)
+    ax.set_xlim(plot_min_x - pad, plot_max_x + pad)
+    ax.set_ylim(plot_min_y - pad, plot_max_y + pad)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, color="#e5e7eb", linewidth=0.4)
     ax.set_xlabel("x")
@@ -269,18 +310,31 @@ def render_png(
 
 def _metrics_for_run(run: dict[str, Any], stage: str) -> dict[str, Any]:
     if stage == "pre":
-        return {
+        metrics = {
             "bbox": f"{float(run['bbox_area']):.2f}",
             "hpwl": f"{float(run['hpwl_proxy']):.3f}",
             "soft": int(run["soft_boundary_violations"]),
         }
-    return {
-        "bbox": f"{float(run['post_repair_bbox_area']):.2f}",
-        "hpwl": f"{float(run['post_repair_hpwl_proxy']):.3f}",
-        "soft": int(run["post_repair_soft_boundary_violations"]),
-        "disp": f"{float(run['repair_mean_displacement']):.3f}",
-    }
-
+        frame_metrics = run.get("virtual_frame_metrics")
+    else:
+        metrics = {
+            "bbox": f"{float(run['post_repair_bbox_area']):.2f}",
+            "hpwl": f"{float(run['post_repair_hpwl_proxy']):.3f}",
+            "soft": int(run["post_repair_soft_boundary_violations"]),
+            "disp": f"{float(run['repair_mean_displacement']):.3f}",
+        }
+        frame_metrics = run.get("post_repair_virtual_frame_metrics")
+    if frame_metrics:
+        metrics.update(
+            {
+                "frame_v": int(frame_metrics["num_frame_violations"]),
+                "protrude": f"{float(frame_metrics['max_protrusion_distance']):.3f}",
+                "out_area": f"{float(frame_metrics['outside_frame_area_ratio']):.4f}",
+                "b_sat": f"{float(frame_metrics['boundary_frame_satisfaction_rate']):.2f}",
+                "b_unsat": int(frame_metrics["boundary_frame_unsatisfied_blocks"]),
+            }
+        )
+    return metrics
 
 def _write_index(rows: list[dict[str, str]], output_dir: Path) -> None:
     cards = []
@@ -340,7 +394,17 @@ def main() -> None:
         seed = int(run["best_seed"])
         start = int(run["best_start"])
         case = cases[case_id]
-        pre_positions, family_usage = multistart._construct(case, seed, start)
+        frame = None
+        if payload.get("virtual_frame_enabled") and run.get("best_frame_index") is not None:
+            frames = multistart.multistart_virtual_frames(case)
+            frame = frames[int(run["best_frame_index"])]
+        pre_positions, family_usage, construction_frame, _predicted_hull = multistart._construct(
+            case,
+            seed,
+            start,
+            frame,
+            boundary_commit_mode=payload.get("boundary_commit_mode", "prefer_predicted_hull"),
+        )
         stages = ["pre", "post"] if args.stage == "both" else [args.stage]
         for stage in stages:
             if stage == "post":
@@ -361,6 +425,7 @@ def main() -> None:
                     output_path=output_dir / f"{stem}.png",
                     draw_nets=args.draw_nets,
                     dpi=args.dpi,
+                    frame=construction_frame,
                 )
             if args.format in {"svg", "both"}:
                 (output_dir / f"{stem}.svg").write_text(
@@ -370,6 +435,7 @@ def main() -> None:
                         title=title,
                         metrics=metrics,
                         draw_nets=args.draw_nets,
+                        frame=construction_frame,
                     )
                 )
             position_dump["layouts"].append(
@@ -379,6 +445,16 @@ def main() -> None:
                     "seed": seed,
                     "start": start,
                     "candidate_family_usage": family_usage,
+                    "frame": None
+                    if construction_frame is None
+                    else {
+                        "variant": construction_frame.variant,
+                        "relaxation": construction_frame.relaxation,
+                        "xmin": construction_frame.xmin,
+                        "ymin": construction_frame.ymin,
+                        "xmax": construction_frame.xmax,
+                        "ymax": construction_frame.ymax,
+                    },
                     "metrics": metrics,
                     "image": image_filename,
                     "positions": {str(idx): list(box) for idx, box in sorted(placements.items())},

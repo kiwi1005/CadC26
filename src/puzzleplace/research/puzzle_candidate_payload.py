@@ -11,6 +11,10 @@ from puzzleplace.actions.executor import ExecutionState
 from puzzleplace.actions.schema import ActionPrimitive, TypedAction, canonical_action_key
 from puzzleplace.data import ConstraintColumns, FloorSetCase
 from puzzleplace.geometry.boxes import pairwise_intersection_area
+from puzzleplace.research.virtual_frame import (
+    PuzzleFrame,
+    boundary_frame_satisfaction_fraction,
+)
 
 ContactMode = Literal[
     "origin",
@@ -25,6 +29,12 @@ ContactMode = Literal[
 ]
 AnchorKind = Literal["origin", "placed_block", "free_rect", "boundary", "group", "pin_pull"]
 FeatureMode = Literal["puzzle_pool_raw_safe", "puzzle_pool_normalized_relational"]
+BoundaryCommitMode = Literal[
+    "none",
+    "prefer_predicted_hull",
+    "require_predicted_hull_if_available",
+    "require_virtual_frame_if_available",
+]
 
 ALLOWED_PUZZLE_INFERENCE_FIELDS = frozenset(
     {
@@ -165,8 +175,9 @@ def masked_anchor_xywh(case: FloorSetCase) -> torch.Tensor:
     return anchors
 
 
-def shape_bin_log_aspects(bin_count: int = 17) -> list[float]:
-    values = torch.linspace(-3.0, 3.0, steps=bin_count).tolist()
+def shape_bin_log_aspects(bin_count: int = 17, *, log_limit: float = 3.0) -> list[float]:
+    limit = abs(float(log_limit))
+    values = torch.linspace(-limit, limit, steps=bin_count).tolist()
     values.append(0.0)
     return sorted(set(round(float(v), 6) for v in values))
 
@@ -218,6 +229,8 @@ def _shape_candidates(
     anchors: torch.Tensor,
     *,
     max_shape_bins: int | None = None,
+    virtual_frame: PuzzleFrame | None = None,
+    log_aspect_limit: float = 3.0,
 ) -> list[tuple[int, bool, float, float]]:
     fixed = bool(case.constraints[block_index, ConstraintColumns.FIXED].item())
     preplaced = bool(case.constraints[block_index, ConstraintColumns.PREPLACED].item())
@@ -229,15 +242,26 @@ def _shape_candidates(
     rows: list[tuple[int, bool, float, float]] = _mib_exact_shape_candidates(
         case, state, block_index, anchors
     )
-    for shape_bin_id, log_r in enumerate(shape_bin_log_aspects()):
+    for shape_bin_id, log_r in enumerate(shape_bin_log_aspects(log_limit=log_aspect_limit)):
         ratio = math.exp(log_r)
         rows.append((shape_bin_id, False, math.sqrt(area * ratio), math.sqrt(area / ratio)))
+    if virtual_frame is not None:
+        rows = [
+            row
+            for row in rows
+            if row[2] <= virtual_frame.width + 1e-6 and row[3] <= virtual_frame.height + 1e-6
+        ]
     if max_shape_bins is not None and len(rows) > max_shape_bins:
         # Keep constraint-derived exact rows, square, and low/aspect extremes.
         exact_rows = [row for row in rows if row[1]]
         bin_rows = [row for row in rows if not row[1]]
         keep_bins = max(max_shape_bins - len(exact_rows), 1)
-        square = min(bin_rows, key=lambda row: abs(row[0] - len(shape_bin_log_aspects()) // 2))
+        square = min(
+            bin_rows,
+            key=lambda row: abs(
+                row[0] - len(shape_bin_log_aspects(log_limit=log_aspect_limit)) // 2
+            ),
+        )
         sampled = bin_rows[:: max(1, len(bin_rows) // keep_bins)][: max(keep_bins - 1, 0)]
         rows = (exact_rows + sampled + [square])[:max_shape_bins]
     return rows
@@ -247,11 +271,15 @@ def _free_rect_lower_left_sites(
     state: ExecutionState,
     *,
     max_sites: int = 12,
+    virtual_frame: PuzzleFrame | None = None,
 ) -> list[tuple[float, float, str, str, str]]:
     if not state.placements:
         return []
     xs = {0.0}
     ys = {0.0}
+    if virtual_frame is not None:
+        xs.add(virtual_frame.xmin)
+        ys.add(virtual_frame.ymin)
     for x, y, w, h in state.placements.values():
         xs.add(float(x + w))
         ys.add(float(y + h))
@@ -275,6 +303,12 @@ def _free_rect_lower_left_sites(
     return sites
 
 
+def _clamp_to_frame(value: float, low: float, high: float) -> float:
+    if high < low:
+        return low
+    return min(max(value, low), high)
+
+
 def _candidate_sites(
     case: FloorSetCase,
     state: ExecutionState,
@@ -282,8 +316,15 @@ def _candidate_sites(
     width: float,
     height: float,
     anchors: torch.Tensor,
+    virtual_frame: PuzzleFrame | None = None,
+    predicted_hull: PuzzleFrame | None = None,
 ) -> list[tuple[float, float, str, str, str]]:
-    sites: list[tuple[float, float, str, str, str]] = [(0.0, 0.0, "origin", "origin", "origin")]
+    if virtual_frame is None:
+        sites: list[tuple[float, float, str, str, str]] = [(0.0, 0.0, "origin", "origin", "origin")]
+    else:
+        sites = [
+            (virtual_frame.xmin, virtual_frame.ymin, "frame_lower_left", "boundary", "boundary")
+        ]
     ax, ay, aw, ah = [float(v) for v in anchors[block_index].tolist()]
     preplaced = bool(case.constraints[block_index, ConstraintColumns.PREPLACED].item())
     if preplaced and ax >= 0 and ay >= 0 and aw > 0 and ah > 0:
@@ -306,24 +347,85 @@ def _candidate_sites(
         if same_group:
             sites.append((tx + tw, ty, f"group_right_of_{target_idx}", "group_mate", "group"))
 
-    sites.extend(_free_rect_lower_left_sites(state))
+    sites.extend(_free_rect_lower_left_sites(state, virtual_frame=virtual_frame))
 
     boundary = int(case.constraints[block_index, ConstraintColumns.BOUNDARY].item())
     if boundary:
-        sites.append((0.0, 0.0, "boundary_origin", "boundary", "boundary"))
+        for edge_box, edge_prefix in (
+            (predicted_hull, "predicted_hull_boundary"),
+            (virtual_frame, "frame_boundary"),
+        ):
+            if edge_box is None:
+                continue
+            x = edge_box.xmin
+            y = edge_box.ymin
+            labels: list[str] = []
+            if boundary & 1:
+                x = edge_box.xmin
+                labels.append("left")
+            if boundary & 2:
+                x = edge_box.xmax - width
+                labels.append("right")
+            if boundary & 8:
+                y = edge_box.ymin
+                labels.append("bottom")
+            if boundary & 4:
+                y = edge_box.ymax - height
+                labels.append("top")
+            sites.append((x, y, edge_prefix + "_" + "_".join(labels), "boundary", "boundary"))
+            x_fixed = (boundary & 1) or (boundary & 2)
+            y_fixed = (boundary & 8) or (boundary & 4)
+            if bool(x_fixed) != bool(y_fixed):
+                x_candidates = {edge_box.xmin}
+                y_candidates = {edge_box.ymin}
+                for px, py, pw, ph in state.placements.values():
+                    x_candidates.add(px + pw)
+                    x_candidates.add(px - width)
+                    y_candidates.add(py + ph)
+                    y_candidates.add(py - height)
+                if x_fixed:
+                    edge_x = edge_box.xmin if boundary & 1 else edge_box.xmax - width
+                    for candidate_y in sorted(y_candidates):
+                        edge_y = _clamp_to_frame(candidate_y, edge_box.ymin, edge_box.ymax - height)
+                        sites.append(
+                            (
+                                edge_x,
+                                edge_y,
+                                f"{edge_prefix}_slide_y_{len(sites)}",
+                                "boundary",
+                                "boundary",
+                            )
+                        )
+                else:
+                    edge_y = edge_box.ymin if boundary & 8 else edge_box.ymax - height
+                    for candidate_x in sorted(x_candidates):
+                        edge_x = _clamp_to_frame(candidate_x, edge_box.xmin, edge_box.xmax - width)
+                        sites.append(
+                            (
+                                edge_x,
+                                edge_y,
+                                f"{edge_prefix}_slide_x_{len(sites)}",
+                                "boundary",
+                                "boundary",
+                            )
+                        )
+        if virtual_frame is None:
+            sites.append((0.0, 0.0, "boundary_origin", "boundary", "boundary"))
 
     for pin_idx, pin_block, _weight in case.p2b_edges.tolist():
         if int(pin_block) == block_index and 0 <= int(pin_idx) < len(case.pins_pos):
             px, py = [float(v) for v in case.pins_pos[int(pin_idx)].tolist()]
-            sites.append(
-                (
-                    max(0.0, px - width / 2.0),
-                    max(0.0, py - height / 2.0),
-                    "pin_pull",
-                    "pin_pull",
-                    "pin_pull",
+            if virtual_frame is None:
+                pin_x = max(0.0, px - width / 2.0)
+                pin_y = max(0.0, py - height / 2.0)
+            else:
+                pin_x = _clamp_to_frame(
+                    px - width / 2.0, virtual_frame.xmin, virtual_frame.xmax - width
                 )
-            )
+                pin_y = _clamp_to_frame(
+                    py - height / 2.0, virtual_frame.ymin, virtual_frame.ymax - height
+                )
+            sites.append((pin_x, pin_y, "pin_pull", "pin_pull", "pin_pull"))
             break
     return sites
 
@@ -347,6 +449,7 @@ def _is_legal_box(
     block_index: int,
     box: tuple[float, float, float, float],
     anchors: torch.Tensor,
+    virtual_frame: PuzzleFrame | None = None,
 ) -> tuple[bool, str]:
     x, y, w, h = box
     if w <= 0 or h <= 0:
@@ -366,6 +469,8 @@ def _is_legal_box(
             return False, "fixed_preplaced_dimensions_mismatch"
         if preplaced and (abs(x - ax) > 1e-4 or abs(y - ay) > 1e-4):
             return False, "preplaced_location_mismatch"
+    if virtual_frame is not None and not virtual_frame.contains_box(box):
+        return False, "frame_violation"
     tensor_box = torch.tensor(box, dtype=torch.float32)
     for other_idx, other_box in state.placements.items():
         if other_idx == block_index:
@@ -388,6 +493,8 @@ def _feature_vector(
     exact_shape_flag: bool,
     contact_mode: str,
     feature_mode: FeatureMode,
+    virtual_frame: PuzzleFrame | None = None,
+    predicted_hull: PuzzleFrame | None = None,
 ) -> torch.Tensor:
     x, y, w, h = box
     total_area = max(float(case.area_targets.sum().item()), 1e-6)
@@ -418,6 +525,17 @@ def _feature_vector(
                 float(weight) * (abs(cx - (ox + ow / 2.0)) + abs(cy - (oy + oh / 2.0))) / scale
             )
     boundary = float(case.constraints[block_index, ConstraintColumns.BOUNDARY].item() != 0)
+    boundary_code = int(case.constraints[block_index, ConstraintColumns.BOUNDARY].item())
+    boundary_frame_satisfaction = (
+        boundary_frame_satisfaction_fraction(boundary_code, box, virtual_frame)
+        if virtual_frame is not None
+        else 0.0
+    )
+    predicted_hull_satisfaction = (
+        boundary_frame_satisfaction_fraction(boundary_code, box, predicted_hull)
+        if predicted_hull is not None
+        else 0.0
+    )
     cluster = float(case.constraints[block_index, ConstraintColumns.CLUSTER].item() > 0)
     mib = float(case.constraints[block_index, ConstraintColumns.MIB].item() > 0)
     contact_vocab = {
@@ -451,9 +569,23 @@ def _feature_vector(
             1.0 if contact_mode in {"right", "left", "top", "bottom", "group_mate"} else 0.0,
             block_index / max(case.block_count - 1, 1),
             contact_vocab.get(contact_mode, 0) / max(len(contact_vocab) - 1, 1),
+            boundary_frame_satisfaction,
+            predicted_hull_satisfaction,
         ],
         dtype=torch.float32,
     )
+    if virtual_frame is not None:
+        frame_raw = torch.tensor(
+            [
+                (x - virtual_frame.xmin) / max(virtual_frame.width, 1e-6),
+                (y - virtual_frame.ymin) / max(virtual_frame.height, 1e-6),
+                (virtual_frame.xmax - (x + w)) / max(virtual_frame.width, 1e-6),
+                (virtual_frame.ymax - (y + h)) / max(virtual_frame.height, 1e-6),
+                (w * h) / max(virtual_frame.area, 1e-6),
+            ],
+            dtype=torch.float32,
+        )
+        raw = torch.cat([raw, frame_raw])
     if feature_mode == "puzzle_pool_raw_safe":
         return raw
     normalized = raw.clone()
@@ -473,6 +605,8 @@ def _mask_reason_bucket(reason: str) -> str:
         return "area_tolerance"
     if reason in {"fixed_preplaced_dimensions_mismatch", "preplaced_location_mismatch"}:
         return "fixed_preplaced"
+    if reason == "frame_violation":
+        return "frame_violation"
     return reason
 
 
@@ -482,6 +616,7 @@ def empty_mask_reason_buckets() -> dict[str, int]:
         "non_positive": 0,
         "area_tolerance": 0,
         "fixed_preplaced": 0,
+        "frame_violation": 0,
     }
 
 
@@ -494,69 +629,178 @@ def build_puzzle_candidate_descriptors(
     max_shape_bins: int | None = 5,
     max_descriptors_per_block: int | None = 16,
     mask_reason_buckets: dict[str, int] | None = None,
+    virtual_frame: PuzzleFrame | None = None,
+    frame_relaxation_steps: int = 2,
+    frame_expand_factor: float = 1.05,
+    shape_log_aspect_limit: float | None = None,
+    predicted_hull: PuzzleFrame | None = None,
+    commit_boundary_to_frame: bool = False,
+    boundary_commit_mode: BoundaryCommitMode = "none",
 ) -> list[PuzzleCandidateDescriptor]:
+    """Build Step6 puzzle candidates, optionally bounded by a virtual frame.
+
+    When `virtual_frame` is supplied, candidates are valid only if the whole
+    rectangle is inside the frame.  Empty candidate pools trigger the Step6H
+    relaxation policy: expand the frame by `frame_expand_factor` and retry.  The
+    first pass uses a mild log-aspect range of [-2, 2] unless the caller
+    overrides it; if all relaxed attempts are empty, a final [-3, 3] retry is
+    allowed before returning an empty pool.
+    """
+
     anchors = masked_anchor_xywh(case)
     remaining = remaining_blocks or [
         idx for idx in range(case.block_count) if idx not in state.placements
     ]
-    descriptors: list[PuzzleCandidateDescriptor] = []
-    site_counter = 0
-    for block_index in remaining:
-        per_block = 0
-        for shape_bin_id, exact_shape, width, height in _shape_candidates(
-            case, state, block_index, anchors, max_shape_bins=max_shape_bins
-        ):
-            for x, y, site_key, contact_mode, anchor_kind in _candidate_sites(
-                case, state, block_index, width, height, anchors
+    initial_log_limit = 3.0 if virtual_frame is None else 2.0
+    base_log_limit = initial_log_limit if shape_log_aspect_limit is None else shape_log_aspect_limit
+
+    def build_once(frame: PuzzleFrame | None, log_limit: float) -> list[PuzzleCandidateDescriptor]:
+        descriptors: list[PuzzleCandidateDescriptor] = []
+        site_counter = 0
+        for block_index in remaining:
+            per_block = 0
+            per_block_descriptors: list[PuzzleCandidateDescriptor] = []
+            for shape_bin_id, exact_shape, width, height in _shape_candidates(
+                case,
+                state,
+                block_index,
+                anchors,
+                max_shape_bins=max_shape_bins,
+                virtual_frame=frame,
+                log_aspect_limit=log_limit,
             ):
-                box = (float(x), float(y), float(width), float(height))
-                allowed, reason = _is_legal_box(case, state, block_index, box, anchors)
-                if not allowed:
-                    if mask_reason_buckets is not None:
-                        bucket = _mask_reason_bucket(reason)
-                        mask_reason_buckets[bucket] = mask_reason_buckets.get(bucket, 0) + 1
-                    continue
-                shape_kind = "exact" if exact_shape else "bin"
-                family = f"shape_bin:{shape_kind}|anchor:{anchor_kind}|contact:{contact_mode}"
-                action = TypedAction(
-                    ActionPrimitive.PLACE_ABSOLUTE,
-                    block_index=block_index,
-                    x=box[0],
-                    y=box[1],
-                    w=box[2],
-                    h=box[3],
-                    metadata={"source": "step6g_descriptor", "site_key": site_key},
-                )
-                descriptor = PuzzleCandidateDescriptor(
-                    block_index=block_index,
-                    shape_bin_id=shape_bin_id,
-                    exact_shape_flag=exact_shape,
-                    site_id=site_counter,
-                    contact_mode=contact_mode,
-                    anchor_kind=anchor_kind,
-                    candidate_family=family,
-                    legality_status=reason,
-                    action_token=action,
-                    normalized_features=_feature_vector(
-                        case,
-                        state,
-                        block_index,
-                        box,
+                for x, y, site_key, contact_mode, anchor_kind in _candidate_sites(
+                    case,
+                    state,
+                    block_index,
+                    width,
+                    height,
+                    anchors,
+                    virtual_frame=frame,
+                    predicted_hull=predicted_hull,
+                ):
+                    box = (float(x), float(y), float(width), float(height))
+                    allowed, reason = _is_legal_box(case, state, block_index, box, anchors, frame)
+                    if not allowed:
+                        if mask_reason_buckets is not None:
+                            bucket = _mask_reason_bucket(reason)
+                            mask_reason_buckets[bucket] = mask_reason_buckets.get(bucket, 0) + 1
+                        continue
+                    shape_kind = "exact" if exact_shape else "bin"
+                    family = f"shape_bin:{shape_kind}|anchor:{anchor_kind}|contact:{contact_mode}"
+                    metadata: dict[str, Any] = {"source": "step6g_descriptor", "site_key": site_key}
+                    boundary_code = int(
+                        case.constraints[block_index, ConstraintColumns.BOUNDARY].item()
+                    )
+                    boundary_satisfaction = (
+                        boundary_frame_satisfaction_fraction(boundary_code, box, frame)
+                        if frame is not None
+                        else 0.0
+                    )
+                    metadata["boundary_frame_satisfaction"] = boundary_satisfaction
+                    predicted_hull_satisfaction = (
+                        boundary_frame_satisfaction_fraction(boundary_code, box, predicted_hull)
+                        if predicted_hull is not None
+                        else 0.0
+                    )
+                    metadata["predicted_hull_satisfaction"] = predicted_hull_satisfaction
+                    if frame is not None:
+                        metadata.update(
+                            {
+                                "virtual_frame": frame.variant,
+                                "frame_relaxation": frame.relaxation,
+                            }
+                        )
+                    action = TypedAction(
+                        ActionPrimitive.PLACE_ABSOLUTE,
+                        block_index=block_index,
+                        x=box[0],
+                        y=box[1],
+                        w=box[2],
+                        h=box[3],
+                        metadata=metadata,
+                    )
+                    descriptor = PuzzleCandidateDescriptor(
+                        block_index=block_index,
                         shape_bin_id=shape_bin_id,
                         exact_shape_flag=exact_shape,
+                        site_id=site_counter,
                         contact_mode=contact_mode,
-                        feature_mode=feature_mode,
-                    ),
-                )
-                validate_puzzle_descriptor(descriptor)
-                descriptors.append(descriptor)
-                site_counter += 1
-                per_block += 1
+                        anchor_kind=anchor_kind,
+                        candidate_family=family,
+                        legality_status=reason,
+                        action_token=action,
+                        normalized_features=_feature_vector(
+                            case,
+                            state,
+                            block_index,
+                            box,
+                            shape_bin_id=shape_bin_id,
+                            exact_shape_flag=exact_shape,
+                            contact_mode=contact_mode,
+                            feature_mode=feature_mode,
+                            virtual_frame=frame,
+                            predicted_hull=predicted_hull,
+                        ),
+                    )
+                    validate_puzzle_descriptor(descriptor)
+                    per_block_descriptors.append(descriptor)
+                    site_counter += 1
+                    per_block += 1
+                    if (
+                        max_descriptors_per_block is not None
+                        and per_block >= max_descriptors_per_block
+                    ):
+                        break
                 if max_descriptors_per_block is not None and per_block >= max_descriptors_per_block:
                     break
-            if max_descriptors_per_block is not None and per_block >= max_descriptors_per_block:
-                break
-    return descriptors
+            boundary_code = int(case.constraints[block_index, ConstraintColumns.BOUNDARY].item())
+            if (
+                boundary_commit_mode == "require_predicted_hull_if_available"
+                and predicted_hull is not None
+                and boundary_code != 0
+            ):
+                committed = [
+                    row
+                    for row in per_block_descriptors
+                    if float(row.action_token.metadata.get("predicted_hull_satisfaction", 0.0))
+                    >= 1.0
+                ]
+                if committed:
+                    per_block_descriptors = committed
+            require_virtual_frame = (
+                commit_boundary_to_frame
+                or boundary_commit_mode == "require_virtual_frame_if_available"
+            )
+            if require_virtual_frame and frame is not None and boundary_code != 0:
+                committed = [
+                    row
+                    for row in per_block_descriptors
+                    if float(row.action_token.metadata.get("boundary_frame_satisfaction", 0.0))
+                    >= 1.0
+                ]
+                if committed:
+                    per_block_descriptors = committed
+            descriptors.extend(per_block_descriptors)
+        return descriptors
+
+    if virtual_frame is None:
+        return build_once(None, base_log_limit)
+
+    frame = virtual_frame
+    relaxation_steps = max(frame_relaxation_steps, 0)
+    for attempt in range(relaxation_steps + 1):
+        descriptors = build_once(frame, base_log_limit)
+        if descriptors:
+            return descriptors
+        if attempt < relaxation_steps:
+            frame = frame.expanded(frame_expand_factor)
+
+    if base_log_limit < 3.0:
+        descriptors = build_once(frame, 3.0)
+        if descriptors:
+            return descriptors
+    return []
 
 
 def choose_expert_descriptor(
@@ -616,5 +860,14 @@ def heuristic_scores(descriptors: Sequence[PuzzleCandidateDescriptor]) -> torch.
         # Prefer small bbox expansion, neighbor proximity, boundary/group contact, anchors.
         score = -2.0 * float(f[7]) - 0.5 * float(f[9])
         score += 0.3 * float(f[10]) + 0.2 * float(f[11]) + 0.1 * float(f[13]) + 0.2 * float(f[15])
+        boundary_satisfaction = float(
+            desc.action_token.metadata.get("boundary_frame_satisfaction", 0.0)
+        )
+        hull_satisfaction = float(
+            desc.action_token.metadata.get("predicted_hull_satisfaction", 0.0)
+        )
+        if float(f[10]) > 0.0:
+            score += 3.0 * hull_satisfaction + 0.4 * boundary_satisfaction
+            score -= 0.8 * (1.0 - max(hull_satisfaction, boundary_satisfaction))
         scores.append(score)
     return torch.tensor(scores, dtype=torch.float32)
