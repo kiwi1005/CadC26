@@ -182,6 +182,91 @@ def render_svg(
     return "\n".join(parts)
 
 
+def render_png(
+    *,
+    case: FloorSetCase,
+    placements: dict[int, Box],
+    title: str,
+    metrics: dict[str, Any],
+    output_path: Path,
+    draw_nets: int = 40,
+    dpi: int = 180,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Circle, Patch, Rectangle
+
+    min_x, min_y, bbox_w, bbox_h = _bbox(placements)
+    max_x = min_x + bbox_w
+    max_y = min_y + bbox_h
+    pad = max(max(bbox_w, bbox_h) * 0.04, 8.0)
+    fig_w = max(min((bbox_w + 2 * pad) / 24.0, 18.0), 6.0)
+    fig_h = max(min((bbox_h + 2 * pad) / 24.0, 18.0), 6.0)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=dpi)
+    ax.set_facecolor("#ffffff")
+
+    if draw_nets > 0:
+        weighted_edges = sorted(
+            case.b2b_edges.tolist(),
+            key=lambda row: abs(float(row[2])) if len(row) > 2 else 1.0,
+            reverse=True,
+        )[:draw_nets]
+        for src, dst, *_rest in weighted_edges:
+            i, j = int(src), int(dst)
+            if i not in placements or j not in placements:
+                continue
+            ix, iy = _center(placements[i])
+            jx, jy = _center(placements[j])
+            ax.plot([ix, jx], [iy, jy], color="#ef4444", alpha=0.28, linewidth=0.45)
+        for pin_idx, block_idx, *_rest in case.p2b_edges.tolist()[:draw_nets]:
+            pin_i, block_i = int(pin_idx), int(block_idx)
+            if pin_i >= len(case.pins_pos) or block_i not in placements:
+                continue
+            px, py = [float(v) for v in case.pins_pos[pin_i].tolist()]
+            bx, by = _center(placements[block_i])
+            ax.plot([px, bx], [py, by], color="#2563eb", alpha=0.35, linewidth=0.45)
+
+    for idx, box in sorted(placements.items()):
+        x, y, w, h = box
+        kind = _constraint_class(case, idx)
+        ax.add_patch(
+            Rectangle(
+                (x, y),
+                w,
+                h,
+                facecolor=_constraint_color(kind),
+                edgecolor="#111827",
+                linewidth=0.5,
+                alpha=0.72,
+            )
+        )
+        ax.text(x + 0.8, y + min(h * 0.55, 7.5), str(idx), fontsize=5, color="#0f172a")
+
+    for pin in case.pins_pos.tolist():
+        px, py = float(pin[0]), float(pin[1])
+        ax.add_patch(Circle((px, py), radius=max(pad * 0.06, 1.0), color="#16a34a"))
+
+    metric_text = " | ".join(f"{key}={value}" for key, value in metrics.items())
+    ax.set_title(f"{title}\n{metric_text}", fontsize=9)
+    ax.set_xlim(min_x - pad, max_x + pad)
+    ax.set_ylim(min_y - pad, max_y + pad)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, color="#e5e7eb", linewidth=0.4)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    legend_handles = [
+        Patch(facecolor=_constraint_color(kind), edgecolor="#111827", label=kind, alpha=0.72)
+        for kind in ["fixed", "preplaced", "mib", "cluster", "boundary", "regular"]
+    ]
+    ax.legend(handles=legend_handles, loc="upper right", fontsize=6)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path)
+    plt.close(fig)
+
+
 def _metrics_for_run(run: dict[str, Any], stage: str) -> dict[str, Any]:
     if stage == "pre":
         return {
@@ -204,8 +289,8 @@ def _write_index(rows: list[dict[str, str]], output_dir: Path) -> None:
             "<section>"
             f"<h2>{html.escape(row['title'])}</h2>"
             f"<p><code>{html.escape(row['metrics'])}</code></p>"
-            f"<p><a href=\"{html.escape(row['svg'])}\">{html.escape(row['svg'])}</a></p>"
-            f"<img src=\"{html.escape(row['svg'])}\" "
+            f"<p><a href=\"{html.escape(row['image'])}\">{html.escape(row['image'])}</a></p>"
+            f"<img src=\"{html.escape(row['image'])}\" "
             "style=\"max-width:100%;border:1px solid #ddd\"/>"
             "</section>"
         )
@@ -223,13 +308,15 @@ def _write_index(rows: list[dict[str, str]], output_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Render Step6G multistart sidecar layouts to SVG plus an HTML index."
+        description="Render Step6G multistart sidecar layouts to PNG/SVG plus an HTML index."
     )
     parser.add_argument("--input", default="artifacts/research/step6g_multistart_sidecar.json")
     parser.add_argument("--output-dir", default="artifacts/research/step6g_visualizations")
     parser.add_argument("--case-ids", nargs="*", type=int)
     parser.add_argument("--stage", choices=["pre", "post", "both"], default="post")
+    parser.add_argument("--format", choices=["png", "svg", "both"], default="png")
     parser.add_argument("--draw-nets", type=int, default=40)
+    parser.add_argument("--dpi", type=int, default=180)
     args = parser.parse_args()
 
     payload = json.loads(Path(args.input).read_text())
@@ -263,16 +350,28 @@ def main() -> None:
                 placements = {idx: _coerce_box(box) for idx, box in pre_positions.items()}
             metrics = _metrics_for_run(run, stage)
             title = f"case {case_id} | {stage}-repair | seed {seed} start {start}"
-            filename = f"case{case_id:03d}_seed{seed}_start{start}_{stage}.svg"
-            (output_dir / filename).write_text(
-                render_svg(
+            stem = f"case{case_id:03d}_seed{seed}_start{start}_{stage}"
+            image_filename = f"{stem}.png" if args.format != "svg" else f"{stem}.svg"
+            if args.format in {"png", "both"}:
+                render_png(
                     case=case,
                     placements=placements,
                     title=title,
                     metrics=metrics,
+                    output_path=output_dir / f"{stem}.png",
                     draw_nets=args.draw_nets,
+                    dpi=args.dpi,
                 )
-            )
+            if args.format in {"svg", "both"}:
+                (output_dir / f"{stem}.svg").write_text(
+                    render_svg(
+                        case=case,
+                        placements=placements,
+                        title=title,
+                        metrics=metrics,
+                        draw_nets=args.draw_nets,
+                    )
+                )
             position_dump["layouts"].append(
                 {
                     "case_id": case_id,
@@ -281,14 +380,14 @@ def main() -> None:
                     "start": start,
                     "candidate_family_usage": family_usage,
                     "metrics": metrics,
-                    "svg": filename,
+                    "image": image_filename,
                     "positions": {str(idx): list(box) for idx, box in sorted(placements.items())},
                 }
             )
             index_rows.append(
                 {
                     "title": title,
-                    "svg": filename,
+                    "image": image_filename,
                     "metrics": ", ".join(f"{key}={value}" for key, value in metrics.items()),
                 }
             )

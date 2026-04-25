@@ -15,14 +15,23 @@ def _load_visualizer():
     return module
 
 
+def _synthetic_placements(case):
+    assert case.target_positions is not None
+    return {
+        idx: module_box(case.target_positions[idx].tolist())
+        for idx in range(case.block_count)
+    }
+
+
+def module_box(values):
+    x, y, w, h = values
+    return float(x), float(y), float(w), float(h)
+
+
 def test_step6g_visualizer_renders_svg_with_blocks_pins_and_metrics() -> None:
     module = _load_visualizer()
     case = make_step6g_synthetic_case(block_count=6)
-    assert case.target_positions is not None
-    placements = {
-        idx: tuple(float(v) for v in case.target_positions[idx].tolist())
-        for idx in range(case.block_count)
-    }
+    placements = _synthetic_placements(case)
 
     svg = module.render_svg(
         case=case,
@@ -38,3 +47,21 @@ def test_step6g_visualizer_renders_svg_with_blocks_pins_and_metrics() -> None:
     assert "hpwl=1.0" in svg
     assert "block 0" in svg
     assert "pin 0" in svg
+
+
+def test_step6g_visualizer_writes_png(tmp_path: Path) -> None:
+    module = _load_visualizer()
+    case = make_step6g_synthetic_case(block_count=6)
+    output = tmp_path / "layout.png"
+
+    module.render_png(
+        case=case,
+        placements=_synthetic_placements(case),
+        title="synthetic layout",
+        metrics={"hpwl": "1.0", "bbox": "2.0"},
+        output_path=output,
+        draw_nets=4,
+        dpi=80,
+    )
+
+    assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
