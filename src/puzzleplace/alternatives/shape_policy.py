@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from puzzleplace.data import ConstraintColumns, FloorSetCase
-from puzzleplace.diagnostics.aspect import abs_log_aspect, block_area
+from puzzleplace.diagnostics.aspect import abs_log_aspect, aspect_stats, block_area
 from puzzleplace.repair import finalize_layout
 from puzzleplace.research.boundary_failure_attribution import block_role_flags
 from puzzleplace.research.move_library import layout_metrics, metric_deltas
@@ -33,6 +33,8 @@ SHAPE_POLICIES: tuple[ShapePolicyName, ...] = (
     "MIB_shape_master_regularized",
     "group_macro_aspect_regularized",
 )
+
+_ROLE_CACHE: dict[int, dict[str, Any]] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,16 +74,15 @@ def deterministic_role_flags(
     placements: dict[int, Placement] | None = None,
 ) -> dict[str, Any]:
     flags = dict(block_role_flags(case, block_id))
-    areas = [float(value) for value in case.area_targets.tolist()]
-    degrees = [b2b_degree(case, idx) for idx in range(case.block_count)]
+    cache = role_cache(case)
     area = float(case.area_targets[block_id].item())
-    degree = b2b_degree(case, block_id)
+    degree = float(cache["degrees"][block_id])
     flags["external_ratio"] = external_ratio(case, block_id)
     flags["b2b_degree"] = degree
-    flags["is_core"] = area >= percentile(areas, 0.75) or degree >= percentile(degrees, 0.75)
+    flags["is_core"] = area >= cache["area_p75"] or degree >= cache["degree_p75"]
     flags["is_filler"] = (
-        area <= percentile(areas, 0.25)
-        and degree <= percentile(degrees, 0.50)
+        area <= cache["area_p25"]
+        and degree <= cache["degree_p50"]
         and not flags["is_boundary"]
         and not flags["is_mib"]
         and not flags["is_grouping"]
@@ -218,6 +219,8 @@ def posthoc_shape_probe(
     placements: dict[int, Placement],
     frame: PuzzleFrame,
 ) -> tuple[dict[int, Placement], list[dict[str, Any]]]:
+    if case.block_count >= 50:
+        return fast_posthoc_shape_probe(policy, case, placements, frame)
     proposed: dict[int, Placement] = {}
     reasons: list[dict[str, Any]] = []
     for block_id, box in placements.items():
@@ -235,6 +238,37 @@ def posthoc_shape_probe(
         for idx, box in enumerate(repaired)
     }
     return repaired_map, reasons
+
+
+def fast_posthoc_shape_probe(
+    policy: ShapePolicyName,
+    case: FloorSetCase,
+    placements: dict[int, Placement],
+    frame: PuzzleFrame,
+) -> tuple[dict[int, Placement], list[dict[str, Any]]]:
+    proposed: dict[int, Placement] = {}
+    reasons: list[dict[str, Any]] = []
+    active = frame
+    x = active.xmin
+    y = active.ymin
+    row_h = 0.0
+    for block_id in sorted(placements):
+        old = placements[block_id]
+        decision = shape_policy_decision(policy, case, block_id, placements)
+        area = float(case.area_targets[block_id].item())
+        new_w, new_h = capped_shape(area, old[2], old[3], decision.log_aspect_cap)
+        if x + new_w > active.xmax and proposed:
+            x = active.xmin
+            y += row_h + 0.5
+            row_h = 0.0
+        while y + new_h > active.ymax:
+            active = active.expanded(1.10)
+        proposed[block_id] = (float(x), float(y), float(new_w), float(new_h))
+        x += new_w + 0.5
+        row_h = max(row_h, new_h)
+        if abs(new_w - old[2]) > 1e-6 or abs(new_h - old[3]) > 1e-6:
+            reasons.append(role_cap_reason(decision, old, proposed[block_id]))
+    return proposed, reasons
 
 
 def role_cap_reason(
@@ -269,7 +303,10 @@ def shape_policy_eval_row(
     before = layout_metrics(case, baseline, frame)
     after = layout_metrics(case, alternative, frame)
     deltas = metric_deltas(before, after)
+    before_path = layout_pathology_metrics(case, baseline, frame)
     after_path = layout_pathology_metrics(case, alternative, frame)
+    before_aspect = aspect_stats(baseline)
+    after_aspect = aspect_stats(alternative)
     aspect_score = aspect_pathology_score(alternative)
     baseline_aspect_score = aspect_pathology_score(baseline)
     return {
@@ -285,8 +322,18 @@ def shape_policy_eval_row(
         "soft_delta": deltas["soft_delta"],
         "aspect_pathology_score": aspect_score,
         "aspect_pathology_delta": aspect_score - baseline_aspect_score,
+        "extreme_aspect_count_delta": int(after_aspect["extreme_aspect_count_gt_1_5"])
+        - int(before_aspect["extreme_aspect_count_gt_1_5"]),
+        "extreme_aspect_area_fraction_delta": float(
+            after_aspect["extreme_aspect_area_fraction_gt_1_5"]
+        )
+        - float(before_aspect["extreme_aspect_area_fraction_gt_1_5"]),
         "hole_fragmentation": float(after_path["largest_empty_rectangle_ratio"]),
+        "hole_fragmentation_delta": float(after_path["largest_empty_rectangle_ratio"])
+        - float(before_path["largest_empty_rectangle_ratio"]),
         "occupancy_ratio": float(after_path["occupancy_ratio"]),
+        "grouping_violation_delta": deltas["grouping_delta"],
+        "mib_violation_delta": deltas["mib_delta"],
         "disruption": disruption_cost(baseline, alternative),
         "hard_feasible": bool(after["hard_feasible"]),
         "frame_protrusion": float(after["frame_protrusion"]),
@@ -413,6 +460,21 @@ def mib_group_policy_summary(case: FloorSetCase) -> dict[str, Any]:
         "mib_alternative_invalid_count": invalid,
         "group_count": len(group_ids),
     }
+
+
+def role_cache(case: FloorSetCase) -> dict[str, Any]:
+    key = id(case)
+    if key not in _ROLE_CACHE:
+        areas = [float(value) for value in case.area_targets.tolist()]
+        degrees = [b2b_degree(case, idx) for idx in range(case.block_count)]
+        _ROLE_CACHE[key] = {
+            "degrees": degrees,
+            "area_p25": percentile(areas, 0.25),
+            "area_p75": percentile(areas, 0.75),
+            "degree_p50": percentile(degrees, 0.50),
+            "degree_p75": percentile(degrees, 0.75),
+        }
+    return _ROLE_CACHE[key]
 
 
 def percentile(values: list[float], q: float) -> float:
