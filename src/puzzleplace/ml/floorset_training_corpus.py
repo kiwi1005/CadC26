@@ -23,8 +23,6 @@ from typing import Any
 
 import torch
 
-from puzzleplace.alternatives.geometry_macro_repack import write_json
-
 DATASET_URL = "https://huggingface.co/datasets/IntelLabs/FloorSet/resolve/main/LiteTensorData_v2.tar.gz"
 LOADER_CONTRACT = (
     "get_training_dataloader(...)-> "
@@ -52,6 +50,11 @@ class CorpusProbe:
 
 def load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def resolve_floorset_root(base_dir: Path, explicit_root: Path | None = None) -> Path | None:
