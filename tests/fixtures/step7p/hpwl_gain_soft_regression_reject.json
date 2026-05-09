@@ -1,0 +1,85 @@
+{
+  "blocks": [
+    {
+      "block_id": 0,
+      "fixed": true,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "block_id": 1,
+      "fixed": false,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 20,
+      "y": 0
+    },
+    {
+      "block_id": 2,
+      "fixed": false,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 40,
+      "y": 0
+    },
+    {
+      "block_id": 3,
+      "fixed": false,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 60,
+      "y": 0
+    }
+  ],
+  "bounds": {
+    "h": 100,
+    "w": 100
+  },
+  "candidates": [
+    {
+      "candidate_id": "soft_reject",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 20
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": 0,
+        "hpwl_delta": -2,
+        "soft_constraint_delta": 1.0
+      },
+      "operator_family": "soft_guarded_repair"
+    },
+    {
+      "candidate_id": "soft_accept",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 30
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": 0,
+        "hpwl_delta": -1,
+        "soft_constraint_delta": 0
+      },
+      "operator_family": "soft_guarded_repair"
+    }
+  ],
+  "expectations": {
+    "expect_soft_regression_rejection": true
+  },
+  "fixture_id": "hpwl_gain_soft_regression_reject",
+  "intent_family": "soft_guarded_repair"
+}

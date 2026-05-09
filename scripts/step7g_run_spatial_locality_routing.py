@@ -10,6 +10,7 @@ from typing import Any
 from puzzleplace.alternatives.locality_routing import (
     calibration_report,
     predict_move_locality,
+    routing_quality_report,
     routing_summary,
 )
 
@@ -120,7 +121,7 @@ def _predict_from_artifacts(
     changed_count = int(candidate["changed_block_count"])
     block_count = max(int(round(changed_count / max(candidate["changed_block_fraction"], 1e-9))), 1)
     fit_ratio = changed_count / max(total_slack, 1e-9)
-    return predict_move_locality(
+    prediction = predict_move_locality(
         case_id=int(candidate["case_id"]),
         block_count=block_count,
         changed_block_count=changed_count,
@@ -130,41 +131,145 @@ def _predict_from_artifacts(
         free_space_fit_ratio=fit_ratio,
         hard_summary=candidate["hard_summary"],
     )
+    prediction.update(
+        {
+            "source_move_type": candidate.get("source_move_type", "unknown"),
+            "source_policy": candidate.get("source_policy", "unknown"),
+            "source_track": candidate.get("source_track", "unknown"),
+        }
+    )
+    return prediction
 
 
 def _visualization_audit(path: Path) -> dict[str, Any]:
     debug_path = path / "arrow_endpoint_debug.json"
     rows = _load_json(debug_path, [])
+    suspicious_pngs = [
+        path / "case099_region_cell_repair.png",
+        path / "case091_region_cell_repair.png",
+    ]
     if not rows:
         return {
             "status": "missing_debug",
+            "trace_confidence": "unavailable",
             "arrow_endpoint_is_after_center": False,
+            "raw_distance_matches_centers": False,
             "block_id_matching_ok": False,
             "same_coordinate_frame_likely": False,
             "after_bbox_frame_protrusion_measured": False,
+            "arrows_do_not_autoscale_plot_into_unreadability": False,
             "debug_path": str(debug_path),
+            "suspicious_pngs": [
+                {"path": str(item), "exists": item.exists()} for item in suspicious_pngs
+            ],
         }
+    endpoint_ok = all(
+        _close_pair(row.get("drawn_end"), row.get("raw_after_center")) for row in rows
+    )
+    raw_distance_ok = all(_raw_distance_matches(row) for row in rows)
+    drawn_distances = [
+        _point_distance(row.get("drawn_start"), row.get("drawn_end")) for row in rows
+    ]
+    raw_distances = [float(row.get("distance", 0.0)) for row in rows]
+    arrows_normalized = any(
+        drawn < raw - 1e-6 for drawn, raw in zip(drawn_distances, raw_distances, strict=False)
+    )
+    by_case: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = f"case{int(row['case_id']):03d}_{row['repair_mode']}"
+        item = by_case.setdefault(
+            key,
+            {
+                "case_id": int(row["case_id"]),
+                "repair_mode": row["repair_mode"],
+                "row_count": 0,
+                "max_raw_distance": 0.0,
+                "after_outside_frame_count": 0,
+            },
+        )
+        item["row_count"] += 1
+        item["max_raw_distance"] = max(item["max_raw_distance"], float(row["distance"]))
+        item["after_outside_frame_count"] += int(not row.get("after_inside_frame", False))
     return {
         "status": "ok",
-        "arrow_endpoint_is_after_center": True,
+        "trace_confidence": "reconstructed",
+        "trace_confidence_reason": (
+            "Step7F arrow_endpoint_debug.json contains raw before/after centers "
+            "and clipped drawn arrows, but not the full exact construction trace."
+        ),
+        "arrow_endpoint_is_after_center": endpoint_ok,
+        "raw_distance_matches_centers": raw_distance_ok,
         "block_id_matching_ok": all(bool(row.get("block_id_matched")) for row in rows),
         "same_coordinate_frame_likely": True,
         "after_bbox_frame_protrusion_measured": all("after_inside_frame" in row for row in rows),
+        "arrows_do_not_autoscale_plot_into_unreadability": arrows_normalized,
+        "drawn_arrows_are_clipped_or_normalized": arrows_normalized,
         "debug_path": str(debug_path),
         "row_count": len(rows),
         "max_raw_distance": max(float(row["distance"]) for row in rows),
+        "max_drawn_distance": max(drawn_distances, default=0.0),
         "after_outside_frame_count": sum(int(not row["after_inside_frame"]) for row in rows),
+        "suspicious_pngs": [
+            {"path": str(item), "exists": item.exists()} for item in suspicious_pngs
+        ],
+        "per_case_repair_mode_summary": sorted(
+            by_case.values(), key=lambda item: (item["case_id"], item["repair_mode"])
+        ),
     }
 
 
-def _decision(calibration: dict[str, Any], audit: dict[str, Any], routing: dict[str, Any]) -> str:
+def _close_pair(left: Any, right: Any, *, tolerance: float = 1e-6) -> bool:
+    if (
+        not isinstance(left, list)
+        or not isinstance(right, list)
+        or len(left) != 2
+        or len(right) != 2
+    ):
+        return False
+    return all(abs(float(a) - float(b)) <= tolerance for a, b in zip(left, right, strict=False))
+
+
+def _point_distance(left: Any, right: Any) -> float:
+    if (
+        not isinstance(left, list)
+        or not isinstance(right, list)
+        or len(left) != 2
+        or len(right) != 2
+    ):
+        return 0.0
+    dx = float(left[0]) - float(right[0])
+    dy = float(left[1]) - float(right[1])
+    return (dx**2 + dy**2) ** 0.5
+
+
+def _raw_distance_matches(row: dict[str, Any], *, tolerance: float = 1e-5) -> bool:
+    measured = _point_distance(row.get("raw_before_center"), row.get("raw_after_center"))
+    return abs(measured - float(row.get("distance", 0.0))) <= tolerance
+
+
+def _decision(
+    calibration: dict[str, Any],
+    audit: dict[str, Any],
+    routing: dict[str, Any],
+    quality: dict[str, Any],
+) -> str:
     if audit["status"] != "ok" or not audit["block_id_matching_ok"]:
+        return "pivot_to_visualization_or_trace_repair"
+    if audit["trace_confidence"] == "unavailable" or not audit["raw_distance_matches_centers"]:
         return "pivot_to_visualization_or_trace_repair"
     if float(calibration["accuracy"]) < 0.60:
         return "inconclusive_due_to_prediction_quality"
     if calibration["counts"]["under_predicted_globality"] > 0:
         return "inconclusive_due_to_prediction_quality"
-    if routing["route_counts"].get("global_route_not_local_selector", 0) >= 1:
+    if (
+        quality["invalid_local_repair_attempt_rate_after_routing"]
+        < quality["invalid_local_repair_attempt_rate_before_routing"]
+        and quality["safe_improvement_count_after_routing_preserved"]
+        >= quality["safe_improvement_count_before_routing"]
+        and quality["pareto_front_non_empty_count_after_routing_preserved"]
+        >= quality["pareto_front_non_empty_count_before_routing"]
+        and routing["route_counts"].get("global_route_not_local_selector", 0) >= 1
+    ):
         return "promote_locality_routing_to_step7c"
     if routing["route_counts"].get("macro_legalizer", 0) >= 2:
         return "pivot_to_macro_level_move_generator"
@@ -178,6 +283,7 @@ def _write_decision_md(
     calibration: dict[str, Any],
     routing: dict[str, Any],
     audit: dict[str, Any],
+    quality: dict[str, Any],
 ) -> str:
     return (
         "\n".join(
@@ -204,6 +310,40 @@ def _write_decision_md(
                 json.dumps(calibration["counts"], indent=2),
                 "```",
                 f"- accuracy: `{calibration['accuracy']:.3f}`",
+                "",
+                "## Routing quality checks",
+                "",
+                "```json",
+                json.dumps(
+                    {
+                        "invalid_local_repair_attempt_rate_before_routing": quality[
+                            "invalid_local_repair_attempt_rate_before_routing"
+                        ],
+                        "invalid_local_repair_attempt_rate_after_routing": quality[
+                            "invalid_local_repair_attempt_rate_after_routing"
+                        ],
+                        "safe_improvement_count_before_routing": quality[
+                            "safe_improvement_count_before_routing"
+                        ],
+                        "safe_improvement_count_after_routing_preserved": quality[
+                            "safe_improvement_count_after_routing_preserved"
+                        ],
+                        "pareto_front_non_empty_count_before_routing": quality[
+                            "pareto_front_non_empty_count_before_routing"
+                        ],
+                        "pareto_front_non_empty_count_after_routing_preserved": quality[
+                            "pareto_front_non_empty_count_after_routing_preserved"
+                        ],
+                        "useful_improvements_requiring_nonlocal_followup": quality[
+                            "useful_improvements_requiring_nonlocal_followup"
+                        ],
+                        "useful_improvements_lost_by_over_aggressive_prediction": quality[
+                            "useful_improvements_lost_by_over_aggressive_prediction"
+                        ],
+                    },
+                    indent=2,
+                ),
+                "```",
                 "",
                 "## Visualization sanity audit",
                 "",
@@ -334,6 +474,10 @@ def main() -> None:
         default="artifacts/research/step7f_bounded_repair_results.json",
     )
     parser.add_argument(
+        "--step7f-pareto",
+        default="artifacts/research/step7f_pareto_repair_selection.json",
+    )
+    parser.add_argument(
         "--step7e-occupancy",
         default="artifacts/research/step7e_region_occupancy.json",
     )
@@ -352,6 +496,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     candidates = _load_json(Path(args.step7f_candidates), [])
     step7f_results = _load_json(Path(args.step7f_results), [])
+    pareto_selection = _load_json(Path(args.step7f_pareto), {})
     step7f_by_case: dict[int, list[dict[str, Any]]] = {}
     for row in step7f_results:
         step7f_by_case.setdefault(int(row["case_id"]), []).append(row)
@@ -371,8 +516,9 @@ def main() -> None:
     ]
     routing = routing_summary(predictions)
     calibration = calibration_report(predictions, step7f_by_case)
+    quality = routing_quality_report(predictions, step7f_by_case, pareto_selection)
     audit = _visualization_audit(output_dir / "step7f_visualizations")
-    decision = _decision(calibration, audit, routing)
+    decision = _decision(calibration, audit, routing, quality)
     visualizations = _render_visualizations(locality_maps, output_dir)
     case_ids = [int(row["case_id"]) for row in candidates]
     decision_md = _write_decision_md(
@@ -381,12 +527,15 @@ def main() -> None:
         calibration=calibration,
         routing=routing,
         audit=audit,
+        quality=quality,
     )
     routing_results = {
         "summary": routing,
+        "quality": quality,
         "per_case": [
             {
                 "case_id": row["case_id"],
+                "source_move_type": row.get("source_move_type"),
                 "predicted_locality_class": row["predicted_locality_class"],
                 "routing_decision": row["predicted_repair_mode"],
             }
@@ -411,6 +560,17 @@ def main() -> None:
                 "decision": decision,
                 "case_ids": case_ids,
                 "routing": routing,
+                "quality": {
+                    "invalid_before": quality[
+                        "invalid_local_repair_attempt_rate_before_routing"
+                    ],
+                    "invalid_after": quality[
+                        "invalid_local_repair_attempt_rate_after_routing"
+                    ],
+                    "safe_improvements_preserved": quality[
+                        "safe_improvement_count_after_routing_preserved"
+                    ],
+                },
                 "calibration_accuracy": calibration["accuracy"],
                 "visualizations": len(visualizations),
                 "output": str(output_dir / "step7g_decision.md"),

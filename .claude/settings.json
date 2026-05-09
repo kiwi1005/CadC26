@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=src .venv/bin/python scripts/step7s_contact_graph.py --case-id 24 --seed-block 32 --eps-contact 1e-3 --out artifacts/research/step7s_case24_block32_contact_graph_original.json)",
+      "Bash(PYTHONPATH=src .venv/bin/python scripts/step7s_critical_cone_certificate.py --case-id 24 --seed-block 32 --contact-graph artifacts/research/step7s_case24_block32_contact_graph_original.json --trust-region 0.5 --fd-step 1e-4 --n-workers 48 --out artifacts/research/step7s_case24_block32_cone_certificate_original.json)",
+      "Bash(PYTHONPATH=src .venv/bin/python -m ruff check scripts/step7s_run_all_cases_certificate.py)",
+      "Bash(time PYTHONPATH=src .venv/bin/python scripts/step7s_run_all_cases_certificate.py)"
+    ]
+  }
+}

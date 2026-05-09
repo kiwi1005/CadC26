@@ -1,0 +1,121 @@
+{
+  "blocks": [
+    {
+      "block_id": 0,
+      "fixed": true,
+      "h": 10,
+      "mib": 0,
+      "preplaced": false,
+      "w": 10,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "block_id": 1,
+      "fixed": false,
+      "h": 10,
+      "mib": 1,
+      "preplaced": false,
+      "w": 10,
+      "x": 20,
+      "y": 0
+    },
+    {
+      "block_id": 2,
+      "fixed": false,
+      "h": 10,
+      "mib": 1,
+      "preplaced": false,
+      "w": 10,
+      "x": 40,
+      "y": 0
+    },
+    {
+      "block_id": 3,
+      "fixed": false,
+      "h": 10,
+      "mib": 0,
+      "preplaced": false,
+      "w": 10,
+      "x": 60,
+      "y": 0
+    }
+  ],
+  "bounds": {
+    "h": 100,
+    "w": 100
+  },
+  "candidates": [
+    {
+      "candidate_id": "mib_a",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 20
+        },
+        {
+          "block_id": 2,
+          "x": 40,
+          "y": 20
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": 0,
+        "hpwl_delta": -1,
+        "soft_constraint_delta": 0
+      },
+      "operator_family": "mib_shape_preserve_repack"
+    },
+    {
+      "candidate_id": "mib_b",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 30
+        },
+        {
+          "block_id": 2,
+          "x": 40,
+          "y": 30
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": 0.0,
+        "hpwl_delta": -0.5,
+        "soft_constraint_delta": -0.1
+      },
+      "operator_family": "closure_translate_with_repair"
+    },
+    {
+      "candidate_id": "mib_c",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 40
+        },
+        {
+          "block_id": 2,
+          "x": 40,
+          "y": 40
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": -0.1,
+        "hpwl_delta": -0.2,
+        "soft_constraint_delta": 0
+      },
+      "operator_family": "mib_shape_preserve_repack"
+    }
+  ],
+  "expectations": {
+    "expect_mib_guard_pass": true
+  },
+  "fixture_id": "mib_equal_shape_guard",
+  "intent_family": "mib_shape_preserve_repack"
+}
