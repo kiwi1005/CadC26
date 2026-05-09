@@ -60,9 +60,23 @@ sidecar study and does not add a hard runtime gate.
   `global_route_not_local_selector`, which means Step7C should promote
   locality-aware routing before trying bounded local repair as the selector
   default.
-- Step7F visualization audit: OK. Arrow endpoint debug exists, block id matching
-  is true, after-frame protrusion is measured, and raw max displacement remains
-  explicitly visible.
+- Invalid local-repair attempt rate falls from `1.0` before routing to `0.0`
+  after routing because no candidate is sent to `bounded_repair_pareto`.
+- Safe improvements are preserved in reporting/non-local follow-up:
+  cases `19`, `24`, and `25` still have non-empty Pareto fronts and original
+  rollback candidates. They would be lost only if a downstream consumer treated
+  non-local routing as rejection, which Step7G explicitly forbids.
+- Move-source diversity is retained inside the global route:
+  `posthoc_shape_probe:role_aware_cap` (5),
+  `construction_shape_policy_replay:group_macro_aspect_regularized` (2), and
+  `construction_shape_policy_replay:role_aware_cap` (1).
+- Step7F visualization audit: OK with `trace_confidence = reconstructed`.
+  Arrow endpoint debug exists, drawn endpoints equal raw after-block centers,
+  block id matching is true, raw distances match raw before/after centers,
+  after-frame protrusion is measured, suspicious case099/case091 PNGs exist,
+  and drawn arrows are clipped/normalized so the plot is not autoscaled into
+  unreadability. The exact construction trace is not present, so the audit does
+  not overclaim exact trace provenance.
 
 ## Decision options
 
@@ -71,3 +85,16 @@ sidecar study and does not add a hard runtime gate.
 - `pivot_to_macro_level_move_generator`
 - `pivot_to_visualization_or_trace_repair`
 - `inconclusive_due_to_prediction_quality`
+
+## Decision
+
+```text
+promote_locality_routing_to_step7c
+```
+
+Reason: locality prediction is calibrated on the available Step7F weak labels
+(`correct_global = 8`, no under-predicted globality), it removes invalid
+bounded-local repair attempts while preserving safe improvements and non-empty
+Pareto fronts in the non-local reporting path, and the visualization/trace audit
+is trustworthy enough for routing calibration when labeled as reconstructed
+rather than exact.

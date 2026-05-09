@@ -19,4 +19,21 @@ Step6G-P 已在 commit `17744b7` checkpoint。Step7 期間先保留 Step6 sideca
 
 ## Current Step7 entry
 
-第一刀：Step7A Aspect Pathology and Role-Aware Shape Diagnosis。
+Step7A-G 已完成到 spatial locality routing sidecar。
+
+目前最新決策：
+
+```text
+artifacts/research/step7g_decision.md
+Decision: promote_locality_routing_to_step7c
+```
+
+下一個安全入口：
+
+```text
+Step7H: locality-routed Step7C thin loop
+```
+
+重點是先把 Step7G 的 locality classification 接到 sidecar DGLPR
+orchestration，避免 large/XL global moves 再被送進 bounded local selector；
+仍不得直接進 contest runtime。

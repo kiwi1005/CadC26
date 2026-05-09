@@ -1,0 +1,106 @@
+{
+  "blocks": [
+    {
+      "block_id": 0,
+      "boundary": 0,
+      "fixed": true,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "block_id": 1,
+      "boundary": 1,
+      "fixed": false,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 20,
+      "y": 0
+    },
+    {
+      "block_id": 2,
+      "boundary": 0,
+      "fixed": false,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 40,
+      "y": 0
+    },
+    {
+      "block_id": 3,
+      "boundary": 0,
+      "fixed": false,
+      "h": 10,
+      "preplaced": false,
+      "w": 10,
+      "x": 60,
+      "y": 0
+    }
+  ],
+  "bounds": {
+    "h": 100,
+    "w": 100
+  },
+  "candidates": [
+    {
+      "candidate_id": "boundary_a",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 20
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": 0,
+        "hpwl_delta": -1,
+        "soft_constraint_delta": 0
+      },
+      "operator_family": "boundary_contact_guarded"
+    },
+    {
+      "candidate_id": "boundary_b",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 30,
+          "y": 20
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": -0.1,
+        "hpwl_delta": -0.8,
+        "soft_constraint_delta": 0
+      },
+      "operator_family": "boundary_contact_guarded"
+    },
+    {
+      "candidate_id": "boundary_c",
+      "guard_ok": true,
+      "moves": [
+        {
+          "block_id": 1,
+          "x": 20,
+          "y": 30
+        }
+      ],
+      "objective_vector": {
+        "bbox_area_delta": 0,
+        "hpwl_delta": -0.4,
+        "soft_constraint_delta": -0.1
+      },
+      "operator_family": "boundary_contact_guarded"
+    }
+  ],
+  "expectations": {
+    "expect_boundary_guard_pass": true
+  },
+  "fixture_id": "boundary_contact_guard",
+  "intent_family": "boundary_contact_guarded"
+}
