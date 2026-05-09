@@ -11,6 +11,8 @@ from puzzleplace.data import ConstraintColumns, FloorSetCase
 from puzzleplace.feedback import load_policy_checkpoint
 from puzzleplace.models.policy import DecoderOutput, TypedActionPolicy
 from puzzleplace.repair import RepairResult, finalize_layout
+from puzzleplace.repair.active_soft_postprocess import active_soft_postprocess
+from puzzleplace.repair.multistage_active_soft import multistage_active_soft_postprocess
 from puzzleplace.roles import label_case_roles
 from puzzleplace.rollout import semantic_rollout
 from puzzleplace.scoring import ObjectiveCandidate, select_objective_candidate
@@ -159,6 +161,8 @@ class ContestOptimizer(FloorplanOptimizer):
         objective_selection_k: int = 1,
         objective_selector: str = "hpwl_bbox_soft_repair_proxy",
         verbose: bool = False,
+        use_multistage: bool = True,
+        multistage_max_candidates: int | None = 200,
     ):
         super().__init__(verbose=verbose)
         self.beam_width = beam_width
@@ -169,6 +173,8 @@ class ContestOptimizer(FloorplanOptimizer):
             Path(checkpoint_path) if checkpoint_path is not None else CHECKPOINT_PATH
         )
         self._policy = None
+        self.use_multistage = use_multistage
+        self.multistage_max_candidates = multistage_max_candidates
         self.last_report: dict[str, float | bool | int | str] = {}
 
     def _load_policy(self):
@@ -315,6 +321,18 @@ class ContestOptimizer(FloorplanOptimizer):
         selected_candidate = solved_candidates[selected_index]
         selected_repair = solved_repairs[selected_index]
         used_fallback = fallback_flags[selected_index]
+        positions = selected_candidate.positions
+
+        # Fast path: single-stage active-soft postprocess
+        soft_positions, soft_report = active_soft_postprocess(case, positions)
+
+        # Fallback: multi-stage for cases where single-stage finds no winner
+        multi_report: dict[str, object] = {}
+        if self.use_multistage and not soft_report.get("active_soft_applied"):
+            soft_positions, multi_report = multistage_active_soft_postprocess(
+                case, positions, max_candidates=self.multistage_max_candidates,
+            )
+
         self.last_report = {
             "semantic_completed": bool(
                 selected_candidate.metadata.get("semantic_completed", False)
@@ -333,8 +351,10 @@ class ContestOptimizer(FloorplanOptimizer):
             "selected_candidate_source": selected_candidate.source_id,
             "selected_candidate_index": selected_index,
             "selected_objective_score": selected_score,
+            **soft_report,
+            **{f"multi_{k}": v for k, v in multi_report.items()},
         }
-        return selected_candidate.positions, dict(self.last_report)
+        return soft_positions, dict(self.last_report)
 
     def solve(
         self,
