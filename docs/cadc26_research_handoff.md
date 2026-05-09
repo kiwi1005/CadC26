@@ -1,6 +1,6 @@
 # CadC26 research handoff — condensed source of truth
 
-Updated: 2026-05-09 Asia/Taipei. This file replaces the old per-step diary docs
+Updated: 2026-05-10 Asia/Taipei. This file replaces the old per-step diary docs
 for Step4, Step6, Step7, and Oracle prompts. Closed experiment details were
 condensed here; old step docs/prompts were intentionally deleted to keep the
 workspace small. For machine evidence, prefer `artifacts/research/*.json` and
@@ -19,8 +19,12 @@ workspace small. For machine evidence, prefer `artifacts/research/*.json` and
   cases: 6 direct KKT-stationary, 8 stationary under HPWL hinge cap, 0 strict
   winners.
 - Step7T is the current positive branch: active-soft boundary repair found
-  **3 strict winners on 3/8 representative cases** from 400 candidates, with
-  `phase4_gate_open=true` and visual sanity / exact replay passing.
+  **3 strict winners on 3/8 representative cases** (single-stage POC, 400 candidates)
+  with `phase4_gate_open=true`. Multi-stage extension (HPWL-sensitive + joint feasibility
+  + gradient compensation) expanded to **50 strict winners (2.08x)** and **6/6 cases**
+  with winners, including the first-ever case 79 winner via Stage 2 joint push.
+  Integrated into `ContestOptimizer.solve_with_report` as fast-path (single-stage) →
+  fallback (multi-stage). Codex review resolved 3 major issues in the multi-stage module.
 - Step7U is a certificate branch, not a generator: bounded disjunctive blocker
   surrogate for case 24/block 32 returned `blocker_obstruction_certificate`,
   0 hard-feasible candidates out of 33, and no strict winner.
@@ -28,9 +32,16 @@ workspace small. For machine evidence, prefer `artifacts/research/*.json` and
 Current next action:
 
 ```text
-Review/integrate the Step7T active-soft exact winners for Phase4 comparison.
+Phase4 integration review in progress (2026-05-10):
+- [x] Multi-stage active-soft integrated into ContestOptimizer
+- [x] Step7V live adapter source built (step7v_live_active_soft_adapter.py)
+- [x] Phase4 review module updated with multi-stage comparison and current blockers
+- [ ] Run step7v live adapter in contest runtime (needs iccad2026_evaluate)
+- [ ] Generate step7t_active_soft_summary.json and step7t_visual_sanity.json
+- [ ] Close remaining runtime blockers: live_adapter_never_run,
+      validation_label_replay_baseline_not_runtime_input,
+      contest_runtime_finalizer_unchanged
 Do not lower MEANINGFUL_COST_EPS. Do not restart P/Q/R-style local operators.
-Keep Step7U as blocker evidence unless explicitly widening to larger MILP/CP-SAT.
 ```
 
 ## Stable operating rules
@@ -161,6 +172,38 @@ active-soft repair source.
   - 0 strict winners.
 
 ## Retention policy after 2026-05-09 cleanup
+
+## Phase4 review status (2026-05-10)
+
+**Sidecar gate**: `phase4_gate_open=true` from single-stage POC (3/8 winners).
+Multi-stage (50 winners, 6/6 cases) strengthens the evidence but needs fresh
+replay in contest runtime to produce formal Phase4 artifacts.
+
+**Runtime integration blockers** (3 remaining):
+1. `live_adapter_never_run_in_contest_runtime` — Step7V adapter source exists
+   (`src/puzzleplace/experiments/step7v_live_active_soft_adapter.py`) but has
+   never been executed because `iccad2026_evaluate` is not available in this env.
+2. `validation_label_replay_baseline_not_runtime_input` — structural: current
+   POC replay uses validation target positions, not contest optimizer output.
+   Step7V addresses this by calling `ContestOptimizer.solve_with_report`.
+3. `contest_runtime_finalizer_unchanged` — the repair finalizer in the contest
+   runtime path hasn't been modified to include active-soft postprocessing.
+
+**What's needed to close all blockers**:
+- Execute `scripts/step7v_precompute_live_baselines.py` and
+  `scripts/step7v_parallel_live_active_soft_adapter.py` in the contest runtime
+  to produce live-adapter evidence.
+- Or, run `scripts/step7t_run_active_soft_cone.py` + `scripts/step7t_visual_sanity.py`
+  to regenerate the sidecar evidence, then run `scripts/step7t_phase4_review.py`.
+
+**Existing artifacts** (after cleanup):
+- `artifacts/research/step7s_*.json` (34 files) — Step7S terminal certificates
+- `artifacts/models/agent11_awbc_policy.pt` — Trained checkpoint (522 KB)
+- Step7T experiment output artifacts (summary, visual sanity) were deleted during
+  cleanup and need regeneration.
+
+**Dependencies not vendored**: `iccad2026_evaluate` — required to run any
+experiment. Only available in the contest runtime environment.
 
 Kept docs:
 

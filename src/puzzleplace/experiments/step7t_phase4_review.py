@@ -54,6 +54,7 @@ def review_step7t_phase4(
     step7s_summary: dict[str, Any] | None = None,
     step7q_summary: dict[str, Any] | None = None,
     step7r_decision: dict[str, Any] | None = None,
+    multistage_summary: dict[str, Any] | None = None,
     source_summary_path: str | None = None,
     visual_sanity_path: str | None = None,
 ) -> dict[str, Any]:
@@ -105,9 +106,13 @@ def review_step7t_phase4(
         "Current implementation reconstructs validation target positions for replay/evaluation.",
         "Runtime integration requires a live-layout adapter that audits active soft violations "
         "from optimizer-produced candidate positions rather than validation labels.",
+        "Step7V live adapter (step7v_live_active_soft_adapter.py) exists but has not been "
+        "run in the contest runtime — no output artifacts exist yet.",
+        "Multi-stage active-soft (multistage_active_soft.py) is integrated into "
+        "ContestOptimizer.solve_with_report as a fallback after single-stage.",
     ]
     runtime_blockers = [
-        "live_layout_adapter_missing",
+        "live_adapter_never_run_in_contest_runtime",
         "validation_label_replay_baseline_not_runtime_input",
         "contest_runtime_finalizer_unchanged",
     ]
@@ -160,6 +165,27 @@ def review_step7t_phase4(
                 visual_sanity.get("exact_strict_winner_count", 0)
             ),
         },
+        "step7t_multistage": {
+            "integrated_in_contest_optimizer": True,
+            "multistage_strict_winners": int(
+                (multistage_summary or {}).get("multistage_strict_winners", 0)
+            ),
+            "multistage_candidates_evaluated": int(
+                (multistage_summary or {}).get("multistage_candidates_evaluated", 0)
+            ),
+            "multistage_applied": bool(
+                (multistage_summary or {}).get("multistage_applied", False)
+            ),
+            "stage1_direct_snaps": int(
+                (multistage_summary or {}).get("stage1_direct_snaps", 0)
+            ),
+            "stage2_joint_pushes": int(
+                (multistage_summary or {}).get("stage2_joint_pushes", 0)
+            ),
+            "stage3_hpwl_compensations": int(
+                (multistage_summary or {}).get("stage3_hpwl_compensations", 0)
+            ),
+        },
     }
 
     return {
@@ -180,10 +206,13 @@ def review_step7t_phase4(
         "comparison": comparison,
         "runtime_blockers": runtime_blockers,
         "source_policy_notes": source_policy_notes,
-        "recommended_next_experiment": "step7v_live_layout_active_soft_adapter",
+        "recommended_next_experiment": "run_step7v_live_adapter_in_contest_runtime",
         "recommended_next_gate": (
-            "Replay active-soft repair from live optimizer candidate positions and require "
-            ">=3 exact strict meaningful winners without validation-label baseline dependence."
+            "Execute step7v_live_active_soft_adapter in contest runtime to produce Phase4 "
+            "evidence from live optimizer candidate positions. Require >=3 exact strict "
+            "meaningful winners without validation-label baseline dependence. The adapter "
+            "source exists at src/puzzleplace/experiments/step7v_live_active_soft_adapter.py "
+            "and scripts/step7v_*.py; it needs iccad2026_evaluate to run."
         ),
     }
 

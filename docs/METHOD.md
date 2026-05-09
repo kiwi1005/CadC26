@@ -196,9 +196,44 @@ The three-stage pipeline targets the root cause: boundary repairs should never
 expand the bounding box, should account for local HPWL gradient, and should
 compensate neighboring blocks when one block's move causes collateral damage.
 
+## Phase4 gate criteria
+
+The Phase4 review (`src/puzzleplace/experiments/step7t_phase4_review.py`)
+evaluates whether Step7T evidence is strong enough for integration.
+
+### Sidecar review pass conditions
+
+All must hold:
+- `active_summary.phase4_gate_open` is True
+- `visual_sanity.decision == "strict_winner_visual_sanity_pass"`
+- `visual_sanity.exact_strict_winner_count >= 3`
+- At least 3 unique strict winner cases
+- Max stored-vs-exact delta error <= EPS (1e-9)
+
+### Runtime integration blockers (3 remaining)
+
+| Blocker | Status |
+|---|---|
+| `live_adapter_never_run_in_contest_runtime` | Step7V adapter source exists but needs `iccad2026_evaluate` to execute |
+| `validation_label_replay_baseline_not_runtime_input` | Structural: POC uses validation targets; Step7V addresses this |
+| `contest_runtime_finalizer_unchanged` | Finalizer hasn't been modified to include active-soft postprocessing |
+
+### Current evidence
+
+| Source | Strict Winners | Cases | Status |
+|---|---|---|---|
+| Step7T single-stage POC | 3 | 3/8 | Phase4 gate open |
+| Step7T multi-stage | 50 (2.08x) | 6/6 | Smoke-tested, integrated in ContestOptimizer |
+| Step7S terminal certificate | 0 | 8/8 KKT-stationary | Evidence only, no winners |
+| Step7V live adapter | — | — | Source built, never run |
+
 ## References
 
-- Step7T POC: `docs/step7t_active_soft_cone.md`
-- Step7V live adapter: `artifacts/research/step7v_live_active_soft_parallel_summary.md`
-- Current postprocessor: `src/puzzleplace/repair/active_soft_postprocess.py`
+- Step7T POC + multi-stage results: `docs/step7t_active_soft_cone.md`
+- Research handoff + Phase4 status: `docs/cadc26_research_handoff.md`
+- Single-stage postprocessor: `src/puzzleplace/repair/active_soft_postprocess.py`
+- Multi-stage postprocessor: `src/puzzleplace/repair/multistage_active_soft.py`
 - Candidate generator: `src/puzzleplace/experiments/step7t_active_soft_cone.py`
+- Phase4 review: `src/puzzleplace/experiments/step7t_phase4_review.py`
+- Live adapter: `src/puzzleplace/experiments/step7v_live_active_soft_adapter.py`
+- Contest optimizer integration: `src/puzzleplace/optimizer/contest.py`

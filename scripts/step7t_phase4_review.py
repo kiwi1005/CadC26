@@ -46,6 +46,11 @@ def main() -> None:
         default=Path("artifacts/research/step7r_close_decision.json"),
     )
     parser.add_argument(
+        "--multistage-summary",
+        type=Path,
+        default=Path("artifacts/research/step7t_multistage_summary.json"),
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         default=Path("artifacts/research/step7t_phase4_review.json"),
@@ -63,6 +68,7 @@ def main() -> None:
         step7s_summary=optional_json(args.step7s_summary),
         step7q_summary=optional_json(args.step7q_summary),
         step7r_decision=optional_json(args.step7r_decision),
+        multistage_summary=optional_json(args.multistage_summary),
         source_summary_path=str(args.summary),
         visual_sanity_path=str(args.visual_sanity),
     )
