@@ -1,7 +1,34 @@
-# FloorSet Puzzle Bootstrap
+# FloorSet Puzzle Research Workspace
 
-This repository currently contains the **bootstrap scaffold** for a local-only FloorSet puzzle workflow.
-The upstream FloorSet checkout lives under `external/FloorSet/`, stays untracked, and should not be modified in place.
+CadC26 is a local FloorSet-Lite / ICCAD 2026 floorplanning research workspace.
+It contains a runnable Python package, contest smoke entrypoints, tests, and
+sidecar research experiments. The upstream FloorSet checkout lives under
+`external/FloorSet/`, stays untracked, and must not be modified in place.
+
+## Current project direction
+
+The active architecture is Step7 **DGLPR**:
+
+```text
+Diagnose -> Generate Alternatives -> Legalize -> Pareto Select -> Refine / Iterate
+```
+
+As of 2026-05-09:
+
+- Step6 is frozen historical evidence.
+- Step7P/Q/R local-operator expansion produced 0 strict meaningful winners.
+- Step7S certified local smooth-face stationarity on the 8 representative cases.
+- Step7T active-soft repair is the current positive branch: 3 strict winners on
+  3/8 representative cases, `phase4_gate_open=true`, exact visual sanity passed.
+- Step7U bounded blocker MILP is currently an obstruction certificate, not a
+  generator.
+
+Read `docs/cadc26_research_handoff.md` for the condensed Step4/6/7 history,
+current bottleneck, and cleanup retention policy. Old per-step diary docs and
+Oracle prompt docs were merged there and deleted.
+
+Do not integrate runtime/finalizer changes from Step7 sidecars until a fresh
+Phase4 review validates the exact active-soft winners.
 
 ## Environment
 
@@ -11,74 +38,78 @@ The upstream FloorSet checkout lives under `external/FloorSet/`, stays untracked
 git clone https://github.com/IntelLabs/FloorSet.git external/FloorSet
 ```
 
-`external/FloorSet/` is ignored by git on purpose so upstream source and downloaded datasets do not get vendored into this repository.
+`external/FloorSet/` is ignored by git on purpose so upstream source and
+downloaded datasets do not get vendored into this repository.
 
-### 2. Create and activate a virtual environment
+### 2. Use the repo virtual environment
+
+This checkout normally has `.venv` pointing at the shared `cadc-baseline`
+environment. Prefer it instead of creating a second environment:
 
 ```bash
-python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install -e .[dev]
 ```
 
-### 3. Install contest + local development dependencies
+For commands in automation, use:
 
 ```bash
-pip install -r external/FloorSet/iccad2026contest/requirements.txt
-pip install -e .[dev]
+PYTHONPATH=src .venv/bin/python <script-or-module>
 ```
 
 ## Smoke download / loader check
-
-Run the bootstrap smoke script:
 
 ```bash
 python scripts/download_smoke.py
 ```
 
-What it does:
-- imports the official `get_validation_dataloader()` and `get_training_dataloader()` helpers
-- auto-approves the upstream dataset download prompt for non-interactive runs
-- loads the first validation batch and prints field names, tensor shapes, and inferred block count
-- loads a training dataloader with `batch_size=1, num_samples=10` and prints the first batch summary
-
-### Data locations
-
-The script targets the official checkout root at `external/FloorSet/`.
-With the current upstream loader implementation, downloaded data is expected under:
+The script imports official FloorSet dataloaders, auto-approves the dataset
+prompt for non-interactive runs, and prints validation/training batch structure.
+Expected local-only data roots:
 
 - validation: `external/FloorSet/LiteTensorDataTest/`
 - training: `external/FloorSet/floorset_lite/`
 
-The contest README still describes `LiteTensorData/` as the training location, but the current upstream training loader checks `floorset_lite/`; downstream code should treat the loader implementation as the source of truth.
+## Main entrypoints
 
-## Downstream environment contract
+Contest/runtime:
 
-Consumers may assume the following bootstrap contract:
-
-- official imports come from `external/FloorSet/iccad2026contest/`
-- the repo root script entrypoint is `python scripts/download_smoke.py`
-- the smoke script inserts both `external/FloorSet/` and `external/FloorSet/iccad2026contest/` onto `sys.path`
-- validation batches follow the official structure:
-  - inputs: `(area_target, b2b_connectivity, p2b_connectivity, pins_pos, placement_constraints)`
-  - labels: `(polygons, metrics)`
-- training batches follow the official structure:
-  - `(area_target, b2b_connectivity, p2b_connectivity, pins_pos, placement_constraints, tree_sol, fp_sol, metrics)`
-- all upstream datasets and artifacts remain local-only and untracked
-
-## Current milestone scripts
-
-- `python scripts/report_candidate_coverage.py`
-- `python scripts/train_bc_small.py`
-- `python scripts/rollout_validate.py`
-- `python scripts/run_agent10_ablation.py`
-- `python scripts/train_awbc_small.py`
+- `contest_optimizer.py`
+- `src/puzzleplace/optimizer/contest.py`
 - `python scripts/evaluate_contest_optimizer.py`
 - `python scripts/run_smoke_regression_matrix.py`
 
-## Contest entrypoint
+Research sidecars:
 
-- The repository-level submission file is `contest_optimizer.py`.
-- It delegates to `src/puzzleplace/optimizer/contest.py`.
-- If `artifacts/models/agent11_awbc_policy.pt` exists, the contest optimizer loads it.
-- Otherwise it falls back to a deterministic heuristic policy so the validator/evaluator path remains runnable.
+- Step7 scripts live under `scripts/step7*.py`.
+- Step7 modules live under `src/puzzleplace/{diagnostics,alternatives,experiments,ml,repack,search}/`.
+- Generated evidence lives under ignored `artifacts/research/`.
+- Closed experiment conclusions should be merged into
+  `docs/cadc26_research_handoff.md` instead of accumulating one doc per step.
+
+## Verification shortcuts
+
+Use the repository environment and `PYTHONPATH=src`:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest tests/<focused_test>.py
+PYTHONPATH=src .venv/bin/python -m ruff check <touched_python_files>
+PYTHONPATH=src .venv/bin/python -m mypy <typed_modules_or_scripts>
+```
+
+For broad checks after larger code changes:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m pytest
+PYTHONPATH=src .venv/bin/python -m ruff check src scripts tests
+```
+
+## Red lines
+
+- Do not edit `external/FloorSet/` in place.
+- Do not promote sidecar behavior into contest runtime/finalizer paths without
+  explicit scope widening and fresh verification.
+- Do not lower `MEANINGFUL_COST_EPS=1e-7` to rescue local micro improvements.
+- Do not reopen Step7P/Q/R-style local operators unless FloorSet/data/threshold
+  changes and Step7S is rerun first.
+- Do not report only averages; preserve per-case and per-profile evidence.

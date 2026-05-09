@@ -61,7 +61,7 @@ shelf_fallback_count
 
 ## Smoke commands
 
-These are the pivot smoke targets from `AGENT_step2.md`; they describe the intended repair/finalizer check once the stage script is wired in.
+These are historical pivot smoke targets kept as conceptual examples for repair/finalizer checks; verify current script availability before running them.
 
 ### Pivot smoke target
 

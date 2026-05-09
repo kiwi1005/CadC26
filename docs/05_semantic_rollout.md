@@ -55,7 +55,7 @@ violation_profile
 
 ## Smoke commands
 
-These are the pivot smoke targets from `AGENT_step2.md`; they are documented here as the intended rollout checks, not as verified current-baseline commands.
+These are historical pivot smoke targets kept as conceptual examples; verify current script availability before running them.
 
 ### Pivot smoke target
 

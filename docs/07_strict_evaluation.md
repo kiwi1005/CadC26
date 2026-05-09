@@ -47,7 +47,7 @@ violations_relative
 
 ## Smoke commands
 
-These are the pivot smoke targets from `AGENT_step2.md`; they describe the intended strict gate after repair/finalization.
+These are historical pivot smoke targets kept as conceptual examples for the strict gate; verify current script availability before running them.
 
 ### Pivot smoke target
 

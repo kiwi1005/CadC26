@@ -29,7 +29,7 @@ Look at these artifacts first:
 
 ## Smoke commands
 
-Use the smoke command that matches the failing stage. These are the pivot target runners from `AGENT_step2.md`:
+Use the smoke command that matches the failing stage. The following are historical pivot target runners kept as conceptual examples; verify current script availability before running them:
 
 ```bash
 python scripts/check_candidate_coverage.py
