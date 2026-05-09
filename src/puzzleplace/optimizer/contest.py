@@ -11,6 +11,7 @@ from puzzleplace.data import ConstraintColumns, FloorSetCase
 from puzzleplace.feedback import load_policy_checkpoint
 from puzzleplace.models.policy import DecoderOutput, TypedActionPolicy
 from puzzleplace.repair import RepairResult, finalize_layout
+from puzzleplace.repair.active_soft_postprocess import active_soft_postprocess
 from puzzleplace.roles import label_case_roles
 from puzzleplace.rollout import semantic_rollout
 from puzzleplace.scoring import ObjectiveCandidate, select_objective_candidate
@@ -315,6 +316,9 @@ class ContestOptimizer(FloorplanOptimizer):
         selected_candidate = solved_candidates[selected_index]
         selected_repair = solved_repairs[selected_index]
         used_fallback = fallback_flags[selected_index]
+        positions = selected_candidate.positions
+        soft_positions, soft_report = active_soft_postprocess(case, positions)
+
         self.last_report = {
             "semantic_completed": bool(
                 selected_candidate.metadata.get("semantic_completed", False)
@@ -333,8 +337,9 @@ class ContestOptimizer(FloorplanOptimizer):
             "selected_candidate_source": selected_candidate.source_id,
             "selected_candidate_index": selected_index,
             "selected_objective_score": selected_score,
+            **soft_report,
         }
-        return selected_candidate.positions, dict(self.last_report)
+        return soft_positions, dict(self.last_report)
 
     def solve(
         self,
