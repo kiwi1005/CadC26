@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import torch
-import pytest
 
 from puzzleplace.data.schema import ConstraintColumns, FloorSetCase
 from puzzleplace.repair.active_soft_postprocess import active_soft_postprocess

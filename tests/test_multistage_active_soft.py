@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import torch
-import pytest
 
 from puzzleplace.data.schema import ConstraintColumns, FloorSetCase
 from puzzleplace.repair.multistage_active_soft import (
     _bbox_of,
+    _block_center,
     _boundary_edges,
     _boundary_margin,
-    _snap_delta,
-    _block_center,
-    compute_hpwl_sensitivity,
-    compute_bbox_edge_owners,
-    build_net_neighborhood,
-    _rects_overlap,
     _push_to_resolve_overlap,
+    _rects_overlap,
+    _snap_delta,
+    build_net_neighborhood,
+    compute_bbox_edge_owners,
+    compute_hpwl_sensitivity,
     multistage_active_soft_postprocess,
 )
 
@@ -96,6 +97,17 @@ def test_hpwl_sensitivity_no_edges():
     assert sy == [0.0, 0.0, 0.0, 0.0]
 
 
+def test_hpwl_sensitivity_sign_convention_for_b2b_edge():
+    case = _make_case(2, [0, 0])
+    case.b2b_edges = torch.tensor([[0.0, 1.0, 2.0]], dtype=torch.float32)
+    positions = [(0.0, 0.0, 10.0, 10.0), (20.0, 0.0, 10.0, 10.0)]
+
+    sx, sy = compute_hpwl_sensitivity(case, positions)
+
+    assert sx == [-2.0, 2.0]
+    assert sy == [0.0, 0.0]
+
+
 def test_bbox_edge_owners():
     positions = [
         (0.0, 0.0, 10.0, 10.0),   # left + bottom
@@ -133,7 +145,21 @@ def test_push_to_resolve_overlap():
     pdx, pdy = push
     # Overlap in x: (10+10) - 18 = 2, overlap in y: (5+10) - 8 = 7
     # Smaller push is right (dx=2)
-    assert abs(pdx - 2.0) < 1e-9 or abs(pdy - 7.0) < 1e-9
+    assert (pdx, pdy) == (2.0, 0.0)
+    ox, oy, ow, oh = obstructing
+    assert not _rects_overlap(moving, (ox + pdx, oy + pdy, ow, oh))
+
+
+def test_push_to_resolve_overlap_can_push_left_or_down():
+    moving = (10.0, 10.0, 10.0, 10.0)
+
+    push_left = _push_to_resolve_overlap(moving, (5.0, 12.0, 10.0, 5.0))
+    assert push_left == (-5.0, 0.0)
+    assert not _rects_overlap(moving, (0.0, 12.0, 10.0, 5.0))
+
+    push_down = _push_to_resolve_overlap(moving, (12.0, 5.0, 5.0, 10.0))
+    assert push_down == (0.0, -5.0)
+    assert not _rects_overlap(moving, (12.0, 0.0, 5.0, 10.0))
 
 
 # --- Integration tests ---
@@ -165,3 +191,85 @@ def test_multistage_no_target_positions():
     assert result_positions == positions
     assert report["multistage_applied"] is False
     assert report["multistage_skipped_reason"] == "no_target_positions"
+
+
+def test_multistage_candidate_at_limit_can_still_be_selected(monkeypatch):
+    import puzzleplace.repair.multistage_active_soft as multistage_mod
+
+    case = _make_case(2, [1, 0])
+    positions = [(5.0, 0.0, 10.0, 10.0), (0.0, 20.0, 10.0, 10.0)]
+
+    def fake_evaluate_positions(case, trial, *, runtime=1.0):
+        del case, runtime
+        is_repaired = trial[0][0] <= 1e-9
+        return {
+            "quality": {
+                "cost": 0.0 if is_repaired else 10.0,
+                "HPWLgap": 0.0,
+                "Areagap_bbox": 0.0,
+                "Violationsrelative": 0.0 if is_repaired else 1.0,
+                "feasible": True,
+            }
+        }
+
+    monkeypatch.setattr(multistage_mod, "evaluate_positions", fake_evaluate_positions)
+    monkeypatch.setattr(
+        multistage_mod,
+        "summarize_hard_legality",
+        lambda case, trial: SimpleNamespace(is_feasible=True),
+    )
+
+    result_positions, report = multistage_active_soft_postprocess(
+        case, positions, max_candidates=1
+    )
+
+    assert result_positions[0] == (0.0, 0.0, 10.0, 10.0)
+    assert report["multistage_applied"] is True
+    assert report["multistage_candidates_evaluated"] == 1
+    assert report["multistage_limit_reached"] is True
+
+
+def test_stage2_joint_push_can_use_stage3_hpwl_compensation(monkeypatch):
+    import puzzleplace.repair.multistage_active_soft as multistage_mod
+
+    case = _make_case(3, [1, 0, 0])
+    case.b2b_edges = torch.tensor([[0.0, 2.0, 1.0]], dtype=torch.float32)
+    positions = [
+        (12.0, 0.0, 10.0, 10.0),
+        (0.0, 0.0, 10.0, 10.0),
+        (40.0, 0.0, 10.0, 10.0),
+    ]
+
+    def fake_evaluate_positions(case, trial, *, runtime=1.0):
+        del case, runtime
+        snapped = trial[0][0] < 12.0
+        pushed = snapped and not _rects_overlap(trial[0], trial[1])
+        compensated = trial[2][0] < 40.0
+        if snapped and pushed and compensated:
+            cost, hpwl, soft = 0.0, 0.0, 0.0
+        elif snapped and pushed:
+            cost, hpwl, soft = 9.0, 1.0, 0.0
+        else:
+            cost, hpwl, soft = 10.0, 0.0, 1.0
+        return {
+            "quality": {
+                "cost": cost,
+                "HPWLgap": hpwl,
+                "Areagap_bbox": 0.0,
+                "Violationsrelative": soft,
+                "feasible": True,
+            }
+        }
+
+    monkeypatch.setattr(multistage_mod, "evaluate_positions", fake_evaluate_positions)
+
+    result_positions, report = multistage_active_soft_postprocess(
+        case, positions, max_candidates=None
+    )
+
+    assert report["multistage_applied"] is True
+    assert report["stage2_joint_pushes"] >= 1
+    assert report["stage3_hpwl_compensations"] >= 1
+    assert report["stage3_strict_winners"] >= 1
+    assert str(report["multistage_selected"]).startswith("stage3_")
+    assert result_positions[2][0] < 40.0

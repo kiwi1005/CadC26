@@ -204,6 +204,14 @@ def _rects_overlap(a: Box, b: Box) -> bool:
     )
 
 
+def _sign(value: float) -> float:
+    if value > 0:
+        return 1.0
+    if value < 0:
+        return -1.0
+    return 0.0
+
+
 def _push_to_resolve_overlap(
     moving: Box, obstructing: Box
 ) -> tuple[float, float] | None:
@@ -211,17 +219,19 @@ def _push_to_resolve_overlap(
     mx, my, mw, mh = moving
     ox, oy, ow, oh = obstructing
 
-    overlap_x = (mx + mw) - ox
-    overlap_y = (my + mh) - oy
-
-    if overlap_x <= EPS or overlap_y <= EPS:
+    if not _rects_overlap(moving, obstructing):
         return None
 
-    # Choose smaller push: right or up
-    if abs(overlap_x) <= abs(overlap_y):
-        return (overlap_x, 0.0)
-    else:
-        return (0.0, overlap_y)
+    pushes = [
+        ((mx + mw) - ox, (1.0, 0.0)),
+        ((ox + ow) - mx, (-1.0, 0.0)),
+        ((my + mh) - oy, (0.0, 1.0)),
+        ((oy + oh) - my, (0.0, -1.0)),
+    ]
+    distance, (sx, sy) = min(pushes, key=lambda item: item[0])
+    if distance <= EPS:
+        return None
+    return (sx * distance, sy * distance)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +260,9 @@ def multistage_active_soft_postprocess(
         return positions, {
             "multistage_applied": False,
             "multistage_skipped_reason": "no_target_positions",
+            "multistage_candidates_evaluated": 0,
+            "multistage_strict_winners": 0,
+            "multistage_limit_reached": False,
         }
 
     before_eval = evaluate_positions(case, positions, runtime=1.0)
@@ -299,6 +312,80 @@ def multistage_active_soft_postprocess(
         return False
 
     compensation_steps = (0.5, 1.0, 2.0, 4.0)
+
+    def _try_hpwl_compensation(
+        base_trial: list[Box],
+        *,
+        moved_block_id: int,
+        label_base: str,
+        hpwl_delta: float,
+    ) -> None:
+        nonlocal best_cost_delta, best_id, best_positions
+        nonlocal candidates_evaluated, stage3_count, stage3_strict, strict_winners
+
+        if hpwl_delta <= EPS:
+            return
+
+        conn_blocks = neighbors.get(moved_block_id, [])
+        for conn_idx, conn_weight in conn_blocks:
+            if limit_reached:
+                break
+            if conn_idx in boundary_set:
+                continue  # don't move boundary blocks
+
+            cx_conn, cy_conn = _block_center(base_trial[conn_idx])
+            cx_snap, cy_snap = _block_center(base_trial[moved_block_id])
+
+            # Move connected blocks along the pairwise negative HPWL subgradient.
+            grad_x = 0.0
+            grad_y = 0.0
+            dx_conn = cx_snap - cx_conn
+            dy_conn = cy_snap - cy_conn
+            if abs(dx_conn) > EPS:
+                grad_x = conn_weight if dx_conn > 0 else -conn_weight
+            if abs(dy_conn) > EPS:
+                grad_y = conn_weight if dy_conn > 0 else -conn_weight
+
+            if abs(grad_x) <= EPS and abs(grad_y) <= EPS:
+                continue
+
+            for step in compensation_steps:
+                if limit_reached:
+                    break
+                cdx = step * _sign(grad_x)
+                cdy = step * _sign(grad_y)
+
+                if abs(cdx) <= EPS and abs(cdy) <= EPS:
+                    continue
+
+                comp_trial = list(base_trial)
+                cox, coy, cow, coh = comp_trial[conn_idx]
+                comp_trial[conn_idx] = (cox + cdx, coy + cdy, cow, coh)
+
+                clegality = summarize_hard_legality(case, comp_trial)
+                if not clegality.is_feasible:
+                    continue
+
+                cafter = evaluate_positions(case, comp_trial, runtime=1.0)
+                if not cafter["quality"].get("feasible"):
+                    continue
+
+                cdelta = actual_delta(before_eval, cafter)
+                candidates_evaluated += 1
+                stage3_count += 1
+                is_cstrict = strict_meaningful_winner(cdelta, True)
+
+                if is_cstrict:
+                    stage3_strict += 1
+                    strict_winners += 1
+                    cost_delta = float(cdelta.get("official_like_cost_delta", 0.0))
+                    if best_positions is None or cost_delta < best_cost_delta:
+                        best_positions = comp_trial
+                        best_cost_delta = cost_delta
+                        best_id = f"stage3_{label_base}_comp{conn_idx}_step{step}"
+                _check_limit()
+                if limit_reached:
+                    break
 
     for comp in boundary_violations:
         if limit_reached:
@@ -362,85 +449,33 @@ def multistage_active_soft_postprocess(
                         delta = actual_delta(before_eval, after)
                         candidates_evaluated += 1
                         stage1_count += 1
-                        _check_limit()
-                        if limit_reached:
-                            break
+                        is_strict = strict_meaningful_winner(delta, True)
 
-                        if strict_meaningful_winner(delta, True):
+                        if is_strict:
                             strict_winners += 1
                             cost_delta = float(delta.get("official_like_cost_delta", 0.0))
                             if best_positions is None or cost_delta < best_cost_delta:
                                 best_positions = trial
                                 best_cost_delta = cost_delta
                                 best_id = f"stage1_{label_base}"
+                        _check_limit()
+                        if limit_reached:
+                            break
+                        if is_strict:
                             continue  # got a winner, skip further processing
 
                         # --- Stage 3: HPWL compensation ---
                         # Snap is feasible but not a strict winner.
                         # Try small compensating moves on connected non-boundary blocks.
                         hpwl_before_comp = float(delta.get("hpwl_delta", 0.0))
-                        if hpwl_before_comp > EPS:
-                            # Snap caused HPWL regression; try compensation
-                            conn_blocks = neighbors.get(block_id, [])
-                            for conn_idx, conn_weight in conn_blocks:
-                                if limit_reached:
-                                    break
-                                if conn_idx in boundary_set:
-                                    continue  # don't move boundary blocks
-
-                                cx_conn, cy_conn = _block_center(trial[conn_idx])
-                                cx_snap, cy_snap = _block_center(trial[block_id])
-
-                                # Gradient: if snapped block is now above/below/left/right
-                                # of connected block, move connected block TOWARD snapped block
-                                grad_x = 0.0
-                                grad_y = 0.0
-                                dx_conn = cx_snap - cx_conn
-                                dy_conn = cy_snap - cy_conn
-                                if abs(dx_conn) > EPS:
-                                    grad_x = conn_weight if dx_conn > 0 else -conn_weight
-                                if abs(dy_conn) > EPS:
-                                    grad_y = conn_weight if dy_conn > 0 else -conn_weight
-
-                                if abs(grad_x) <= EPS and abs(grad_y) <= EPS:
-                                    continue
-
-                                for step in compensation_steps:
-                                    if limit_reached:
-                                        break
-                                    cdx = step * (1.0 if grad_x > 0 else (-1.0 if grad_x < 0 else 0))
-                                    cdy = step * (1.0 if grad_y > 0 else (-1.0 if grad_y < 0 else 0))
-
-                                    if abs(cdx) <= EPS and abs(cdy) <= EPS:
-                                        continue
-
-                                    comp_trial = list(trial)
-                                    cox, coy, cow, coh = comp_trial[conn_idx]
-                                    comp_trial[conn_idx] = (cox + cdx, coy + cdy, cow, coh)
-
-                                    clegality = summarize_hard_legality(case, comp_trial)
-                                    if not clegality.is_feasible:
-                                        continue
-
-                                    cafter = evaluate_positions(case, comp_trial, runtime=1.0)
-                                    if not cafter["quality"].get("feasible"):
-                                        continue
-
-                                    cdelta = actual_delta(before_eval, cafter)
-                                    candidates_evaluated += 1
-                                    stage3_count += 1
-                                    _check_limit()
-                                    if limit_reached:
-                                        break
-
-                                    if strict_meaningful_winner(cdelta, True):
-                                        stage3_strict += 1
-                                        strict_winners += 1
-                                        cost_delta = float(cdelta.get("official_like_cost_delta", 0.0))
-                                        if best_positions is None or cost_delta < best_cost_delta:
-                                            best_positions = comp_trial
-                                            best_cost_delta = cost_delta
-                                            best_id = f"stage3_{label_base}_comp{conn_idx}_step{step}"
+                        _try_hpwl_compensation(
+                            trial,
+                            moved_block_id=block_id,
+                            label_base=label_base,
+                            hpwl_delta=hpwl_before_comp,
+                        )
+                        if limit_reached:
+                            break
 
                 # --- Stage 2: joint push for infeasible snaps ---
                 if not legality.is_feasible:
@@ -476,22 +511,33 @@ def multistage_active_soft_postprocess(
                             jdelta = actual_delta(before_eval, jafter)
                             candidates_evaluated += 1
                             stage2_count += 1
-                            _check_limit()
-                            if limit_reached:
-                                break
+                            is_jstrict = strict_meaningful_winner(jdelta, True)
 
-                            if strict_meaningful_winner(jdelta, True):
+                            if is_jstrict:
                                 strict_winners += 1
                                 cost_delta = float(jdelta.get("official_like_cost_delta", 0.0))
                                 if best_positions is None or cost_delta < best_cost_delta:
                                     best_positions = joint_trial
                                     best_cost_delta = cost_delta
                                     best_id = f"stage2_{label_base}_push{other_idx}"
+                            _check_limit()
+                            if limit_reached:
+                                break
+                            if not is_jstrict:
+                                _try_hpwl_compensation(
+                                    joint_trial,
+                                    moved_block_id=block_id,
+                                    label_base=f"{label_base}_push{other_idx}",
+                                    hpwl_delta=float(jdelta.get("hpwl_delta", 0.0)),
+                                )
+                                if limit_reached:
+                                    break
 
     report: dict[str, Any] = {
         "multistage_applied": best_positions is not None,
         "multistage_candidates_evaluated": candidates_evaluated,
         "multistage_strict_winners": strict_winners,
+        "multistage_limit_reached": limit_reached,
         "stage1_direct_snaps": stage1_count,
         "stage2_joint_pushes": stage2_count,
         "stage3_hpwl_compensations": stage3_count,
