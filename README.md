@@ -62,12 +62,32 @@ PYTHONPATH=src python scripts/profile_hcfp.py --blocks 120 --candidates 32 \
   --device cuda --output artifacts/reports/profile-n120-k32.json
 ```
 
+For the official 1.008M-case corpus, stream the extracted FloorSet-Lite files
+directly and close the exact-tail replay/ranker loop without copying the
+dataset:
+
+```bash
+PYTHONPATH=src python scripts/train_hcfp.py \
+  --floorset-lite-root artifacts/floorset-v10 --sampling score-aware \
+  -o artifacts/checkpoints/hcfp-flow.pt --stage all --steps 3000 \
+  --population 8 --amp bf16 --ema-decay 0.999 --device cuda
+PYTHONPATH=src python scripts/generate_hcfp_replay.py \
+  --floorset-lite-root artifacts/floorset-v10 \
+  --checkpoint artifacts/checkpoints/hcfp-flow.pt \
+  --output artifacts/replay/hcfp-exact-tail.jsonl --limit 32 --device cuda
+PYTHONPATH=src python scripts/train_hcfp_ranker.py \
+  artifacts/replay/hcfp-exact-tail.jsonl \
+  --checkpoint artifacts/checkpoints/hcfp-flow.pt \
+  --output artifacts/checkpoints/hcfp-ranked.pt --steps 500 --device cuda
+```
+
 Set `HCFP_CHECKPOINT=/absolute/path/model.pt` to opt into the learned
 initializer. Loading is schema/hash/normalization checked; any missing,
 damaged, or incompatible checkpoint falls back to the verified analytic lane.
 For effect attribution, benchmark `scripts/audit_learned_optimizer.py` with
-`--checkpoint learned=/absolute/path/model.pt`; this strict adapter refuses to
-silently label an analytic fallback as learned.
+`--checkpoint learned=/absolute/path/model.pt`; this strict adapter requires a
+valid checkpoint while the per-case raw gate still retains the verified
+analytic/safe incumbent when a learned winner is not officially legal.
 
 The official submission surface is `submission/optimizer.py`; the standalone
 JSON stdin/stdout executable is `submission/binary_main.py`. Geometry remains
@@ -79,6 +99,9 @@ The implementation order and acceptance gates live in
 [`docs/research/hcfp5090_greenfield_plan.md`](docs/research/hcfp5090_greenfield_plan.md).
 The first complete-framework effect result is recorded in
 [`docs/research/hcfp5090_framework_effect_2026-08-01.md`](docs/research/hcfp5090_framework_effect_2026-08-01.md).
+The official-data training, exact replay, learned sidecar, 100-case benchmark,
+and current HOLD decision are recorded in
+[`docs/research/hcfp5090_training_closed_loop_2026-08-01.md`](docs/research/hcfp5090_training_closed_loop_2026-08-01.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,

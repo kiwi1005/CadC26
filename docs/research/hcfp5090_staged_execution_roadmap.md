@@ -36,17 +36,19 @@
 | FP32 typed analytic dynamics | `[~]` | 已有 deterministic 第一版與 100-case runtime；exact QoR 仍全部落在 cost cap。 |
 | BDP | `[x]` | 已有 bounded active-pair outer rebuild、方向 beam 與 per-candidate status。 |
 | Official 100-case replay | `[x]` | 完整 runtime 與 fallback-only 均為 100/100 hard-feasible；見 [`hcfp5090_p0_correctness_2026-08-01.md`](hcfp5090_p0_correctness_2026-08-01.md)。 |
-| Data shards／labels | `[~]` | label、D4、hard-safe corruption、tar/checksum/provenance manifest 已可執行；1M inventory/split 尚未執行。 |
-| SCENE／POP-INIT | `[~]` | trainable encoder、structure heads、initializer 與 checkpoint contract 已完成；尚無正式訓練／oracle@K gate。 |
-| Rectified flow／controller／ranker | `[~]` | trainable heads 與 flow loss 已完成；controller/ranker 等待 exact replay labels。 |
-| Learned runtime | `[~]` | checkpoint opt-in、hash/schema/normalization fail-closed 與 analytic exact tail 已完成；預設關閉。 |
+| Data shards／labels | `[~]` | 已盤點 1.008M cases、direct streaming、100-sample raw audit、score-aware sampling；stratified internal split 尚未執行。 |
+| SCENE／POP-INIT | `[~]` | structure 1k + all-head 3k 正式短訓練完成；oracle@K promotion gate 尚未通過。 |
+| Rectified flow／controller／ranker | `[~]` | 6-step flow、32-record exact replay、ranker 500-step/top-4 已閉環；QoR/runtime gate HOLD。 |
+| Learned runtime | `[~]` | additive analytic+learned sidecar、raw official replay gate與 100/100 feasibility 已完成；預設關閉。 |
 | Benchmark／visualization | `[x]` | 官方 weighted/bucket report、promotion decision 與 deterministic SVG/HTML 已完成。 |
 | Runtime profile | `[~]` | N120/K32 CUDA profile 已通過穩定性／記憶體 gate；cold-start 與 A100 profile 尚待補。 |
-| Submission freeze／package proof | `[ ]` | 尚未做正式資料 replay、portable smoke、hash 與 dry run。 |
+| Submission freeze／package proof | `[~]` | 正式 100-case replay 與 hashes 已完成；payload freeze、portable smoke 與 dry run 尚未做。 |
 
-因此目前正確定位是：**P0 correctness gate 已通過，P1 有 analytic／BDP v0
-與 opt-in telemetry；P1 因 100 個正式 validation case 全部 `cost >= 9.99`
-而維持 HOLD，必須先改善 exact QoR。**
+因此目前正確定位是：**P0 correctness gate 已通過，P1–P5 的第一個正式資料
+closed loop 已完成；trained sidecar 在 100 個 validation case 為 100/100
+feasible，但 weighted cost 仍為 `9.999999`、runtime p95 為 `3.100891s`，所以
+維持 HOLD。**完整證據見
+[`hcfp5090_training_closed_loop_2026-08-01.md`](hcfp5090_training_closed_loop_2026-08-01.md)。
 
 ## 3. 階段依賴與停止點
 
@@ -67,8 +69,10 @@ P0 合約與安全基線
 - P0 未完成，不開始模型訓練。
 - P1 未證明 post-BDP 改善，不增加 learned dynamics 複雜度。
 - P2 未通過 leakage／transform audit，不開始 P3。
-- P3 的 oracle@K 未優於 analytic initializer，不開始 P4 multi-step。
-- 沒有 exact replay 產生的 event／repair labels，不訓練 ETR 或 PVR。
+- P3 的 oracle@K 未優於 analytic initializer 時，P4 只能做 bounded、default-off
+  實驗，不擴大步數或升為正式路徑。
+- 沒有 exact replay 產生的 event／repair labels，不訓練 ETR；PVR/ranker 只能用
+  已存在的 candidate/outcome labels 做第一版校準。
 - 未經 profiler 證明的 kernel，不改寫 Triton／CUDA。
 - P0–P7 任一新路徑失敗時，正式輸出仍回退到最後一個 verified incumbent。
 
@@ -78,12 +82,12 @@ P0 合約與安全基線
 | --- | --- | --- | --- | --- |
 | P0 | D1–D2 | 官方合約、parity、fallback、determinism | correctness gate 100% | 通過 |
 | P1 | D3–D5 | Analytic population、typed dynamics、BDP、telemetry | post-BDP 改善且 N120/K32 穩定 | 框架完成／promotion HOLD |
-| P2 | D6–D8 | 訓練 split、labels、shards、corruptions | audit／round-trip／leakage 全通過 | 合約完成／資料執行待辦 |
-| P3 | D9–D11 | SCENE、POP-INIT、oracle@K | post-BDP oracle@K 優於 analytic seeds | 模型介面完成／未訓練 |
-| P4 | D12–D14 | rectified-flow recovery | exact QoR 改善且 large case 不退步 | 訓練介面完成／未 promotion |
-| P5 | D15–D17 | controller、ranker、局部事件 | stagnation／ranker regret 明確改善 | heads 完成／labels 待辦 |
-| P6 | D18 | compile／graph／profile／portable fallback | p95 達標且官方環境可執行 | profiler 完成／加速未啟用 |
-| P7 | D19–D20 | full replay、freeze、package、dry run | submission hard gates 全通過 | replay/可視化完成／未 freeze |
+| P2 | D6–D8 | 訓練 split、labels、shards、corruptions | audit／round-trip／leakage 全通過 | 1.008M direct stream／stratified split 待辦 |
+| P3 | D9–D11 | SCENE、POP-INIT、oracle@K | post-BDP oracle@K 優於 analytic seeds | 1k+3k 短訓練完成／gate HOLD |
+| P4 | D12–D14 | rectified-flow recovery | exact QoR 改善且 large case 不退步 | 6-step flow 完成／promotion HOLD |
+| P5 | D15–D17 | controller、ranker、局部事件 | stagnation／ranker regret 明確改善 | 32 replay + ranker 500／calibration 待辦 |
+| P6 | D18 | compile／graph／profile／portable fallback | p95 達標且官方環境可執行 | BF16/profile 完成／runtime HOLD |
+| P7 | D19–D20 | full replay、freeze、package、dry run | submission hard gates 全通過 | 100-case replay/可視化完成／未 freeze |
 | P8 | gate 後選配 | DAgger／local policy optimization | full-case Pareto improvement | 禁止提前開始 |
 
 時窗是依賴順序，不是允許跳過 gate 的硬日期。若前一階段未過，後一階段的
@@ -173,8 +177,8 @@ P1.8 的 RTX 5090 warm profile 為 p50 `0.957574s`、p95 `0.962069s`、peak
 
 ### 任務
 
-- `[ ] P2.1` 清點實際可用資料、版本、大小、欄位與 checksum；官方 100
-  validation 明確列入 denylist。
+- `[x] P2.1` 清點實際可用資料、版本、大小、欄位與 checksum；9,000 files ×
+  112 layouts = 1,008,000 cases，官方 validation path 明確拒絕。
 - `[ ] P2.2` 依 block count、constraint density、connectivity statistics 與
   topology hash 建立 stratified train/dev/internal-test split。
 - `[~] P2.3` 從 solution fixture 抽取 rectangles、center、log-aspect、
@@ -183,11 +187,12 @@ P1.8 的 RTX 5090 warm profile 為 p50 `0.957574s`、p95 `0.962069s`、peak
 - `[~] P2.5` 實作 D4 mirror／90-degree rotation；同步轉換 pins、
   targets、fixed/preplaced geometry 與 boundary bitmask。
 - `[~] P2.6` 建立 deterministic shift／aspect corruption 並硬投影 targets；
-  其餘 corruption 等待 exact replay labels。
+  contact/event corruption 等待擴充 exact replay labels。
 - `[~] P2.7` 寫成 streaming tar shards、內嵌 sample manifest 與含 source、split、
   denylist checksum、tar SHA256 的 sidecar manifest。
 - `[~] P2.8` 已測 transform round-trip、area preservation、target exactness、
-  label validation 與 shard decode；1M split leakage 等待實際資料。
+  label validation、shard decode 與 100 筆 raw official audit；完整 1M split
+  leakage 仍等待 stratified split。
 
 ### 退出條件
 
@@ -208,12 +213,12 @@ P1.8 的 RTX 5090 warm profile 為 p50 `0.957574s`、p95 `0.962069s`、peak
 - `[~] P3.1` 實作 SCENE static encoder 與 precedence／outline heads；contact head 等待 labels。
 - `[ ] P3.2` 實作 cycle-free H/V relation decoding 與少量 structure seeds。
 - `[x] P3.3` 實作 POP-INIT residual population generator，維持 hard projections。
-- `[~] P3.4` checkpoint contract 已有 schema/version、normalization、model hash、
-  loading failure fallback；EMA 等待正式訓練。
-- `[ ] P3.5` 評估 best-of-K diversity、structure accuracy、raw oracle@K 與
-  post-BDP oracle@K；後者才是 promotion 主指標。
-- `[ ] P3.6` 對 106–120 blocks、high constraint density 與 preplaced-heavy
-  subsets 分別報告，不以全體平均掩蓋 large-case regression。
+- `[x] P3.4` checkpoint contract、warm-start、EMA、periodic checkpoints 與
+  schema/hash/normalization failure fallback 已完成。
+- `[~] P3.5` 已完成 structure 1k/all-head 3k 短訓練與 post-BDP full replay；
+  raw/post-BDP oracle@K attribution 仍是下一個 gate。
+- `[~] P3.6` 已報 106–120 subset 15/15 feasible，並找到 case 88 regression、
+  case 97 improvement；constraint-density 分層仍待補。
 
 ### 退出條件
 
@@ -233,14 +238,15 @@ unroll；learned 輸出只修正 analytic force，不直接取代 projection 或
 
 - `[~] P4.1` 以 ground-truth residual 與 on-the-fly corruption 建立 rectified-flow
   target；analytic teacher replay 等待資料。
-- `[~] P4.2` one-step flow velocity head 與 hard mobility mask 已可訓練；尚無
-  promotion checkpoint。
-- `[ ] P4.3` one-step gate 通過後，依序 unroll 8、16、24 steps；每個長度獨立
+- `[x] P4.2` flow velocity head、hard mobility mask 與第一個正式短訓練
+  checkpoint 已完成。
+- `[~] P4.3` 已實作並測試 6-step Euler flow；後續 8、16、24 steps 必須在
+  oracle@K gate 通過後才展開；每個長度獨立
   檢查 NaN、energy drift、gradient stability 與 projection displacement。
 - `[ ] P4.4` 加入 hard projection after each step、best-incumbent checkpoint 與
   stagnation detector。
-- `[ ] P4.5` 以 analytic-only、learned-only、analytic+residual 做 ablation；禁止
-  只用 training loss 宣稱改善。
+- `[~] P4.5` 已完成 analytic vs additive learned sidecar 的 100-case ablation；
+  cost 未改善且 runtime regression，因此明確 HOLD。
 
 ### 退出條件
 
@@ -260,16 +266,16 @@ post-projection 價值，降低無效 BDP 與 exact tail 次數。
 
 - `[ ] P5.1` 從 exact solutions 抽取 cluster contact tree、contact side 與
   latch labels；實作 CAL hysteresis 與 semi-rigid group aggregation。
-- `[ ] P5.2` 從 P4 replay 建立 hard-negative event labels，包含 conflict
-  component、觸發原因、動作與 exact outcome。
+- `[~] P5.2` 已從 P4 exact tail 產生第一批 32-record candidate/outcome replay；
+  conflict component、觸發原因與動作 labels 尚待擴充。
 - `[ ] P5.3` 實作 bounded ETR actions：local resample、direction swap、shape
   perturb、component translation、boundary slot change。
 - `[ ] P5.4` 先用 exhaustive small-component replay 產生 BDP direction outcome，
   再訓練 direction proposal；exact projector 仍負責最後判定。
-- `[~] P5.5` repair-aware ranker head 與 candidate-metric contract 已完成；待 exact
-  replay 後訓練 post-repair feasibility、violations、QoR、repair displacement 與 runtime。
-- `[ ] P5.6` 以 lexicographic hard gate 選 top-M；永遠保留 current incumbent，
-  並測量 top-1 regret、top-M recall、calibration 與 tail call reduction。
+- `[x] P5.5` repair-aware ranker 已由 32-record exact replay 訓練 500 steps，
+  loss `0.318158 -> 0.125271`；checkpoint 維持 default-off。
+- `[~] P5.6` top-M 只裁 learned 增量並永遠保留完整 analytic candidates；top-4
+  已降低三案 tail runtime，但 top-1 regret、top-M recall 與 calibration 尚未達 gate。
 
 ### 退出條件
 
@@ -287,10 +293,11 @@ post-projection 價值，降低無效 BDP 與 exact tail 次數。
 
 ### 任務
 
-- `[~] P6.1` 以 `N={32,64,96,120}` 與候選數分桶，量測 synchronized fast-path
-  cold/warm p50、p95、p99、peak memory 與各 phase time。
-- `[ ] P6.2` 根據 uncertainty 與預算制定 candidate／step／tail-top-M policy；
-  任何 adaptive policy 都有 deterministic upper bound。
+- `[~] P6.1` 已量 N120/K8 training FP32/BF16 與 official 100-case analytic/learned
+  p50/p95/max；其餘 bucket、cold-start 與 phase breakdown 待補。
+- `[~] P6.2` 已有 deterministic flow-step 與 tail-top-M runtime controls；根據
+  uncertainty 與預算制定 candidate policy 仍待補，任何 adaptive policy 都必須
+  有 deterministic upper bound。
 - `[ ] P6.3` 先使用 vectorized PyTorch；只有 profiler 證明收益後才逐項啟用
   `torch.compile` 或 CUDA Graph，並保留 eager fallback。
 - `[ ] P6.4` 只有 pairwise force 等單一 kernel 超過約 20% runtime，且 compile
@@ -317,13 +324,14 @@ post-projection 價值，降低無效 BDP 與 exact tail 次數。
 
 - `[ ] P7.1` internal dev／test 各跑固定多 seeds，輸出 per-case exact metrics、
   failure atlas、weighted score、median/p95/p99 與 fallback rate。
-- `[ ] P7.2` 獨立檢查 106–120 bucket、preplaced-heavy、group-heavy、MIB-heavy、
-  boundary-heavy 與 disconnected-net cases。
-- `[ ] P7.3` 固定 ablation：P1 analytic、+POP-INIT、+HiCoDy、+CAL/ETR、+PVR、
-  +acceleration；每項都用相同 exact tail 與 budget。
+- `[~] P7.2` 106–120 bucket 已驗 15/15 hard-feasible並辨識 case 88/97；
+  preplaced/group/MIB/boundary-heavy 與 disconnected-net 分層待補。
+- `[~] P7.3` 已固定 analytic vs additive flow+ranker ablation與相同 exact tail；
+  CAL/ETR、完整 PVR 與 acceleration 尚未進 gate。
 - `[x] P7.4` 官方 validation 僅用於 promotion／freeze 證據，不回灌訓練、
   threshold fitting 或 checkpoint selection。
-- `[ ] P7.5` 鎖定 source、model、reference evaluator、config 與 payload hashes。
+- `[~] P7.5` source commits、三個 model、replay、reference evaluator、benchmark
+  config/report 與 visualization hashes 已記錄；submission payload 尚未 freeze。
 - `[ ] P7.6` 依官方真實 payload layout 打包，驗證 root entrypoint、權限、
   offline dependencies、clean-host smoke、timeout 與 output format。
 - `[ ] P7.7` 執行 final dry run，保存 invocation、host/GPU、exit code、runtime、
@@ -379,16 +387,17 @@ payload smoke。模型未成熟時，P1 本身就是最低可提交主線。
 ## 16. 下一個 promotion 批次
 
 可執行框架已涵蓋 analytic、learned/data/checkpoint、benchmark、profile 與
-visualization。下一批需要實際 1M 資料與 exact replay evidence，不再增加未被
-資料驅動的 runtime 抽象：
+visualization，且第一輪 1.008M direct-stream training／exact replay 已完成。
+下一批只處理目前 exact evidence 指出的 promotion blocker：
 
 | 優先序 | Task | 輸入 | 必須產出 | Done 證據 |
 | --- | --- | --- | --- | --- |
-| 1 | 1M inventory/split | FloorSet training source | source/split/checksum manifest | validation leakage = 0 |
-| 2 | 補齊 labels/corruptions | fp_sol/metrics_sol/exact replay | contact/event/repair labels | round-trip 與 hard-target audit |
-| 3 | 訓練 structure/initializer/flow | audited shards | hashed checkpoints + training reports | post-BDP oracle@K 優於 analytic |
-| 4 | controller/ranker replay | exact tail outcomes | calibrated gates/PVR | top-M recall 與 repair displacement 改善 |
-| 5 | 固定 full replay | 相同 budget/official scorer | per-case/bucket ablation+visual atlas | weighted/large/runtime gates 全通過 |
+| 1 | Oracle/source attribution | trained checkpoint + exact tail | raw/post-BDP oracle@K、winner source | learned candidates 真正優於 analytic |
+| 2 | 擴充 hard-negative replay | case 44/51/88/97 + failure atlas | 數千 exact outcome records | top-M recall／regret 可量測 |
+| 3 | Soft-constraint force repair | grouping/boundary/MIB telemetry | typed-force ablation | 解除 capped cost 且 large case 不退步 |
+| 4 | Raw-margin ranker | denormalized overlap margin | calibrated raw-feasibility feature | 減少 analytic/safe replay 與 p95 |
+| 5 | Stratified internal split | 1.008M training source | source/split/checksum manifest | validation leakage = 0 |
 
-「框架可執行」不等於 learned lane 已 promotion；只有第 3–5 項的 exact evidence
-通過後，`HCFP_CHECKPOINT` 才能從 opt-in 升為 default。
+「框架可執行且已短訓練」不等於 learned lane 已 promotion；只有上述 exact
+QoR、large-case 與 runtime gates 全通過後，`HCFP_CHECKPOINT` 才能從 opt-in
+升為 default。

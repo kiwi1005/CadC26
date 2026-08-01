@@ -6,6 +6,9 @@
 > [`hcfp5090_p0_correctness_2026-08-01.md`](hcfp5090_p0_correctness_2026-08-01.md).
 > The initial P1 analytic/BDP and telemetry slice remains on HOLD because its
 > exact validation QoR is still at the feasible cost cap.
+> The first official-data training/replay/ranker loop is documented in
+> [`hcfp5090_training_closed_loop_2026-08-01.md`](hcfp5090_training_closed_loop_2026-08-01.md);
+> it is 100/100 hard-feasible but remains HOLD on QoR and runtime.
 
 ## Goal
 

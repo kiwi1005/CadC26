@@ -1,5 +1,10 @@
 # HCFP-5090 runnable framework effect report — 2026-08-01
 
+> This report preserves the initial untrained-framework evidence. The later
+> 1.008M-data streaming, trained flow/ranker, raw replay fixes, and final
+> 100-case decision are recorded in
+> [`hcfp5090_training_closed_loop_2026-08-01.md`](hcfp5090_training_closed_loop_2026-08-01.md).
+
 ## Scope and decision
 
 Commit `bb0e5d0b190c44dfdba4622018c41aebfc457904` closes the runnable analytic,
