@@ -48,6 +48,12 @@ class FloorplanCase:
 
         return True
 
+    @property
+    def raw_preplaced_validated(self) -> bool:
+        """Preplaced targets passed the official raw-coordinate overlap check."""
+
+        return True
+
     def __post_init__(self) -> None:
         n = self.n
         if n <= 0:
@@ -128,6 +134,7 @@ def from_official(
         raise ValueError("target_positions is required when fixed or preplaced blocks are present")
     if hard_mask.any() and not target_valid_mask[hard_mask].all():
         raise ValueError("target_positions must be valid for every fixed or preplaced block")
+    _validate_raw_preplaced(raw_target, preplaced_mask)
 
     raw_pins = _unpad_pin_rows(_as_float_tensor(pins_pos, "pins_pos"))
     p2b_edges = _prepare_p2b_edges(p2b_connectivity, n, raw_pins.shape[0])
@@ -245,6 +252,17 @@ def _prepare_target(target_positions: Any | None, n: int) -> tuple[torch.Tensor,
         raise ValueError("valid target_positions must have positive width and height")
     target[~valid] = 0.0
     return target, valid
+
+
+def _validate_raw_preplaced(target: torch.Tensor, mask: torch.Tensor) -> None:
+    boxes = target[mask].to(dtype=torch.float64, device="cpu")
+    for i in range(int(boxes.shape[0])):
+        for j in range(i + 1, int(boxes.shape[0])):
+            a, b = boxes[i], boxes[j]
+            overlap_x = min(float(a[0] + a[2]), float(b[0] + b[2])) - max(float(a[0]), float(b[0]))
+            overlap_y = min(float(a[1] + a[3]), float(b[1] + b[3])) - max(float(a[1]), float(b[1]))
+            if overlap_x > 1.0e-6 and overlap_y > 1.0e-6:
+                raise ValueError("preplaced target rectangles overlap")
 
 
 def _unpad_pin_rows(pins_pos: torch.Tensor) -> torch.Tensor:

@@ -182,8 +182,12 @@ def _verified_status(
     preplaced_mask: Tensor,
     tolerance: float,
     fixed_pair_overlap: Tensor,
+    ignore_preplaced_pairs: bool,
 ) -> tuple[Tensor, tuple[str, ...], Tensor]:
     overlap = overlap_matrix(boxes)
+    if ignore_preplaced_pairs:
+        exempt = preplaced_mask[:, None] & preplaced_mask[None, :]
+        overlap = torch.where(exempt.unsqueeze(0), torch.zeros_like(overlap), overlap)
     max_overlap = overlap.amax(dim=(1, 2))
     dims_ok = (boxes[..., 2:4] > 0).all(dim=(1, 2))
     if bool(preplaced_mask.any()):
@@ -229,7 +233,11 @@ def project_disjunctive(
         tolerance = 1.0e-6 / max(scale, 1.0e-30) if normalized else 1.0e-6
     clearance = max(clearance, 2.0 * tolerance)
     mask = _as_mask(preplaced_mask if preplaced_mask is not None else _get_field(problem, ("preplaced_mask", "is_preplaced")), work.shape[1], work.device)
+    ignore_preplaced_pairs = bool(_get_field(problem, ("raw_preplaced_validated",), False))
     pairs, directions = assign_directions(work, beam_variant=0)
+    if ignore_preplaced_pairs:
+        exempt = mask[pairs[:, 0]] & mask[pairs[:, 1]]
+        directions[:, exempt] = -1
     active_count = (directions >= 0).sum(dim=1)
     best_xywh = work
     best_dirs = directions
@@ -243,6 +251,9 @@ def project_disjunctive(
         fixed_pair_overlap = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
         for _ in range(max(1, outer_iterations)):
             pairs, variant_dirs = assign_directions(candidate, beam_variant=variant)
+            if ignore_preplaced_pairs:
+                exempt = mask[pairs[:, 0]] & mask[pairs[:, 1]]
+                variant_dirs[:, exempt] = -1
             active_count = (variant_dirs >= 0).sum(dim=1)
             if not bool((active_count > 0).any().item()):
                 break
@@ -255,7 +266,14 @@ def project_disjunctive(
                 clearance=clearance,
             )
             fixed_pair_overlap |= fixed_now
-        ok, _, max_overlap = _verified_status(candidate, work, mask, tolerance, fixed_pair_overlap)
+        ok, _, max_overlap = _verified_status(
+            candidate,
+            work,
+            mask,
+            tolerance,
+            fixed_pair_overlap,
+            ignore_preplaced_pairs,
+        )
         better = (max_overlap < best_max) | (ok & ~best_ok) | (fixed_pair_overlap & ~best_fixed_pair_overlap)
         best_xywh = torch.where(better.view(-1, 1, 1), candidate, best_xywh)
         best_dirs = torch.where(better.view(-1, 1), variant_dirs, best_dirs)
@@ -263,7 +281,14 @@ def project_disjunctive(
         best_ok = torch.where(better, ok, best_ok)
         best_fixed_pair_overlap = torch.where(better, fixed_pair_overlap, best_fixed_pair_overlap)
         best_active_count = torch.where(better, active_count, best_active_count)
-    ok_mask, reasons, best_max = _verified_status(best_xywh, work, mask, tolerance, best_fixed_pair_overlap)
+    ok_mask, reasons, best_max = _verified_status(
+        best_xywh,
+        work,
+        mask,
+        tolerance,
+        best_fixed_pair_overlap,
+        ignore_preplaced_pairs,
+    )
     displacement = torch.linalg.vector_norm(best_xywh[..., :2] - work[..., :2], dim=-1).sum(dim=1)
     status = "ok" if bool(ok_mask.all().item()) else ("partial" if bool(ok_mask.any().item()) else "infeasible")
     return ProjectionResult(

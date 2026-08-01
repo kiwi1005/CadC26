@@ -137,7 +137,8 @@ def safe_shelf(case: FloorplanCase, *, gap: float | None = None) -> torch.Tensor
     pos[preplaced] = target[preplaced]
 
     overlap_eps = coordinate_tolerance(case, OVERLAP_EPS)
-    if overlap_pairs(pos[preplaced], eps=overlap_eps):
+    raw_preplaced_validated = bool(_field(case, ("raw_preplaced_validated",), False))
+    if not raw_preplaced_validated and overlap_pairs(pos[preplaced], eps=overlap_eps):
         raise ValueError("preplaced anchors overlap; hard-feasible fallback is impossible")
 
     x = _max_right(pos, preplaced) + clearance

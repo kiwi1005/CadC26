@@ -428,6 +428,9 @@ def soft_violation_normalized(case: Any, xywh: Any) -> SoftViolations:
 def verify(case: Any, xywh: Any) -> Verification:
     boxes = as_xywh(xywh)
     overlaps = overlap_pairs(boxes, eps=coordinate_tolerance(case, OVERLAP_EPS))
+    if bool(_field(case, ("raw_preplaced_validated",), False)):
+        _, preplaced = _constraint_masks(case, int(boxes.shape[0]))
+        overlaps = tuple(pair for pair in overlaps if not bool(preplaced[pair[0]] and preplaced[pair[1]]))
     areas = area_bad_blocks(case, boxes)
     hard_tolerance = coordinate_tolerance(case, HARD_TARGET_TOL)
     fixed = fixed_bad_blocks(case, boxes, tol=hard_tolerance)

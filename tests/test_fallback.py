@@ -11,7 +11,9 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from hcfp.case import from_official  # noqa: E402
 from hcfp.fallback import safe_shelf  # noqa: E402
+from hcfp.projection import project_disjunctive  # noqa: E402
 from hcfp.verify import overlap_pairs, verify  # noqa: E402
 
 
@@ -79,3 +81,35 @@ def test_safe_shelf_fails_closed_when_hard_anchors_overlap() -> None:
 
     with pytest.raises(ValueError, match="preplaced anchors overlap"):
         safe_shelf(case)
+
+
+def test_raw_validated_touching_preplaced_survives_fp32_normalization() -> None:
+    preplaced = torch.tensor(
+        [
+            [7.0, 0.0, 29.0, 20.0],
+            [0.0, 10.0, 7.0, 10.0],
+            [75.0, 55.0, 15.0, 14.0],
+            [0.0, 20.0, 6.0, 8.0],
+            [75.0, 22.0, 11.0, 26.0],
+        ]
+    )
+    targets = torch.cat((preplaced, torch.full((1, 4), -1.0)))
+    areas = torch.tensor([580.0, 70.0, 210.0, 48.0, 286.0, 19368.0])
+    constraints = torch.zeros((6, 5), dtype=torch.long)
+    constraints[:5, 1] = 1
+    case = from_official(6, areas, [], [], [], constraints, targets)
+
+    assert overlap_pairs(case.target[case.preplaced_mask], eps=1.0e-6 / case.scale)
+    placed = safe_shelf(case)
+    projection = project_disjunctive(placed, problem=case)
+
+    assert verify(case, placed).feasible
+    assert projection.ok
+
+
+def test_official_adapter_rejects_raw_overlapping_preplaced_targets() -> None:
+    constraints = torch.tensor([[0, 1, 0, 0, 0], [0, 1, 0, 0, 0]])
+    targets = torch.tensor([[0.0, 0.0, 2.0, 2.0], [1.0, 1.0, 2.0, 2.0]])
+
+    with pytest.raises(ValueError, match="preplaced target rectangles overlap"):
+        from_official(2, [4.0, 4.0], [], [], [], constraints, targets)
