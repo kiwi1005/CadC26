@@ -1,0 +1,19 @@
+stateDiagram-v2
+    [*] --> Parse
+    Parse --> FallbackReady
+    FallbackReady --> Encode
+    Encode --> InitializePopulation
+    InitializePopulation --> Dynamics
+    Dynamics --> Diagnose
+    Diagnose --> Reconfigure: stagnated
+    Reconfigure --> Dynamics
+    Diagnose --> Rank: budget/steps complete
+    Rank --> BDP
+    BDP --> FastVerify
+    FastVerify --> ExactVerify: candidate passes
+    FastVerify --> FallbackReady: none pass and timeout
+    ExactVerify --> Polish: time remains
+    ExactVerify --> ReturnBest: no time
+    Polish --> ExactVerify
+    FallbackReady --> ReturnBest: timeout/error
+    ReturnBest --> [*]

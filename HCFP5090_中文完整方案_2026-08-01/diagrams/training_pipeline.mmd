@@ -1,0 +1,14 @@
+flowchart LR
+    A[1M FloorSet Training] --> B[Shard + Labels]
+    B --> C[SCENE/POP-INIT Supervision]
+    B --> D[Online Corruptions]
+    D --> E[One-Step Recovery]
+    E --> F[Multi-Step HiCoDy]
+    F --> G[Stagnation Replay]
+    G --> H[ETR Teacher Outcomes]
+    F --> I[BDP Direction Outcomes]
+    I --> J[PVR / Direction Training]
+    H --> K[Self-Improvement DAgger]
+    J --> K
+    K --> F
+    K --> L[Exact Internal Evaluation]

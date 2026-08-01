@@ -1,58 +1,24 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "floorset-puzzle"
+name = "hcfp5090"
 version = "0.1.0"
-description = "Bootstrap scaffold for FloorSet puzzle environment setup and smoke validation"
+description = "Heterogeneous collective floorplanning with GPU dynamics and disjunctive projection"
 readme = "README.md"
-requires-python = ">=3.10"
-dependencies = [
-  "matplotlib>=3.7.0",
-  "networkx>=3.0.0",
-  "numpy>=1.24.0",
-  "pandas>=2.0.0",
-  "pydantic>=2.0.0",
-  "pyyaml>=6.0.0",
-  "requests>=2.28.0",
-  "rich>=13.0.0",
-  "shapely>=2.0.0",
-  "torch>=2.0.0",
-  "tqdm>=4.60.0",
-]
+requires-python = ">=3.11"
+dependencies = ["torch>=2.11"]
 
 [project.optional-dependencies]
-dev = [
-  "black>=24.0.0",
-  "mypy>=1.8.0",
-  "pytest>=8.0.0",
-  "ruff>=0.5.0",
-]
+dev = ["pytest>=8"]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
+[project.scripts]
+hcfp = "hcfp.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.black]
-line-length = 100
-target-version = ["py310"]
-
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-q"
 testpaths = ["tests"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-
-[tool.ruff.lint]
-select = ["B", "E", "F", "I", "UP"]
-
-[tool.mypy]
-python_version = "3.10"
-ignore_missing_imports = true
-warn_unused_configs = true
-scripts_are_modules = true

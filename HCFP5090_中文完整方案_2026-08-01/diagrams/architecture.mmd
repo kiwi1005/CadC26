@@ -1,0 +1,20 @@
+flowchart TD
+    A[Official FloorSet tensors] --> B[Sanitize / Normalize / Hard Masks]
+    B --> C[SCENE Static Encoder]
+    C --> D[POP-INIT K Hypotheses]
+    D --> E[HiCoDy Block-Level Interactions]
+    E --> F[Region-Level Coordination]
+    F --> G[Global Density / Envelope Field]
+    G --> H[Local Hard Projection]
+    H --> I{Stagnation or Conflict?}
+    I -- No --> E
+    I -- Yes --> J[ETR: Branch / Rewire / Restart]
+    J --> E
+    H --> K[PVR Population Ranker]
+    K --> L[BDP Direction Beam]
+    L --> M[Batched PDHG Projection]
+    M --> N[GPU Fast Verifier]
+    N --> O[CPU Exact Verifier]
+    O --> P[Best Exact Feasible]
+    B --> Q[Deterministic Shelf Fallback]
+    Q --> P

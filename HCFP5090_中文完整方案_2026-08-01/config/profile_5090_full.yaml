@@ -1,0 +1,49 @@
+project: HCFP-5090
+profile: rtx5090_full
+precision:
+  neural: bf16
+  linear_fp8_optional: true
+  geometry: fp32
+  projection: fp32
+  exact_verify: cpu_float64
+runtime:
+  cuda_min_version: "12.8"
+  torch_compile: true
+  cuda_graphs: true
+  deterministic: true
+buckets:
+  - {n_pad: 32,  population: 32, dynamics_steps: 20, pvr_topm: 8,  bdp_beam: 6}
+  - {n_pad: 64,  population: 48, dynamics_steps: 22, pvr_topm: 10, bdp_beam: 8}
+  - {n_pad: 96,  population: 64, dynamics_steps: 24, pvr_topm: 12, bdp_beam: 8}
+  - {n_pad: 128, population: 64, dynamics_steps: 28, pvr_topm: 12, bdp_beam: 10}
+model:
+  hidden_dim: 320
+  scene_layers: 8
+  heads: 8
+  region_tokens: 12
+  density_grid: 32
+  interaction_layers: 4
+  event_types: 8
+initializer:
+  sinkhorn_iters: 6
+  learned_modes: 16
+  sobol_noise: true
+dynamics:
+  segment_steps: 6
+  velocity_clip: 0.12
+  aspect_clip_normalized: 5.0
+  latch_on_steps: 3
+  latch_off_steps: 2
+  stagnation_window: 6
+projection:
+  outer_cycles: 3
+  pdhg_iters: 48
+  direction_uncertain_pairs: 12
+  separation_margin_normalized: 1.0e-5
+  soft_slack_penalty: 100.0
+selection:
+  exact_verify_topk: 4
+  optional_polish_steps: 8
+fallback:
+  enabled: true
+  gap_normalized: 1.0e-4

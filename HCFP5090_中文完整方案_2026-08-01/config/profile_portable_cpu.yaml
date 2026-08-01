@@ -1,0 +1,32 @@
+project: HCFP-5090
+profile: portable_cpu
+precision:
+  neural: fp32
+  geometry: fp64
+  projection: fp64
+  exact_verify: cpu_float64
+runtime:
+  torch_compile: false
+  cuda_graphs: false
+  deterministic: true
+buckets:
+  - {n_pad: 32,  population: 8,  dynamics_steps: 12, pvr_topm: 4, bdp_beam: 3}
+  - {n_pad: 64,  population: 8,  dynamics_steps: 12, pvr_topm: 4, bdp_beam: 3}
+  - {n_pad: 96,  population: 12, dynamics_steps: 14, pvr_topm: 4, bdp_beam: 4}
+  - {n_pad: 128, population: 12, dynamics_steps: 16, pvr_topm: 4, bdp_beam: 4}
+model:
+  hidden_dim: 160
+  scene_layers: 4
+  heads: 4
+  region_tokens: 8
+  density_grid: 16
+  interaction_layers: 2
+projection:
+  outer_cycles: 2
+  pdhg_iters: 32
+  separation_margin_normalized: 2.0e-5
+selection:
+  exact_verify_topk: 2
+fallback:
+  enabled: true
+  always_precompute: true

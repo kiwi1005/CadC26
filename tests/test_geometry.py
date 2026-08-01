@@ -2,42 +2,47 @@ from __future__ import annotations
 
 import torch
 
-from puzzleplace.data.schema import FloorSetCase
-from puzzleplace.eval.official import evaluate_positions, extract_validation_baseline_metrics
-from puzzleplace.geometry import summarize_hard_legality
+from hcfp.case import from_official
+from hcfp.geometry import (
+    centers_from_xywh,
+    denormalize_xywh,
+    exact_shape_projection,
+    normalize_xywh,
+    overlap_area_matrix,
+)
 
 
-def _make_case() -> FloorSetCase:
-    return FloorSetCase(
-        case_id="geom-1",
-        block_count=2,
-        area_targets=torch.tensor([6.0, 6.0]),
-        b2b_edges=torch.tensor([[0.0, 1.0, 1.0]]),
-        p2b_edges=torch.empty((0, 3)),
-        pins_pos=torch.empty((0, 2)),
-        constraints=torch.tensor([[1.0, 0.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 0.0, 2.0]]),
-        target_positions=torch.tensor([[0.0, 0.0, 2.0, 3.0], [3.0, 0.0, 3.0, 2.0]]),
-        metrics=torch.tensor([12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
+def _case(device: str = "cpu"):
+    return from_official(
+        3,
+        [4.0, 6.0, 9.0],
+        [],
+        [],
+        [],
+        [[0, 0, 0, 0, 0], [1, 0, 0, 0, 0], [0, 1, 0, 0, 0]],
+        [[-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, 2.0, 3.0], [10.0, 4.0, 3.0, 3.0]],
+        device=device,
     )
 
 
-def test_summarize_hard_legality_detects_preplaced_and_overlap_violations() -> None:
-    case = _make_case()
-    valid_positions = [(0.0, 0.0, 2.0, 3.0), (3.0, 0.0, 3.0, 2.0)]
-    summary = summarize_hard_legality(case, valid_positions)
-    assert summary.is_feasible is True
+def test_shape_projection_preserves_area_and_hard_dimensions() -> None:
+    case = _case()
+    log_aspect = torch.tensor([[0.5, -0.8, 1.2], [-0.5, 0.8, -1.2]])
+    wh = exact_shape_projection(case, log_aspect)
 
-    invalid_positions = [(0.0, 0.0, 2.0, 3.0), (2.5, 0.0, 3.0, 2.0)]
-    invalid_summary = summarize_hard_legality(case, invalid_positions)
-    assert invalid_summary.is_feasible is False
-    assert invalid_summary.overlap_violations >= 1 or invalid_summary.dimension_violations >= 1
+    assert torch.allclose(wh[:, 0, 0] * wh[:, 0, 1], case.area[0].expand(2))
+    assert torch.equal(wh[:, 1], case.target[1, 2:4].expand(2, -1))
+    assert torch.equal(wh[:, 2], case.target[2, 2:4].expand(2, -1))
 
 
-def test_official_wrapper_matches_target_solution_feasibility() -> None:
-    case = _make_case()
-    positions = [(0.0, 0.0, 2.0, 3.0), (3.0, 0.0, 3.0, 2.0)]
-    result = evaluate_positions(case, positions)
-    assert result["legality"]["is_feasible"] is True
-    assert result["official"]["is_feasible"] is True
-    baseline = extract_validation_baseline_metrics(case)
-    assert baseline["area_baseline"] == 12.0
+def test_normalization_round_trip_and_overlap_matrix() -> None:
+    case = _case()
+    raw = torch.tensor([[0.0, 0.0, 2.0, 2.0], [1.0, 1.0, 2.0, 3.0], [10.0, 4.0, 3.0, 3.0]])
+    normalized = normalize_xywh(case, raw)
+    restored = denormalize_xywh(case, normalized)
+
+    assert torch.allclose(restored, raw, atol=1.0e-5)
+    assert torch.allclose(centers_from_xywh(raw)[0], torch.tensor([1.0, 1.0]))
+    overlap = overlap_area_matrix(raw)
+    assert overlap[0, 1] == 1.0
+    assert overlap[0, 2] == 0.0
