@@ -36,6 +36,7 @@ def test_report_contains_pairwise_buckets_and_promotion_decision() -> None:
         {"fallback": _rows(), "analytic": _rows((1.5, 2.5))},
         baseline="fallback",
         provenance={"git_commit": "abc"},
+        lane_metadata={"analytic": {"checkpoint_hash": "abc123"}},
     )
 
     assert report["schema_version"] == 1
@@ -44,6 +45,7 @@ def test_report_contains_pairwise_buckets_and_promotion_decision() -> None:
     assert report["comparisons"]["analytic"]["improved_cases"] == 2
     assert report["comparisons"]["analytic"]["per_case_delta"][1]["test_id"] == 1
     assert report["promotion_decisions"]["analytic"] == "PROMOTE"
+    assert report["lane_metadata"]["analytic"]["checkpoint_hash"] == "abc123"
 
 
 def test_capped_feasible_is_hold_and_infeasible_is_reject() -> None:

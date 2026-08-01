@@ -74,3 +74,39 @@ def test_visualize_cli_writes_svg(tmp_path: Path) -> None:
 
     assert str(dst) in result.stdout
     assert dst.read_text(encoding="utf-8").startswith("<svg ")
+
+
+def test_visualize_cli_selects_benchmark_lane_and_case(tmp_path: Path) -> None:
+    src = tmp_path / "benchmark.json"
+    dst = tmp_path / "selected.svg"
+    row = {
+        "test_id": 7,
+        "cost": 2.0,
+        "hpwl_gap": 0.2,
+        "area_gap": 0.1,
+        "violations_relative": 0.0,
+        "positions": _payload()["placements"],
+    }
+    src.write_text(json.dumps({"lanes": {"analytic": [row]}}), encoding="utf-8")
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/visualize_hcfp.py",
+            str(src),
+            "--lane",
+            "analytic",
+            "--case-id",
+            "7",
+            "-o",
+            str(dst),
+        ],
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+    )
+
+    svg = dst.read_text(encoding="utf-8")
+    assert "case 7" in svg
+    assert "cost=2" in svg

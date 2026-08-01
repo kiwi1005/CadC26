@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from hcfp.benchmark import build_report  # noqa: E402
+from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.reference import OFFICIAL_FLOORSET_V10  # noqa: E402
 from hcfp.visualize import render_html  # noqa: E402
 
@@ -35,23 +36,45 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-path", default="artifacts/floorset-v10")
     parser.add_argument("--cases", default="all", help="all or comma-separated test ids")
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--checkpoint",
+        action="append",
+        metavar="LANE=PATH",
+        help="hash-verified checkpoint for a learned optimizer lane",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--visualize-dir")
     parser.add_argument("--visualize-cases", default="")
     args = parser.parse_args(argv)
 
     specs = _assignments(args.optimizer or args.result or [])
+    checkpoints = _assignments(args.checkpoint or [])
+    if checkpoints and not args.optimizer:
+        raise ValueError("--checkpoint requires --optimizer mode")
+    unknown_checkpoint_lanes = checkpoints.keys() - specs.keys()
+    if unknown_checkpoint_lanes:
+        raise ValueError(f"checkpoint lanes are missing optimizers: {sorted(unknown_checkpoint_lanes)}")
     if args.optimizer:
-        lanes = _run_optimizers(specs, Path(args.data_path), _case_ids(args.cases), args.device)
+        lanes, case_metadata, lane_metadata = _run_optimizers(
+            specs,
+            Path(args.data_path),
+            _case_ids(args.cases),
+            args.device,
+            checkpoints,
+        )
         mode = "optimizer"
     else:
         lanes = {name: _load_rows(path) for name, path in specs.items()}
+        case_metadata = {}
+        lane_metadata = {}
         mode = "result"
 
     report = build_report(
         lanes,
         baseline=args.baseline,
         provenance=_provenance(Path(args.data_path), args.device, mode),
+        case_metadata=case_metadata,
+        lane_metadata=lane_metadata,
     )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -97,15 +120,52 @@ def _run_optimizers(
     data_path: Path,
     test_ids: list[int] | None,
     device: str,
-) -> dict[str, list[dict[str, Any]]]:
+    checkpoints: dict[str, Path],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
     evaluator_module = _load_evaluator(data_path)
     lanes = {}
+    metadata: dict[str, Any] = {}
+    lane_metadata: dict[str, Any] = {}
     with _environment("HCFP_DEVICE", device):
         for name, path in specs.items():
-            evaluator = evaluator_module.ContestEvaluator(str(data_path), verbose=False)
-            result = evaluator.evaluate(str(path), test_ids=test_ids)
+            checkpoint = checkpoints.get(name)
+            if checkpoint is not None:
+                _, checkpoint_metadata = load_checkpoint(
+                    checkpoint,
+                    expected_normalization=RUNTIME_NORMALIZATION,
+                    map_location="cpu",
+                )
+                lane_metadata[name] = {
+                    "checkpoint": str(checkpoint),
+                    "checkpoint_hash": checkpoint_metadata["state_hash"],
+                    "normalization": checkpoint_metadata["normalization"],
+                    "required": True,
+                }
+            else:
+                lane_metadata[name] = {"checkpoint": None, "required": False}
+            with _environment("HCFP_CHECKPOINT", str(checkpoint) if checkpoint is not None else None):
+                evaluator = evaluator_module.ContestEvaluator(str(data_path), verbose=False)
+                result = evaluator.evaluate(str(path), test_ids=test_ids)
             lanes[name] = [asdict(row) for row in result.test_results]
-    return lanes
+            if not metadata:
+                metadata = _case_metadata(evaluator, [int(row.test_id) for row in result.test_results])
+    return lanes, metadata, lane_metadata
+
+
+def _case_metadata(evaluator: Any, test_ids: list[int]) -> dict[str, Any]:
+    metadata = {}
+    for test_id in test_ids:
+        inputs = evaluator.dataset[test_id]["input"]
+        area, b2b, p2b, pins, constraints = inputs
+        block_count = int((area != -1).sum().item())
+        metadata[str(test_id)] = {
+            "block_count": block_count,
+            "constraints": constraints[:block_count].tolist(),
+            "pins_pos": [row for row in pins.tolist() if row != [-1.0, -1.0]],
+            "b2b_connectivity": [row for row in b2b.tolist() if row[:2] != [-1.0, -1.0]],
+            "p2b_connectivity": [row for row in p2b.tolist() if row[:2] != [-1.0, -1.0]],
+        }
+    return metadata
 
 
 def _load_evaluator(data_path: Path):
@@ -164,6 +224,7 @@ def _visualize(report: dict[str, Any], directory: Path, case_ids: list[int] | No
                 {
                     "title": f"case {test_id} — {name} — cost {float(row['cost']):.6f}",
                     "placements": row["positions"],
+                    "case": report.get("case_metadata", {}).get(str(test_id)),
                     "telemetry": {
                         key: row[key]
                         for key in ("cost", "hpwl_gap", "area_gap", "violations_relative")
@@ -177,9 +238,12 @@ def _visualize(report: dict[str, Any], directory: Path, case_ids: list[int] | No
 
 
 @contextmanager
-def _environment(name: str, value: str):
+def _environment(name: str, value: str | None):
     previous = os.environ.get(name)
-    os.environ[name] = value
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
     try:
         yield
     finally:

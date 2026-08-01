@@ -17,7 +17,7 @@
 | --- | --- |
 | Branch | `feat/hcfp5090-greenfield` |
 | Full-runtime source commit | `d3fc9997c49e56ede19b02b10f7315bc97458ea9` |
-| Fallback audit adapter commit | `9d6f961d1361364e15678477342dffd7901bd220` |
+| Fallback audit adapter commit | `e2f51758dc4a20e0495d0273577e1438afe38a30` |
 | FloorSet checkout commit | `aadddcc2238695eb21e6542b8a6cd9e9fe6b80fa` |
 | Evaluator SHA256 | `64db37865b42baf11add62bdbf035690dca086cd4be7b5b4e58db756f20d8498` |
 | Validation inventory | 100 litedata + 100 litelabel, `config_21` through `config_120` |
@@ -47,7 +47,7 @@ HCFP_DEVICE=cpu PYTHONPATH=src python -B \
   artifacts/floorset-v10/iccad2026contest/iccad2026_evaluate.py \
   --evaluate scripts/audit_fallback_optimizer.py \
   --data-path artifacts/floorset-v10 \
-  --output artifacts/reports/hcfp-9d6f961-fallback100.json
+  --output artifacts/reports/hcfp-e2f5175-fallback100.json
 ```
 
 ## Results
@@ -60,18 +60,23 @@ HCFP_DEVICE=cpu PYTHONPATH=src python -B \
 | 106–120 block feasible | 15/15 | 15/15 |
 | Average cost / total score | 9.999999 | 9.999999 |
 | Cases with `cost >= 9.99` | 100 | 100 |
-| Average runtime | 0.513950 s | 0.202637 s |
-| Runtime p50 | 0.413986 s | 0.157940 s |
-| Runtime p95 | 1.118387 s | 0.496697 s |
-| Runtime p99 | 1.441782 s | 0.734643 s |
-| Runtime max | 1.560965 s | 0.830374 s |
+| Average runtime | 0.513950 s | 0.204343 s |
+| Runtime p50 | 0.413986 s | 0.160256 s |
+| Runtime p95 | 1.118387 s | 0.498944 s |
+| Runtime p99 | 1.441782 s | 0.734906 s |
+| Runtime max | 1.560965 s | 0.813677 s |
 
 Report hashes:
 
 ```text
 d1f291ae9be6bc7076bdd4eced3945c4e125b2bbc54db5839fc313af53f3bf56  hcfp-d3fc999-validation100.json
-a0528c2a7f48a60dee4c86193a7f0f7f9356c754f91914d5ba0b7dae9631c18c  hcfp-9d6f961-fallback100.json
+f179c6e8514f21ceaa689aff0dd3a6e0e1447df67885de90ade681f1d2cb864f  hcfp-e2f5175-fallback100.json
 ```
+
+The earlier `9d6f961` fallback report is superseded. Its audit module exposed
+the imported base optimizer class, so the official loader could select the
+wrong class during module scanning. Commit `e2f5175` removes that class from
+the module namespace and adds a regression test for loader-visible classes.
 
 ## Supporting correctness checks
 
@@ -83,7 +88,8 @@ a0528c2a7f48a60dee4c86193a7f0f7f9356c754f91914d5ba0b7dae9631c18c  hcfp-9d6f961-f
 - The official optimizer constructor accepts the evaluator's `verbose`
   argument.
 - Candidate telemetry is opt-in; the official fast path does not compute it.
-- The full repository suite passed 78 tests before this report was committed.
+- The original P0 suite passed 78 tests; the corrected audit and complete
+  runnable framework later passed 95 tests.
 
 ## Known gaps and next gate
 

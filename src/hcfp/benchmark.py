@@ -42,6 +42,8 @@ def build_report(
     *,
     baseline: str,
     provenance: dict[str, Any] | None = None,
+    case_metadata: dict[str, Any] | None = None,
+    lane_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build one stable comparison report from evaluator-compatible rows."""
 
@@ -88,6 +90,8 @@ def build_report(
     return {
         "schema_version": 1,
         "provenance": provenance or {},
+        "case_metadata": case_metadata or {},
+        "lane_metadata": lane_metadata or {},
         "baseline": baseline,
         "lanes": normalized,
         "lane_summary": lane_summary,

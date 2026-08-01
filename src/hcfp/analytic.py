@@ -74,6 +74,16 @@ def solve_case(case: FloorplanCase, config: AnalyticConfig | None = None) -> Ten
     return _solve_candidates(case, config)[0]
 
 
+def solve_case_from_population(
+    case: FloorplanCase,
+    initial_xywh: Tensor,
+    config: AnalyticConfig | None = None,
+) -> Tensor:
+    """Run the verified analytic tail from an explicit ``[K,N,4]`` population."""
+
+    return _solve_candidates(case, config, initial_population=initial_xywh)[0]
+
+
 def solve_case_with_telemetry(case: FloorplanCase, config: AnalyticConfig | None = None) -> AnalyticResult:
     """Return best candidate plus per-candidate telemetry after projection."""
 
@@ -92,13 +102,16 @@ def solve_case_with_telemetry(case: FloorplanCase, config: AnalyticConfig | None
 def _solve_candidates(
     case: FloorplanCase,
     config: AnalyticConfig | None,
+    *,
+    initial_population: Tensor | None = None,
 ) -> tuple[Tensor, FloorplanCase, Tensor, ProjectionResult, Tensor, dict[str, object]]:
     cfg = config or AnalyticConfig()
     cpu_case = case.to(device="cpu", dtype=torch.float32)
     fallback = safe_shelf(cpu_case).to(dtype=torch.float32)
     manager = IncumbentManager(cpu_case, fallback)
 
-    result = relax(case, cfg.dynamics, initial_xywh=fallback.to(case.area.device))
+    initial = fallback.to(case.area.device) if initial_population is None else initial_population
+    result = relax(case, cfg.dynamics, initial_xywh=initial)
     candidates = torch.cat(
         (fallback.to(case.area.device).unsqueeze(0), result.initial_boxes, result.boxes),
         dim=0,
@@ -137,8 +150,18 @@ def solve(
         device=selected_device,
     )
     normalized_solution = solve_case(normalized, config)
-    raw = denormalize_xywh(normalized.to(device="cpu"), normalized_solution).to(torch.float64)
-    _copy_raw_hard_targets(case, normalized.to(device="cpu"), raw)
+    return to_official_placements(case, normalized, normalized_solution)
+
+
+def to_official_placements(
+    source: Any,
+    normalized_case: FloorplanCase,
+    normalized_solution: Tensor,
+) -> list[tuple[float, float, float, float]]:
+    """Denormalize a verified candidate and replay raw hard targets exactly."""
+
+    raw = denormalize_xywh(normalized_case.to(device="cpu"), normalized_solution).to(torch.float64)
+    _copy_raw_hard_targets(source, normalized_case.to(device="cpu"), raw)
     return [tuple(float(value) for value in row) for row in raw.tolist()]
 
 

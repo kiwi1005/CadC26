@@ -20,9 +20,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-o", "--output", required=True, help="output .svg or .html path")
     parser.add_argument("--html", action="store_true", help="force HTML output even for one placement")
     parser.add_argument("--title", default="HCFP floorplan")
+    parser.add_argument("--lane", help="select a lane from benchmark JSON")
+    parser.add_argument("--case-id", type=int, help="select a test id from benchmark JSON")
     args = parser.parse_args(argv)
 
-    entries = load_visualization_json(args.input)
+    entries = load_visualization_json(args.input, lane=args.lane, test_id=args.case_id)
     output = Path(args.output)
     if args.html or output.suffix.lower() in {".html", ".htm"} or len(entries) > 1:
         text = render_html(entries, title=args.title)

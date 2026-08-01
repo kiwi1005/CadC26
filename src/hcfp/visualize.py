@@ -114,11 +114,18 @@ def render_html(items: Sequence[Mapping[str, Any]], *, title: str = "HCFP compar
     )
 
 
-def load_visualization_json(path: str | Path) -> list[dict[str, Any]]:
+def load_visualization_json(
+    path: str | Path,
+    *,
+    lane: str | None = None,
+    test_id: int | None = None,
+) -> list[dict[str, Any]]:
     """Load one or more visualization entries from a JSON payload."""
 
     with Path(path).open(encoding="utf-8") as fh:
         payload = json.load(fh)
+    if isinstance(payload, Mapping) and "lanes" in payload:
+        return _benchmark_entries(payload, lane=lane, test_id=test_id)
     if isinstance(payload, list):
         return [_entry(item, i) for i, item in enumerate(payload)]
     if "candidates" in payload:
@@ -129,6 +136,44 @@ def load_visualization_json(path: str | Path) -> list[dict[str, Any]]:
             for i, candidate in enumerate(payload["candidates"])
         ]
     return [_entry(payload, 0)]
+
+
+def _benchmark_entries(
+    payload: Mapping[str, Any],
+    *,
+    lane: str | None,
+    test_id: int | None,
+) -> list[dict[str, Any]]:
+    lanes = payload["lanes"]
+    if not isinstance(lanes, Mapping):
+        raise ValueError("benchmark lanes must be a mapping")
+    names = [lane] if lane else list(lanes)
+    entries = []
+    for name in names:
+        if name not in lanes:
+            raise ValueError(f"benchmark lane {name!r} is missing")
+        rows = lanes[name]
+        selected = rows if test_id is None else [row for row in rows if int(row["test_id"]) == test_id]
+        for row in selected:
+            if row.get("positions") is None:
+                continue
+            entries.append(
+                _entry(
+                    {
+                        "title": f"case {int(row['test_id'])} — {name} — cost {float(row['cost']):.6f}",
+                        "placements": row["positions"],
+                        "case": payload.get("case_metadata", {}).get(str(int(row["test_id"]))),
+                        "telemetry": {
+                            key: row[key]
+                            for key in ("cost", "hpwl_gap", "area_gap", "violations_relative")
+                        },
+                    },
+                    len(entries),
+                )
+            )
+    if not entries:
+        raise ValueError("benchmark selection contains no placements")
+    return entries
 
 
 def _entry(payload: Mapping[str, Any], index: int) -> dict[str, Any]:

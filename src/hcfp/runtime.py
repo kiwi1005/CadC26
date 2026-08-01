@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib
 import math
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -106,6 +107,13 @@ def solve(
 
 
 def _load_default_solver() -> Solver | None:
+    checkpoint = os.environ.get("HCFP_CHECKPOINT")
+    if checkpoint:
+        try:
+            learned = importlib.import_module("hcfp.learned")
+            return lambda case: learned.solve(case, checkpoint=checkpoint)
+        except Exception:
+            pass
     for module_name, attr_name in (
         ("hcfp.analytic", "solve"),
         ("hcfp.solver", "solve"),

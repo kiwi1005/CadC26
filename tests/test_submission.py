@@ -188,6 +188,14 @@ def test_official_optimizer_accepts_evaluator_verbose_flag() -> None:
     assert HCFPOptimizer(verbose=True).verbose is True
 
 
+def test_opt_in_missing_checkpoint_still_returns_verified_solution(monkeypatch) -> None:
+    monkeypatch.setenv("HCFP_CHECKPOINT", "/missing/hcfp-checkpoint.pt")
+    placements = HCFPRuntime().solve(**_case_payload())
+
+    assert placements[0] == (10.0, 5.0, 2.0, 2.0)
+    assert len(placements) == 3
+
+
 def test_fallback_audit_exposes_only_its_specialized_optimizer_class() -> None:
     path = Path("scripts/audit_fallback_optimizer.py")
     spec = importlib.util.spec_from_file_location("fallback_audit_test", path)
