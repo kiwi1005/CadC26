@@ -51,6 +51,10 @@ def test_project_resolves_overlap_and_preserves_dimensions(device):
     result = projection.project_disjunctive(boxes, iterations=8)
     assert result.ok
     assert result.status == "ok"
+    assert bool(result.ok_mask)
+    assert result.failure_reasons == ("ok",)
+    assert result.active_pair_count.item() == 0
+    assert result.displacement.item() > 0.0
     assert result.xywh.device.type == torch.device(device).type
     assert torch.allclose(result.xywh[:, 2:4], boxes[:, 2:4])
     assert projection.overlap_matrix(result.xywh).max().item() <= 1.0e-5
@@ -87,6 +91,9 @@ def test_batch_projection_is_independent_and_deterministic(device):
     assert torch.allclose(first.xywh, second.xywh)
     assert torch.allclose(first.xywh[..., 2:4], boxes[..., 2:4])
     assert torch.all(projection.overlap_matrix(first.xywh).amax(dim=(1, 2)) <= 1.0e-5)
+    assert first.ok_mask.tolist() == [True, True]
+    assert first.active_pair_count.tolist() == second.active_pair_count.tolist()
+    assert torch.all(first.displacement >= 0.0)
 
 
 @pytest.mark.parametrize("device", devices())
@@ -95,5 +102,41 @@ def test_overlapping_preplaced_assignment_fails_closed(device):
     result = projection.project_disjunctive(boxes, preplaced_mask=torch.tensor([True, True], device=device), iterations=8)
     assert not result.ok
     assert result.status == "infeasible"
+    assert result.ok_mask.item() is False
+    assert result.failure_reasons == ("fixed_pair_overlap",)
     assert result.max_overlap.item() > 0.0
     assert torch.equal(result.xywh, boxes)
+
+
+@pytest.mark.parametrize("device", devices())
+def test_outer_rebuild_catches_newly_created_overlaps(device):
+    boxes = torch.tensor(
+        [
+            [0.6079329252, 3.9580490589, 2.1840376854, 1.6304452419],
+            [0.0058529293, 2.8178839684, 3.2314422131, 3.6374118328],
+            [2.7010056973, 0.1247475445, 1.9217861891, 2.4937322140],
+        ],
+        device=device,
+    )
+
+    one_pass = projection.project_disjunctive(boxes, iterations=6, outer_iterations=1, beam=1)
+    rebuilt = projection.project_disjunctive(boxes, iterations=6, outer_iterations=3, beam=1)
+
+    assert not one_pass.ok
+    assert one_pass.failure_reasons == ("residual_overlap",)
+    assert rebuilt.ok
+    assert rebuilt.failure_reasons == ("ok",)
+    assert projection.overlap_matrix(rebuilt.xywh).max().item() <= 1.0e-5
+
+
+def test_normalized_problem_uses_raw_coordinate_overlap_tolerance() -> None:
+    class Problem:
+        scale = 100.0
+        normalized = True
+        preplaced_mask = torch.tensor([False, False])
+
+    boxes = torch.tensor([[0.0, 0.0, 0.1, 0.1], [0.05, 0.0, 0.1, 0.1]])
+    result = projection.project_disjunctive(boxes, problem=Problem(), iterations=8)
+
+    assert result.ok
+    assert result.max_overlap.item() <= 1.0e-8

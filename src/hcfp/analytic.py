@@ -12,7 +12,8 @@ from hcfp.case import FloorplanCase, from_official
 from hcfp.dynamics import DynamicsConfig, relax
 from hcfp.fallback import safe_shelf
 from hcfp.geometry import bbox_area_tensor, centers_from_xywh, denormalize_xywh, hpwl_tensor
-from hcfp.projection import project_disjunctive
+from hcfp.incumbent import IncumbentManager
+from hcfp.projection import ProjectionResult, project_disjunctive
 from hcfp.verify import soft_violation_normalized, verify_feasible
 
 
@@ -37,10 +38,14 @@ class CandidateTelemetry:
     hard_feasible: Tensor
     raw_overlap: Tensor
     projected_overlap: Tensor
+    overlap_components: Tensor
+    projection_ok: Tensor
+    projection_active_pairs: Tensor
     hpwl: Tensor
     bbox_area: Tensor
     soft_violation: Tensor
     projection_displacement: Tensor
+    projection_failure_reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class AnalyticResult:
     telemetry: CandidateTelemetry
     energy_history: Tensor
     projection_status: str
+    incumbent_snapshot: dict[str, object]
 
 
 def select_device(requested: str | torch.device | None = None) -> torch.device:
@@ -71,29 +77,32 @@ def solve_case(case: FloorplanCase, config: AnalyticConfig | None = None) -> Ten
 def solve_case_with_telemetry(case: FloorplanCase, config: AnalyticConfig | None = None) -> AnalyticResult:
     """Return best candidate plus per-candidate telemetry after projection."""
 
-    best, cpu_case, candidates, projected, energy_history, projection_status = _solve_candidates(case, config)
+    best, cpu_case, candidates, projection, energy_history, incumbent = _solve_candidates(case, config)
     return AnalyticResult(
         selected=best,
         raw_candidates=candidates.detach(),
-        projected_candidates=projected.detach(),
-        telemetry=_telemetry(cpu_case, candidates.detach(), projected.detach()),
+        projected_candidates=projection.xywh.detach(),
+        telemetry=_telemetry(cpu_case, candidates.detach(), projection),
         energy_history=energy_history.detach(),
-        projection_status=projection_status,
+        projection_status=projection.status,
+        incumbent_snapshot=incumbent,
     )
 
 
 def _solve_candidates(
     case: FloorplanCase,
     config: AnalyticConfig | None,
-) -> tuple[Tensor, FloorplanCase, Tensor, Tensor, Tensor, str]:
+) -> tuple[Tensor, FloorplanCase, Tensor, ProjectionResult, Tensor, dict[str, object]]:
     cfg = config or AnalyticConfig()
     cpu_case = case.to(device="cpu", dtype=torch.float32)
     fallback = safe_shelf(cpu_case).to(dtype=torch.float32)
-    best = fallback
-    best_key = _candidate_key(cpu_case, fallback)
+    manager = IncumbentManager(cpu_case, fallback)
 
     result = relax(case, cfg.dynamics, initial_xywh=fallback.to(case.area.device))
-    candidates = torch.cat((fallback.to(case.area.device).unsqueeze(0), result.boxes), dim=0)
+    candidates = torch.cat(
+        (fallback.to(case.area.device).unsqueeze(0), result.initial_boxes, result.boxes),
+        dim=0,
+    )
     projection = project_disjunctive(
         candidates,
         problem=case,
@@ -102,14 +111,10 @@ def _solve_candidates(
     )
     projected = projection.xywh
 
-    for candidate in projected.detach().to(device="cpu", dtype=torch.float32):
-        if not verify_feasible(cpu_case, candidate):
-            continue
-        key = _candidate_key(cpu_case, candidate)
-        if key < best_key:
-            best = candidate
-            best_key = key
-    return best, cpu_case, candidates, projected, result.state.energy_history, projection.status
+    ok_mask = projection.ok_mask.detach().to(device="cpu", dtype=torch.bool).reshape(-1)
+    for idx, candidate in enumerate(projected.detach().to(device="cpu", dtype=torch.float32)):
+        manager.consider(candidate, source=f"candidate_{idx}", fast_feasible=bool(ok_mask[idx]))
+    return manager.best_exact.xywh, cpu_case, candidates, projection, result.state.energy_history, manager.snapshot()
 
 
 def solve(
@@ -137,12 +142,6 @@ def solve(
     return [tuple(float(value) for value in row) for row in raw.tolist()]
 
 
-def _candidate_key(case: FloorplanCase, boxes: Tensor) -> tuple[float, float]:
-    soft = soft_violation_normalized(case, boxes).total
-    quality = float(bbox_area_tensor(boxes)) + 0.05 * float(hpwl_tensor(case, centers_from_xywh(boxes)))
-    return soft, quality
-
-
 def _overlap_sum(boxes: Tensor) -> Tensor:
     from hcfp.geometry import overlap_area_matrix
 
@@ -150,7 +149,8 @@ def _overlap_sum(boxes: Tensor) -> Tensor:
     return torch.triu(overlap, diagonal=1).sum(dim=(-2, -1))
 
 
-def _telemetry(case: FloorplanCase, raw: Tensor, projected: Tensor) -> CandidateTelemetry:
+def _telemetry(case: FloorplanCase, raw: Tensor, projection: ProjectionResult) -> CandidateTelemetry:
+    projected = projection.xywh.detach()
     cpu_projected = projected.detach().to(device="cpu", dtype=torch.float32)
     hard = torch.tensor([verify_feasible(case, candidate) for candidate in cpu_projected], dtype=torch.bool)
     soft = torch.tensor([soft_violation_normalized(case, candidate).total for candidate in cpu_projected], dtype=torch.float32)
@@ -161,11 +161,35 @@ def _telemetry(case: FloorplanCase, raw: Tensor, projected: Tensor) -> Candidate
         hard_feasible=hard.to(device=projected.device),
         raw_overlap=_overlap_sum(raw),
         projected_overlap=_overlap_sum(projected),
+        overlap_components=_overlap_components(projected),
+        projection_ok=projection.ok_mask.detach(),
+        projection_active_pairs=projection.active_pair_count.detach(),
         hpwl=hpwl_tensor(projected_cpu_case, centers),
         bbox_area=bbox_area_tensor(projected),
         soft_violation=soft.to(device=projected.device),
         projection_displacement=displacement,
+        projection_failure_reasons=projection.failure_reasons,
     )
+
+
+def _overlap_components(boxes: Tensor) -> Tensor:
+    from hcfp.geometry import overlap_area_matrix
+
+    adjacency = overlap_area_matrix(boxes).detach().to(device="cpu") > 0.0
+    counts = []
+    for graph in adjacency:
+        remaining = set(torch.nonzero(graph.any(dim=1), as_tuple=False).reshape(-1).tolist())
+        components = 0
+        while remaining:
+            components += 1
+            stack = [remaining.pop()]
+            while stack:
+                node = stack.pop()
+                neighbors = set(torch.nonzero(graph[node], as_tuple=False).reshape(-1).tolist()) & remaining
+                remaining -= neighbors
+                stack.extend(neighbors)
+        counts.append(components)
+    return torch.tensor(counts, dtype=torch.long, device=boxes.device)
 
 
 def _copy_raw_hard_targets(case: Any, normalized: FloorplanCase, raw: Tensor) -> None:

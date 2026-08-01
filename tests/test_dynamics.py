@@ -35,6 +35,7 @@ def test_parallel_dynamics_preserves_hard_geometry_and_is_finite(device: str) ->
     ))
     result = relax(case, cfg, initial_xywh=initial)
 
+    assert result.initial_boxes.shape == (4, 3, 4)
     assert result.boxes.shape == (4, 3, 4)
     assert torch.isfinite(result.boxes).all()
     assert torch.equal(result.boxes[:, 0], case.target[0].expand(4, -1))

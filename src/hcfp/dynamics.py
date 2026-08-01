@@ -61,6 +61,7 @@ class PopulationState:
 
 @dataclass(frozen=True)
 class DynamicsResult:
+    initial_boxes: Tensor
     boxes: Tensor
     state: PopulationState
     diagnostics: dict[str, Tensor]
@@ -280,10 +281,11 @@ def relax(
     if initial_xywh is None:
         initial_xywh = safe_shelf(case).to(device=case.area.device, dtype=torch.float32)
     state = initialize_population(case, cfg, initial_xywh)
+    initial_boxes = xywh_from_state(case, state.center, state.log_aspect)
     diagnostics = _diagnostics(case, state)
     for _ in range(cfg.steps):
         state, diagnostics = step(case, state, cfg)
         if not bool(torch.isfinite(state.center).all() and torch.isfinite(state.log_aspect).all()):
             raise FloatingPointError("collective dynamics produced non-finite geometry")
     boxes = xywh_from_state(case, state.center, state.log_aspect)
-    return DynamicsResult(boxes=boxes, state=state, diagnostics=diagnostics)
+    return DynamicsResult(initial_boxes=initial_boxes, boxes=boxes, state=state, diagnostics=diagnostics)
