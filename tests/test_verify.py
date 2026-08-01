@@ -78,6 +78,20 @@ def test_boundary_bitmask_uses_solution_bbox_all_codes() -> None:
     assert v.boundary_bitmask(boxes).tolist() == [9, 10, 5, 6, 0]
 
 
+def test_boundary_bitmask_handles_span_and_full_bbox_combinations() -> None:
+    boxes = torch.tensor(
+        [
+            [0.0, 0.0, 10.0, 1.0],
+            [0.0, 9.0, 10.0, 1.0],
+            [0.0, 0.0, 1.0, 10.0],
+            [9.0, 0.0, 1.0, 10.0],
+            [0.0, 0.0, 10.0, 10.0],
+        ]
+    )
+
+    assert v.boundary_bitmask(boxes).tolist() == [11, 7, 13, 14, 15]
+
+
 def test_group_edge_connectivity_and_mib_round4() -> None:
     boxes = torch.tensor(
         [
@@ -97,6 +111,70 @@ def test_group_edge_connectivity_and_mib_round4() -> None:
     assert v.grouping_violation(case, boxes) == 1
     assert v.mib_shape_keys(boxes)[2:] == ((1.0, 1.0), (1.0001, 1.0))
     assert v.mib_violation(case, boxes) == 1
+
+
+def test_mib_compatible_and_incompatible_groups_are_counted_separately() -> None:
+    boxes = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 2.0],
+            [2.0, 0.0, 1.00004, 2.0],
+            [4.0, 0.0, 3.0, 1.0],
+            [8.0, 0.0, 3.0, 1.0002],
+        ]
+    )
+    case = Case(
+        area=torch.tensor([2.0, 2.00008, 3.0, 3.0006]),
+        mib_membership=torch.tensor([[True, True, False, False], [False, False, True, True]]),
+    )
+
+    assert v.mib_violation(case, boxes) == 1
+
+
+def test_grouping_requires_edge_connected_components_not_corner_touch() -> None:
+    boxes = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0, 1.0],
+            [2.0, 0.0, 1.0, 1.0],
+            [4.0, 0.0, 1.0, 1.0],
+            [5.0, 1.0, 1.0, 1.0],
+        ]
+    )
+    case = Case(
+        area=torch.ones(5),
+        group_membership=torch.tensor([[True, True, True, False, False], [False, False, False, True, True]]),
+    )
+
+    assert v.connected_components_for_group(boxes, torch.tensor([True, True, True, False, False])) == 1
+    assert v.connected_components_for_group(boxes, torch.tensor([False, False, False, True, True])) == 2
+    assert v.grouping_violation(case, boxes) == 1
+
+
+def test_fixed_preplaced_exact_target_tolerance_boundary() -> None:
+    target = torch.tensor(
+        [
+            [0.0, 0.0, 2.0, 2.0],
+            [3.0, 0.0, 2.0, 2.0],
+            [6.0, 0.0, 2.0, 2.0],
+            [9.0, 0.0, 2.0, 2.0],
+        ]
+    )
+    boxes = target.clone()
+    boxes[0, 2] += 9.0e-5
+    boxes[1, 2] += 2.0e-4
+    boxes[2, 0] += 9.0e-5
+    boxes[3, 0] += 2.0e-4
+    case = Case(
+        area=torch.tensor([4.0, 4.0, 4.0, 4.0]),
+        target=target,
+        fixed_mask=torch.tensor([True, True, False, False]),
+        preplaced_mask=torch.tensor([False, False, True, True]),
+    )
+
+    result = v.verify(case, boxes)
+    assert result.fixed_bad == (1,)
+    assert result.preplaced_bad == (3,)
+    assert not result.feasible
 
 
 def test_b2b_p2b_hpwl_bbox_and_soft_violation_normalization() -> None:

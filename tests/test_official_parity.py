@@ -128,6 +128,194 @@ def test_soft_metrics_hpwl_and_bbox_match_pinned_official_v10() -> None:
     assert exact.cost == pytest.approx(official_metrics.cost)
 
 
+def test_boundary_edge_cases_match_pinned_official_v10() -> None:
+    official = _official()
+    positions = [
+        (0.0, 0.0, 1.0, 1.0),
+        (3.0, 0.0, 1.0, 1.0),
+        (0.0, 3.0, 1.0, 1.0),
+        (3.0, 3.0, 1.0, 1.0),
+        (1.5, 1.5, 0.5, 0.5),
+    ]
+    areas = torch.tensor([1.0, 1.0, 1.0, 1.0, 0.25])
+    constraints = torch.tensor(
+        [
+            [0, 0, 0, 0, 9],
+            [0, 0, 0, 0, 10],
+            [0, 0, 0, 0, 5],
+            [0, 0, 0, 0, 6],
+            [0, 0, 0, 0, 1],
+        ]
+    )
+    baseline = {"hpwl_baseline": 1.0, "area_baseline": official.calculate_bbox_area(positions)}
+    official_metrics = official.evaluate_solution(
+        {"positions": positions, "runtime": 1.0},
+        baseline,
+        constraints,
+        torch.empty((0, 3)),
+        torch.empty((0, 3)),
+        torch.empty((0, 2)),
+        areas,
+        median_runtime=1.0,
+    )
+
+    case = from_official(5, areas, [], [], [], constraints)
+    normalized = normalize_xywh(case, positions)
+    ours = soft_violation_normalized(case, normalized)
+
+    assert ours.raw_boundary == official_metrics.boundary_violations == 1
+    assert ours.maximum == official_metrics.max_possible_violations == 5
+    assert ours.total == pytest.approx(official_metrics.violations_relative)
+
+
+@pytest.mark.parametrize("code", range(16))
+def test_all_boundary_codes_match_pinned_official_v10(code: int) -> None:
+    official = _official()
+    positions = [
+        (0.0, 0.0, 1.0, 1.0),
+        (9.0, 0.0, 1.0, 1.0),
+        (0.0, 9.0, 1.0, 1.0),
+        (9.0, 9.0, 1.0, 1.0),
+        (4.0, 4.0, 1.0, 1.0),
+    ]
+    areas = torch.ones(5)
+    constraints = torch.zeros((5, 5), dtype=torch.long)
+    constraints[4, 4] = code
+    baseline = {"hpwl_baseline": 1.0, "area_baseline": official.calculate_bbox_area(positions)}
+    official_metrics = official.evaluate_solution(
+        {"positions": positions, "runtime": 1.0},
+        baseline,
+        constraints,
+        torch.empty((0, 3)),
+        torch.empty((0, 3)),
+        torch.empty((0, 2)),
+        areas,
+        median_runtime=1.0,
+    )
+
+    case = from_official(5, areas, [], [], [], constraints)
+    normalized = normalize_xywh(case, positions)
+    ours = soft_violation_normalized(case, normalized)
+
+    expected = int(code != 0)
+    assert ours.raw_boundary == official_metrics.boundary_violations == expected
+    assert ours.total == pytest.approx(official_metrics.violations_relative)
+
+
+def test_mib_compatible_and_incompatible_shapes_match_pinned_official_v10() -> None:
+    official = _official()
+    positions = [
+        (0.0, 0.0, 1.0, 2.0),
+        (2.0, 0.0, 1.00004, 2.0),
+        (4.0, 0.0, 3.0, 1.0),
+        (8.0, 0.0, 3.0, 1.0002),
+    ]
+    areas = torch.tensor([2.0, 2.00008, 3.0, 3.0006])
+    constraints = torch.tensor(
+        [
+            [0, 0, 1, 0, 0],
+            [0, 0, 1, 0, 0],
+            [0, 0, 2, 0, 0],
+            [0, 0, 2, 0, 0],
+        ]
+    )
+    baseline = {"hpwl_baseline": 1.0, "area_baseline": official.calculate_bbox_area(positions)}
+    official_metrics = official.evaluate_solution(
+        {"positions": positions, "runtime": 1.0},
+        baseline,
+        constraints,
+        torch.empty((0, 3)),
+        torch.empty((0, 3)),
+        torch.empty((0, 2)),
+        areas,
+        median_runtime=1.0,
+    )
+
+    case = from_official(4, areas, [], [], [], constraints)
+    normalized = normalize_xywh(case, positions)
+    ours = soft_violation_normalized(case, normalized)
+
+    assert ours.raw_mib == official_metrics.mib_violations == 1
+    assert ours.maximum == official_metrics.max_possible_violations == 2
+    assert ours.total == pytest.approx(official_metrics.violations_relative)
+
+
+def test_grouping_edge_connectivity_matches_pinned_official_v10() -> None:
+    official = _official()
+    positions = [
+        (0.0, 0.0, 1.0, 1.0),
+        (1.0, 0.0, 1.0, 1.0),
+        (2.0, 0.0, 1.0, 1.0),
+        (4.0, 0.0, 1.0, 1.0),
+        (5.0, 1.0, 1.0, 1.0),
+    ]
+    areas = torch.ones(5)
+    constraints = torch.tensor(
+        [
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 2, 0],
+            [0, 0, 0, 2, 0],
+        ]
+    )
+    baseline = {"hpwl_baseline": 1.0, "area_baseline": official.calculate_bbox_area(positions)}
+    official_metrics = official.evaluate_solution(
+        {"positions": positions, "runtime": 1.0},
+        baseline,
+        constraints,
+        torch.empty((0, 3)),
+        torch.empty((0, 3)),
+        torch.empty((0, 2)),
+        areas,
+        median_runtime=1.0,
+    )
+
+    case = from_official(5, areas, [], [], [], constraints)
+    normalized = normalize_xywh(case, positions)
+    ours = soft_violation_normalized(case, normalized)
+
+    assert ours.raw_grouping == official_metrics.grouping_violations == 1
+    assert ours.maximum == official_metrics.max_possible_violations == 3
+    assert ours.total == pytest.approx(official_metrics.violations_relative)
+
+
+def test_fixed_preplaced_exact_tolerance_matches_pinned_official_v10() -> None:
+    official = _official()
+    targets = [
+        (0.0, 0.0, 2.0, 2.0),
+        (3.0, 0.0, 2.0, 2.0),
+        (6.0, 0.0, 2.0, 2.0),
+        (9.0, 0.0, 2.0, 2.0),
+    ]
+    positions = [
+        (0.0, 0.0, 2.00009, 2.0),
+        (3.0, 0.0, 2.0002, 2.0),
+        (6.00009, 0.0, 2.0, 2.0),
+        (9.0002, 0.0, 2.0, 2.0),
+    ]
+    areas = torch.tensor([4.0, 4.0, 4.0, 4.0])
+    constraints = torch.tensor(
+        [
+            [1, 0, 0, 0, 0],
+            [1, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0],
+            [0, 1, 0, 0, 0],
+        ]
+    )
+
+    official_bad = official.check_dimension_hard_constraints(positions, targets, constraints, len(positions))
+    ours = verify(
+        {"area_targets": areas, "constraints": constraints, "target_positions": targets},
+        positions,
+    )
+
+    assert official_bad == 2
+    assert len(ours.fixed_bad) + len(ours.preplaced_bad) == official_bad
+    assert ours.fixed_bad == (1,)
+    assert ours.preplaced_bad == (3,)
+
+
 def test_cost_and_weighted_total_match_pinned_official_v10() -> None:
     official = _official()
     inputs = [

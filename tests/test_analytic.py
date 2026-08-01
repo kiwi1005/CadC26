@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from hcfp.analytic import AnalyticConfig, solve
+import torch
+
+from hcfp import analytic
+from hcfp.analytic import AnalyticConfig, solve, solve_case, solve_case_with_telemetry
 from hcfp.case import from_official
 from hcfp.dynamics import DynamicsConfig
 from hcfp.geometry import normalize_xywh
@@ -33,3 +36,48 @@ def test_analytic_solver_returns_verified_geometry_and_exact_hard_targets() -> N
     assert placements[0] == (-2.0, 3.0, 2.0, 2.0)
     assert placements[1][2:] == (3.0, 3.0)
     assert verify_feasible(normalized_case, normalize_xywh(normalized_case, placements))
+
+
+def test_solve_case_with_telemetry_reports_every_candidate_after_projection(monkeypatch) -> None:
+    normalized_case = from_official(
+        3,
+        [4.0, 4.0, 4.0],
+        [[0, 1, 2.0], [1, 2, 1.0]],
+        [],
+        [],
+        [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+        [[-1.0] * 4, [-1.0] * 4, [-1.0] * 4],
+    )
+    config = AnalyticConfig(DynamicsConfig(population=4, steps=3), projection_iterations=8, direction_beam=2)
+
+    telemetry_calls = 0
+    real_telemetry = analytic._telemetry
+
+    def track_telemetry(*args, **kwargs):
+        nonlocal telemetry_calls
+        telemetry_calls += 1
+        return real_telemetry(*args, **kwargs)
+
+    monkeypatch.setattr(analytic, "_telemetry", track_telemetry)
+    plain = solve_case(normalized_case, config)
+    assert isinstance(plain, torch.Tensor)
+    assert telemetry_calls == 0
+
+    result = solve_case_with_telemetry(normalized_case, config)
+    telemetry = result.telemetry
+
+    assert telemetry_calls == 1
+    assert result.raw_candidates.shape == (5, 3, 4)
+    assert result.projected_candidates.shape == (5, 3, 4)
+    assert result.energy_history.shape == (4, 3, 3)
+    assert telemetry.hard_feasible.shape == (5,)
+    assert telemetry.raw_overlap.shape == (5,)
+    assert telemetry.projected_overlap.shape == (5,)
+    assert telemetry.hpwl.shape == (5,)
+    assert telemetry.bbox_area.shape == (5,)
+    assert telemetry.soft_violation.shape == (5,)
+    assert telemetry.projection_displacement.shape == (5,)
+    assert bool(telemetry.hard_feasible[0])
+    assert torch.all(telemetry.projected_overlap <= telemetry.raw_overlap + 1.0e-5)
+    assert torch.all(telemetry.projection_displacement >= 0.0)
+    assert verify_feasible(normalized_case, result.selected)

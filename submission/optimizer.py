@@ -14,7 +14,8 @@ from hcfp.runtime import HCFPRuntime  # noqa: E402
 
 
 class HCFPOptimizer:
-    def __init__(self) -> None:
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
         self.runtime = HCFPRuntime()
 
     def solve(

@@ -32,6 +32,27 @@ class AnalyticConfig:
             raise ValueError("direction_beam must be positive")
 
 
+@dataclass(frozen=True)
+class CandidateTelemetry:
+    hard_feasible: Tensor
+    raw_overlap: Tensor
+    projected_overlap: Tensor
+    hpwl: Tensor
+    bbox_area: Tensor
+    soft_violation: Tensor
+    projection_displacement: Tensor
+
+
+@dataclass(frozen=True)
+class AnalyticResult:
+    selected: Tensor
+    raw_candidates: Tensor
+    projected_candidates: Tensor
+    telemetry: CandidateTelemetry
+    energy_history: Tensor
+    projection_status: str
+
+
 def select_device(requested: str | torch.device | None = None) -> torch.device:
     choice = str(requested or os.environ.get("HCFP_DEVICE", "auto"))
     if choice == "auto":
@@ -44,6 +65,27 @@ def select_device(requested: str | torch.device | None = None) -> torch.device:
 def solve_case(case: FloorplanCase, config: AnalyticConfig | None = None) -> Tensor:
     """Return the best verified normalized candidate, never worse than fallback."""
 
+    return _solve_candidates(case, config)[0]
+
+
+def solve_case_with_telemetry(case: FloorplanCase, config: AnalyticConfig | None = None) -> AnalyticResult:
+    """Return best candidate plus per-candidate telemetry after projection."""
+
+    best, cpu_case, candidates, projected, energy_history, projection_status = _solve_candidates(case, config)
+    return AnalyticResult(
+        selected=best,
+        raw_candidates=candidates.detach(),
+        projected_candidates=projected.detach(),
+        telemetry=_telemetry(cpu_case, candidates.detach(), projected.detach()),
+        energy_history=energy_history.detach(),
+        projection_status=projection_status,
+    )
+
+
+def _solve_candidates(
+    case: FloorplanCase,
+    config: AnalyticConfig | None,
+) -> tuple[Tensor, FloorplanCase, Tensor, Tensor, Tensor, str]:
     cfg = config or AnalyticConfig()
     cpu_case = case.to(device="cpu", dtype=torch.float32)
     fallback = safe_shelf(cpu_case).to(dtype=torch.float32)
@@ -52,12 +94,13 @@ def solve_case(case: FloorplanCase, config: AnalyticConfig | None = None) -> Ten
 
     result = relax(case, cfg.dynamics, initial_xywh=fallback.to(case.area.device))
     candidates = torch.cat((fallback.to(case.area.device).unsqueeze(0), result.boxes), dim=0)
-    projected = project_disjunctive(
+    projection = project_disjunctive(
         candidates,
         problem=case,
         iterations=cfg.projection_iterations,
         beam=cfg.direction_beam,
-    ).xywh
+    )
+    projected = projection.xywh
 
     for candidate in projected.detach().to(device="cpu", dtype=torch.float32):
         if not verify_feasible(cpu_case, candidate):
@@ -66,7 +109,7 @@ def solve_case(case: FloorplanCase, config: AnalyticConfig | None = None) -> Ten
         if key < best_key:
             best = candidate
             best_key = key
-    return best
+    return best, cpu_case, candidates, projected, result.state.energy_history, projection.status
 
 
 def solve(
@@ -98,6 +141,31 @@ def _candidate_key(case: FloorplanCase, boxes: Tensor) -> tuple[float, float]:
     soft = soft_violation_normalized(case, boxes).total
     quality = float(bbox_area_tensor(boxes)) + 0.05 * float(hpwl_tensor(case, centers_from_xywh(boxes)))
     return soft, quality
+
+
+def _overlap_sum(boxes: Tensor) -> Tensor:
+    from hcfp.geometry import overlap_area_matrix
+
+    overlap = overlap_area_matrix(boxes)
+    return torch.triu(overlap, diagonal=1).sum(dim=(-2, -1))
+
+
+def _telemetry(case: FloorplanCase, raw: Tensor, projected: Tensor) -> CandidateTelemetry:
+    cpu_projected = projected.detach().to(device="cpu", dtype=torch.float32)
+    hard = torch.tensor([verify_feasible(case, candidate) for candidate in cpu_projected], dtype=torch.bool)
+    soft = torch.tensor([soft_violation_normalized(case, candidate).total for candidate in cpu_projected], dtype=torch.float32)
+    projected_cpu_case = case.to(device=projected.device, dtype=torch.float32)
+    centers = centers_from_xywh(projected)
+    displacement = torch.linalg.vector_norm(projected[..., :2] - raw[..., :2], dim=-1).sum(dim=1)
+    return CandidateTelemetry(
+        hard_feasible=hard.to(device=projected.device),
+        raw_overlap=_overlap_sum(raw),
+        projected_overlap=_overlap_sum(projected),
+        hpwl=hpwl_tensor(projected_cpu_case, centers),
+        bbox_area=bbox_area_tensor(projected),
+        soft_violation=soft.to(device=projected.device),
+        projection_displacement=displacement,
+    )
 
 
 def _copy_raw_hard_targets(case: Any, normalized: FloorplanCase, raw: Tensor) -> None:

@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+import torch
 
 from hcfp.runtime import HCFPRuntime, SolveCase
 from submission.optimizer import HCFPOptimizer, solve
@@ -30,6 +31,43 @@ def _case_payload():
             [-1.0, -1.0, -1.0, -1.0],
         ],
     }
+
+
+def _representative_case_payload():
+    return {
+        "block_count": 6,
+        "area_targets": [4.0, 9.0, 6.0, 4.0, 8.0, 5.0],
+        "b2b_connectivity": [
+            [0, 1, 4.0],
+            [1, 2, 2.0],
+            [2, 3, 3.0],
+            [3, 4, 1.0],
+            [4, 5, 2.0],
+            [0, 5, 1.5],
+        ],
+        "p2b_connectivity": [[0, 0, 1.0], [1, 4, 2.0]],
+        "pins_pos": [[0.0, 0.0], [3.0, 2.0]],
+        "constraints": [
+            [0, 1, 0, 0, 1],
+            [1, 0, 0, 0, 0],
+            [0, 0, 1, 1, 0],
+            [0, 0, 1, 1, 0],
+            [0, 0, 0, 0, 2],
+            [0, 0, 0, 0, 0],
+        ],
+        "target_positions": [
+            [0.0, 0.0, 2.0, 2.0],
+            [-1.0, -1.0, 3.0, 3.0],
+            [-1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0],
+        ],
+    }
+
+
+def _max_abs_delta(left, right):
+    return max(abs(a - b) for rect_a, rect_b in zip(left, right) for a, b in zip(rect_a, rect_b))
 
 
 def test_official_solve_contract_preserves_hard_targets_and_float_tuples():
@@ -142,3 +180,30 @@ def test_optimizer_imports_when_cwd_is_submission_dir():
     )
 
     assert completed.stdout.strip() == "True"
+
+
+def test_official_optimizer_accepts_evaluator_verbose_flag() -> None:
+    assert HCFPOptimizer(verbose=True).verbose is True
+
+
+def test_official_optimizer_is_repeatable_on_cpu(monkeypatch):
+    payload = _representative_case_payload()
+    monkeypatch.setenv("HCFP_DEVICE", "cpu")
+    optimizer = HCFPOptimizer()
+
+    cpu_runs = [optimizer.solve(**payload) for _ in range(10)]
+
+    assert all(run == cpu_runs[0] for run in cpu_runs[1:])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_official_optimizer_is_repeatable_on_cuda(monkeypatch):
+    payload = _representative_case_payload()
+    monkeypatch.setenv("HCFP_DEVICE", "cpu")
+    cpu_result = HCFPOptimizer().solve(**payload)
+    monkeypatch.setenv("HCFP_DEVICE", "cuda")
+    cuda_optimizer = HCFPOptimizer()
+    cuda_runs = [cuda_optimizer.solve(**payload) for _ in range(3)]
+
+    assert all(_max_abs_delta(run, cuda_runs[0]) <= 1.0e-5 for run in cuda_runs[1:])
+    assert _max_abs_delta(cpu_result, cuda_runs[0]) <= 1.0e-4
