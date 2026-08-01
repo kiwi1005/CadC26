@@ -41,16 +41,11 @@ class FloorplanCase:
     boundary_bits: torch.Tensor
     scale: float
     origin: torch.Tensor
+    raw_preplaced_validated: bool = False
 
     @property
     def normalized(self) -> bool:
         """Coordinates and areas use ``origin``/``scale`` normalization."""
-
-        return True
-
-    @property
-    def raw_preplaced_validated(self) -> bool:
-        """Preplaced targets passed the official raw-coordinate overlap check."""
 
         return True
 
@@ -174,6 +169,7 @@ def from_official(
         boundary_bits=boundary_bits,
         scale=scale,
         origin=origin.to(dtype=torch.float32),
+        raw_preplaced_validated=True,
     )
     return case.to(device=device) if device is not None else case
 

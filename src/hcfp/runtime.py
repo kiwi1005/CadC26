@@ -60,7 +60,11 @@ class HCFPRuntime:
             constraints=constraints,
             target_positions=target_positions,
         )
-        _validate_case_contract(case)
+        try:
+            _validate_case_contract(case)
+        except ValueError as exc:
+            if str(exc) != "preplaced target rectangles overlap":
+                raise
         fallback = self._safe_fallback(case)
         if self._solver is None:
             return fallback

@@ -241,9 +241,14 @@ def project_disjunctive(
     active_count = (directions >= 0).sum(dim=1)
     best_xywh = work
     best_dirs = directions
-    best_max = overlap_matrix(work).amax(dim=(1, 2))
+    initial_overlap = overlap_matrix(work)
+    if ignore_preplaced_pairs:
+        exempt = mask[:, None] & mask[None, :]
+        initial_overlap = torch.where(exempt.unsqueeze(0), torch.zeros_like(initial_overlap), initial_overlap)
+    best_max = initial_overlap.amax(dim=(1, 2))
     best_ok = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
-    best_fixed_pair_overlap = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
+    fixed_pair = mask[pairs[:, 0]] & mask[pairs[:, 1]]
+    best_fixed_pair_overlap = ((directions >= 0) & fixed_pair.unsqueeze(0)).any(dim=1)
     best_active_count = active_count
     for variant in range(max(1, min(beam, 4))):
         candidate = work
@@ -274,7 +279,13 @@ def project_disjunctive(
             fixed_pair_overlap,
             ignore_preplaced_pairs,
         )
-        better = (max_overlap < best_max) | (ok & ~best_ok) | (fixed_pair_overlap & ~best_fixed_pair_overlap)
+        same_feasibility = ok == best_ok
+        same_fixed_status = fixed_pair_overlap == best_fixed_pair_overlap
+        better = (
+            (ok & ~best_ok)
+            | (same_feasibility & ~fixed_pair_overlap & best_fixed_pair_overlap)
+            | (same_feasibility & same_fixed_status & (max_overlap < best_max))
+        )
         best_xywh = torch.where(better.view(-1, 1, 1), candidate, best_xywh)
         best_dirs = torch.where(better.view(-1, 1), variant_dirs, best_dirs)
         best_max = torch.where(better, max_overlap, best_max)

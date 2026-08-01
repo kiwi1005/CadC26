@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import sys
 
@@ -113,3 +113,19 @@ def test_official_adapter_rejects_raw_overlapping_preplaced_targets() -> None:
 
     with pytest.raises(ValueError, match="preplaced target rectangles overlap"):
         from_official(2, [4.0, 4.0], [], [], [], constraints, targets)
+
+
+def test_unvalidated_floorplan_case_cannot_hide_preplaced_overlap() -> None:
+    case = from_official(2, [4.0, 4.0], [], [], [], torch.zeros((2, 5), dtype=torch.long))
+    constraints = torch.tensor([[0, 1, 0, 0, 0], [0, 1, 0, 0, 0]])
+    target = torch.tensor([[0.0, 0.0, 0.5, 0.5], [0.25, 0.25, 0.5, 0.5]])
+    unsafe = replace(
+        case,
+        constraints=constraints,
+        target=target,
+        preplaced_mask=torch.ones(2, dtype=torch.bool),
+        target_valid_mask=torch.ones(2, dtype=torch.bool),
+        raw_preplaced_validated=False,
+    )
+
+    assert not verify(unsafe, target).feasible

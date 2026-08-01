@@ -254,7 +254,11 @@ def case_to_payload(case: FloorplanCase) -> dict[str, Any]:
 
 
 def case_from_payload(payload: dict[str, Any]) -> FloorplanCase:
-    values: dict[str, Any] = {"n": int(payload["n"]), "scale": float(payload["scale"])}
+    values: dict[str, Any] = {
+        "n": int(payload["n"]),
+        "scale": float(payload["scale"]),
+        "raw_preplaced_validated": bool(payload.get("raw_preplaced_validated", False)),
+    }
     bools = {"block_mask", "fixed_mask", "preplaced_mask", "target_valid_mask", "group_membership", "mib_membership", "boundary_bits"}
     longs = {"constraints", "cluster_id", "mib_id", "cluster_group_ids", "mib_group_ids"}
     for field in fields(FloorplanCase):
