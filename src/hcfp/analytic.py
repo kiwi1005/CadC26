@@ -84,10 +84,27 @@ def solve_case_from_population(
     return _solve_candidates(case, config, initial_population=initial_xywh)[0]
 
 
+def solve_case_from_population_with_telemetry(
+    case: FloorplanCase,
+    initial_xywh: Tensor,
+    config: AnalyticConfig | None = None,
+) -> AnalyticResult:
+    """Run the verified tail from explicit candidates and retain exact telemetry."""
+
+    result = _solve_candidates(case, config, initial_population=initial_xywh)
+    return _analytic_result(result)
+
+
 def solve_case_with_telemetry(case: FloorplanCase, config: AnalyticConfig | None = None) -> AnalyticResult:
     """Return best candidate plus per-candidate telemetry after projection."""
 
-    best, cpu_case, candidates, projection, energy_history, incumbent = _solve_candidates(case, config)
+    return _analytic_result(_solve_candidates(case, config))
+
+
+def _analytic_result(
+    result: tuple[Tensor, FloorplanCase, Tensor, ProjectionResult, Tensor, dict[str, object]],
+) -> AnalyticResult:
+    best, cpu_case, candidates, projection, energy_history, incumbent = result
     return AnalyticResult(
         selected=best,
         raw_candidates=candidates.detach(),

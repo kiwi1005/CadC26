@@ -34,6 +34,32 @@ class LossReport:
         }
 
 
+class ExponentialMovingAverage:
+    """Small in-device EMA used only while training."""
+
+    def __init__(self, model: HCFPModel, decay: float = 0.999) -> None:
+        if not 0.0 < decay < 1.0:
+            raise ValueError("EMA decay must be in (0, 1)")
+        self.decay = float(decay)
+        self.shadow = {
+            name: value.detach().clone()
+            for name, value in model.state_dict().items()
+            if torch.is_floating_point(value)
+        }
+
+    @torch.no_grad()
+    def update(self, model: HCFPModel) -> None:
+        for name, value in model.state_dict().items():
+            if name in self.shadow:
+                self.shadow[name].lerp_(value.detach(), 1.0 - self.decay)
+
+    @torch.no_grad()
+    def copy_to(self, model: HCFPModel) -> None:
+        state = model.state_dict()
+        for name, value in self.shadow.items():
+            state[name].copy_(value)
+
+
 def supervised_loss(
     model: HCFPModel,
     sample: DataSample,
@@ -54,7 +80,32 @@ def supervised_loss(
         DynamicsConfig(population=population, steps=0),
         safe_shelf(case).to(device=device),
     )
-    output = model(case, population=population)
+    target_center = labels.centers.unsqueeze(0) - base.center
+    target_aspect = labels.log_aspect.unsqueeze(0) - base.log_aspect
+    target_center = target_center.clamp(-model.config.residual_bound, model.config.residual_bound)
+    target_aspect = target_aspect.clamp(-model.config.aspect_residual_bound, model.config.aspect_residual_bound)
+    target_center[:, case.preplaced_mask] = 0.0
+    target_aspect[:, case.fixed_mask | case.preplaced_mask] = 0.0
+
+    flow_state = None
+    flow_time: float | Tensor = 0.0
+    flow_target = None
+    if stage in {"flow", "all"}:
+        qstar = torch.cat((target_center, target_aspect.unsqueeze(-1)), dim=-1)
+        generator = torch.Generator(device="cpu").manual_seed(int(seed))
+        noise = torch.randn(qstar.shape, generator=generator, dtype=torch.float32).to(device=device)
+        noise[:, case.preplaced_mask, :2] = 0.0
+        noise[:, case.fixed_mask | case.preplaced_mask, 2] = 0.0
+        flow_time = torch.rand(population, generator=generator, dtype=torch.float32).to(device=device)
+        flow_state = (1.0 - flow_time[:, None, None]) * noise + flow_time[:, None, None] * qstar
+        flow_target = qstar - noise
+
+    output = model(
+        case,
+        population=population,
+        flow_state=flow_state,
+        flow_time=flow_time,
+    )
     zero = output.embedding.sum() * 0.0
 
     structure = zero
@@ -66,29 +117,14 @@ def supervised_loss(
         outline = F.smooth_l1_loss(output.outline, labels.outline)
         structure = precedence + outline
 
-    target_center = labels.centers.unsqueeze(0) - base.center
-    target_aspect = labels.log_aspect.unsqueeze(0) - base.log_aspect
-    target_center = target_center.clamp(-model.config.residual_bound, model.config.residual_bound)
-    target_aspect = target_aspect.clamp(-model.config.aspect_residual_bound, model.config.aspect_residual_bound)
-    target_center[:, case.preplaced_mask] = 0.0
-    target_aspect[:, case.fixed_mask | case.preplaced_mask] = 0.0
-
     initializer = zero
     if stage in {"initializer", "all"}:
         initializer = F.smooth_l1_loss(output.center_residual, target_center)
         initializer += F.smooth_l1_loss(output.log_aspect_residual, target_aspect)
 
     flow = zero
-    if stage in {"flow", "all"}:
-        qstar = torch.cat((target_center, target_aspect.unsqueeze(-1)), dim=-1)
-        generator = torch.Generator(device="cpu").manual_seed(int(seed))
-        noise = torch.randn(qstar.shape, generator=generator, dtype=torch.float32).to(device=device)
-        noise[:, case.preplaced_mask, :2] = 0.0
-        noise[:, case.fixed_mask | case.preplaced_mask, 2] = 0.0
-        time = torch.rand(population, generator=generator, dtype=torch.float32).to(device=device)
-        qt = (1.0 - time[:, None, None]) * noise + time[:, None, None] * qstar
-        prediction = model(case, population=population, flow_state=qt, flow_time=time).flow_velocity
-        flow = F.mse_loss(prediction, qstar - noise)
+    if flow_target is not None:
+        flow = F.mse_loss(output.flow_velocity, flow_target)
 
     return LossReport(structure + initializer + flow, structure, initializer, flow)
 
@@ -102,6 +138,8 @@ def train_steps(
     population: int,
     stage: str = "all",
     seed: int = 0,
+    ema: ExponentialMovingAverage | None = None,
+    on_step: Callable[[int, LossReport], None] | None = None,
 ) -> list[dict[str, float]]:
     """Train for a bounded number of deterministic sample-cycling steps."""
 
@@ -139,6 +177,10 @@ def train_steps(
         report.total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
         optimizer.step()
+        if ema is not None:
+            ema.update(model)
+        if on_step is not None:
+            on_step(index + 1, report)
         history.append(report.scalars())
     return history
 

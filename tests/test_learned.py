@@ -8,7 +8,7 @@ from hcfp.analytic import AnalyticConfig
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
-from hcfp.learned import solve_case_with_checkpoint
+from hcfp.learned import LearnedConfig, solve_case_with_checkpoint
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.verify import verify_feasible
 
@@ -47,6 +47,20 @@ def test_checkpoint_lane_runs_through_exact_safe_tail(tmp_path: Path) -> None:
     assert result.used_checkpoint is True
     assert result.checkpoint_hash == saved_hash
     assert result.failure_reason is None
+    assert verify_feasible(_case(), result.selected)
+    assert result.flow_steps == 6
+    assert result.candidate_count == 2
+
+
+def test_multistep_flow_population_preserves_exact_safe_output(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    config = LearnedConfig(analytic=_config(), flow_steps=3, flow_fraction=1.0)
+
+    result = solve_case_with_checkpoint(_case(), checkpoint, config)
+
+    assert result.used_checkpoint is True
+    assert result.flow_steps == 3
     assert verify_feasible(_case(), result.selected)
 
 

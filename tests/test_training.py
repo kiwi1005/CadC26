@@ -10,7 +10,7 @@ import torch
 from hcfp.data import DataSample, extract_labels, write_shard
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
-from hcfp.training import supervised_loss, train_steps
+from hcfp.training import ExponentialMovingAverage, supervised_loss, train_steps
 
 
 def _sample() -> DataSample:
@@ -49,6 +49,25 @@ def test_train_steps_restarts_stream_factory_without_materializing() -> None:
 
     assert len(history) == 3
     assert calls == 3
+
+
+def test_all_stage_uses_one_model_forward_and_updates_ema() -> None:
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
+    ema = ExponentialMovingAverage(model, decay=0.9)
+    calls = 0
+    original = model.forward
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    model.forward = counted  # type: ignore[method-assign]
+    train_steps(model, [_sample()], optimizer, steps=1, population=2, ema=ema)
+
+    assert calls == 1
+    assert ema.shadow
 
 
 def test_training_cli_emits_checkpoint_and_audit_report(tmp_path: Path) -> None:
