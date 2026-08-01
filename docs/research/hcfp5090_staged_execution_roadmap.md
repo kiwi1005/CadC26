@@ -41,7 +41,7 @@
 | Rectified flow／controller／ranker | `[~]` | trainable heads 與 flow loss 已完成；controller/ranker 等待 exact replay labels。 |
 | Learned runtime | `[~]` | checkpoint opt-in、hash/schema/normalization fail-closed 與 analytic exact tail 已完成；預設關閉。 |
 | Benchmark／visualization | `[x]` | 官方 weighted/bucket report、promotion decision 與 deterministic SVG/HTML 已完成。 |
-| Runtime profile | `[~]` | 固定 bucket profiler 已完成；正式 N120/K32 CUDA gate 尚待本次 evidence。 |
+| Runtime profile | `[~]` | N120/K32 CUDA profile 已通過穩定性／記憶體 gate；cold-start 與 A100 profile 尚待補。 |
 | Submission freeze／package proof | `[ ]` | 尚未做正式資料 replay、portable smoke、hash 與 dry run。 |
 
 因此目前正確定位是：**P0 correctness gate 已通過，P1 有 analytic／BDP v0
@@ -152,6 +152,10 @@ incumbent source；telemetry 不放進 submission fast path 計時。
   都使用 post-BDP exact metrics，不用 raw differentiable proxy 代替。
 - `[~] P1.8` 在 CPU 與 CUDA 執行 `N=120, K=32` 穩定性測試，收集 cold/warm
   p50、p95、p99、peak memory、projection success 與 tail failure。
+
+P1.8 的 RTX 5090 warm profile 為 p50 `0.957574s`、p95 `0.962069s`、peak
+`76,457,984` bytes，65 個候選有 10 個 exact-feasible；cold-start 與 A100
+仍未量測，因此保持 `[~]`。
 
 ### 退出條件
 
