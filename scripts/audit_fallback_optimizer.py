@@ -10,10 +10,10 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from hcfp.fallback import safe_fallback  # noqa: E402
 from hcfp.runtime import HCFPRuntime  # noqa: E402
-from submission.optimizer import HCFPOptimizer  # noqa: E402
+from submission import optimizer as _submission  # noqa: E402
 
 
-class Optimizer(HCFPOptimizer):
+class Optimizer(_submission.HCFPOptimizer):
     def __init__(self, verbose: bool = False) -> None:
         super().__init__(verbose)
         self.runtime = HCFPRuntime(solver=safe_fallback)

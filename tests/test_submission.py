@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import math
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -184,6 +186,21 @@ def test_optimizer_imports_when_cwd_is_submission_dir():
 
 def test_official_optimizer_accepts_evaluator_verbose_flag() -> None:
     assert HCFPOptimizer(verbose=True).verbose is True
+
+
+def test_fallback_audit_exposes_only_its_specialized_optimizer_class() -> None:
+    path = Path("scripts/audit_fallback_optimizer.py")
+    spec = importlib.util.spec_from_file_location("fallback_audit_test", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    exposed = {
+        value.__name__
+        for value in vars(module).values()
+        if isinstance(value, type) and issubclass(value, HCFPOptimizer)
+    }
+    assert exposed == {"Optimizer"}
 
 
 def test_official_optimizer_is_repeatable_on_cpu(monkeypatch):
