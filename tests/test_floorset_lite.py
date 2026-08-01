@@ -9,6 +9,7 @@ from hcfp.floorset_lite import (
     fp_sol_to_xywh,
     iter_floorset_lite,
     sample_from_lite_tensors,
+    score_aware_acceptance,
     target_positions_from_solution,
 )
 
@@ -59,3 +60,9 @@ def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: 
 def test_visible_validation_path_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="forbidden"):
         list(iter_floorset_lite(tmp_path / "LiteTensorDataTest"))
+
+
+def test_score_aware_sampling_prioritizes_large_cases() -> None:
+    assert 0.30 < score_aware_acceptance(32) < score_aware_acceptance(80)
+    assert score_aware_acceptance(80) < score_aware_acceptance(120)
+    assert score_aware_acceptance(120) == pytest.approx(1.0)

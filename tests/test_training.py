@@ -7,7 +7,7 @@ import sys
 
 import torch
 
-from hcfp.data import DataSample, extract_labels, write_shard
+from hcfp.data import DataSample, extract_labels, pairwise_precedence, write_shard
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
 from hcfp.training import ExponentialMovingAverage, supervised_loss, train_steps
@@ -68,6 +68,54 @@ def test_all_stage_uses_one_model_forward_and_updates_ema() -> None:
 
     assert calls == 1
     assert ema.shadow
+
+
+def test_vectorized_precedence_preserves_unique_relation_semantics() -> None:
+    boxes = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 1.0],
+            [2.0, 0.0, 1.0, 1.0],
+            [0.0, 2.0, 1.0, 1.0],
+            [2.0, 2.0, 1.0, 1.0],
+        ]
+    )
+
+    relation, tie = pairwise_precedence(boxes)
+
+    assert relation[0, 1].item() == 0
+    assert relation[1, 0].item() == 1
+    assert relation[2, 0].item() == 2
+    assert relation[0, 2].item() == 3
+    assert relation[0, 3].item() == 4
+    assert tie[0, 3]
+    assert torch.all(torch.diag(tie))
+
+
+def test_vectorized_precedence_matches_scalar_reference() -> None:
+    boxes = torch.rand(20, 4)
+    boxes[:, 2:4] += 0.05
+    relation, tie = pairwise_precedence(boxes)
+    expected = torch.full((20, 20), 4, dtype=torch.long)
+    expected_tie = torch.eye(20, dtype=torch.bool)
+    for i in range(20):
+        for j in range(20):
+            if i == j:
+                continue
+            gaps = (
+                boxes[j, 0] - boxes[i, 0] - boxes[i, 2],
+                boxes[i, 0] - boxes[j, 0] - boxes[j, 2],
+                boxes[i, 1] - boxes[j, 1] - boxes[j, 3],
+                boxes[j, 1] - boxes[i, 1] - boxes[i, 3],
+            )
+            valid = [index for index, gap in enumerate(gaps) if float(gap) >= -1.0e-7]
+            if len(valid) == 1:
+                expected[i, j] = valid[0]
+                expected_tie[i, j] = False
+            elif len(valid) > 1:
+                expected_tie[i, j] = True
+
+    assert torch.equal(relation, expected)
+    assert torch.equal(tie, expected_tie)
 
 
 def test_training_cli_emits_checkpoint_and_audit_report(tmp_path: Path) -> None:

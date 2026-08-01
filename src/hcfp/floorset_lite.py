@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
+import random
 from typing import Iterator
 
 import torch
@@ -79,7 +81,20 @@ def sample_from_lite_tensors(
     return DataSample(sample_id, case, extract_labels(case, rectangles))
 
 
-def iter_floorset_lite(root: str | Path, *, limit: int | None = None) -> Iterator[DataSample]:
+def score_aware_acceptance(block_count: int) -> float:
+    """Capped rejection probability for the contest's high-value large cases."""
+
+    score_weight = min(math.exp((int(block_count) - 80) / 12.0), 8.0)
+    return 0.30 + 0.70 * score_weight / 8.0
+
+
+def iter_floorset_lite(
+    root: str | Path,
+    *,
+    limit: int | None = None,
+    seed: int | None = None,
+    score_aware: bool = False,
+) -> Iterator[DataSample]:
     """Yield training samples one source file at a time without copying 1M cases."""
 
     root = Path(root).resolve()
@@ -89,11 +104,19 @@ def iter_floorset_lite(root: str | Path, *, limit: int | None = None) -> Iterato
     files = sorted(layout_root.glob("worker_*/layouts*"))
     if not files:
         raise FileNotFoundError(f"no FloorSet-Lite training layouts under {layout_root}")
+    generator = random.Random(seed)
+    if seed is not None:
+        generator.shuffle(files)
     yielded = 0
     for path in files:
         payload = torch.load(path, map_location="cpu", weights_only=True)
-        layout_count = len(payload[0])
-        for layout_index in range(layout_count):
+        layout_indices = list(range(len(payload[0])))
+        if seed is not None:
+            generator.shuffle(layout_indices)
+        for layout_index in layout_indices:
+            block_count = int((payload[0][layout_index][:, 0] != -1).sum().item())
+            if score_aware and generator.random() > score_aware_acceptance(block_count):
+                continue
             yield sample_from_lite_tensors(
                 f"{path.parent.name}/{path.name}:{layout_index}",
                 payload[0][layout_index],

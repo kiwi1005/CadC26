@@ -78,34 +78,28 @@ def extract_labels(case: FloorplanCase, solution_xywh: Any, *, normalized: bool 
 def pairwise_precedence(rects: torch.Tensor, tol: float = 1.0e-7) -> tuple[torch.Tensor, torch.Tensor]:
     boxes = torch.as_tensor(rects, dtype=torch.float32)
     n = boxes.shape[0]
-    relation = torch.full((n, n), REL_AMBIGUOUS, dtype=torch.long)
-    tie = torch.eye(n, dtype=torch.bool)
     left, bottom = boxes[:, 0], boxes[:, 1]
     right, top = left + boxes[:, 2], bottom + boxes[:, 3]
-    for i in range(n):
-        for j in range(n):
-            if i == j:
-                continue
-            gap_left = left[j] - right[i]
-            gap_right = left[i] - right[j]
-            gap_above = bottom[i] - top[j]
-            gap_below = bottom[j] - top[i]
-            candidates = [
-                (float(gap_left), REL_LEFT),
-                (float(gap_right), REL_RIGHT),
-                (float(gap_above), REL_ABOVE),
-                (float(gap_below), REL_BELOW),
-            ]
-            valid = [(gap, rel) for gap, rel in candidates if gap >= -tol]
-            if not valid:
-                continue
-            valid.sort(reverse=True, key=lambda item: item[0])
-            if len(valid) > 1:
-                relation[i, j] = REL_AMBIGUOUS
-                tie[i, j] = True
-                continue
-            relation[i, j] = valid[0][1]
-            tie[i, j] = False
+    gaps = torch.stack(
+        (
+            left[None, :] - right[:, None],
+            left[:, None] - right[None, :],
+            bottom[:, None] - top[None, :],
+            bottom[None, :] - top[:, None],
+        ),
+        dim=-1,
+    )
+    valid = gaps >= -tol
+    valid_count = valid.sum(dim=-1)
+    unique = valid_count == 1
+    relation = torch.where(
+        unique,
+        valid.to(torch.long).argmax(dim=-1),
+        torch.full((n, n), REL_AMBIGUOUS, dtype=torch.long, device=boxes.device),
+    )
+    diagonal = torch.eye(n, dtype=torch.bool, device=boxes.device)
+    relation[diagonal] = REL_AMBIGUOUS
+    tie = (valid_count > 1) | diagonal
     return relation, tie
 
 

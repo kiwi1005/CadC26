@@ -28,6 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("shards", nargs="*", help="input .tar shards")
     parser.add_argument("--floorset-lite-root", help="direct official training root; avoids copied shards")
     parser.add_argument("--sample-limit", type=int, help="bounded direct-stream subset for smoke/ablation")
+    parser.add_argument("--sampling", choices=("uniform", "score-aware"), default="score-aware")
     parser.add_argument("-o", "--output", required=True, help="output checkpoint")
     parser.add_argument("--stage", choices=TRAINING_STAGES, default="all")
     parser.add_argument("--steps", type=int, default=100)
@@ -61,7 +62,12 @@ def main(argv: list[str] | None = None) -> int:
 
     def training_samples():
         if args.floorset_lite_root:
-            yield from iter_floorset_lite(args.floorset_lite_root, limit=args.sample_limit)
+            yield from iter_floorset_lite(
+                args.floorset_lite_root,
+                limit=args.sample_limit,
+                seed=args.seed,
+                score_aware=args.sampling == "score-aware",
+            )
             return
         for path in args.shards:
             for sample in iter_shard(path):
@@ -121,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         "ema_decay": args.ema_decay if ema is not None else None,
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,
+        "sampling": args.sampling,
         "shards": [{"path": str(path), "sha256": file_sha256(path)} for path in args.shards],
         "floorset_lite_root": args.floorset_lite_root,
         "first_loss": history[0],
