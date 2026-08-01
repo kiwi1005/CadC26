@@ -33,17 +33,18 @@
 | Official seven-input adapter | `[x]` | 已有 case validation、padding/mask 處理與 submission surface。 |
 | Exact-compatible hard verifier | `[x]` | 已對 pinned FloorSet v10 evaluator 建立 parity tests。 |
 | Safe fallback／incumbent guard | `[x]` | exception、non-finite 或不合法候選不會覆蓋安全解。 |
-| FP32 typed analytic dynamics | `[~]` | 已有 deterministic 第一版；尚缺完整 bucket QoR 與 runtime 證據。 |
+| FP32 typed analytic dynamics | `[~]` | 已有 deterministic 第一版與 100-case runtime；exact QoR 仍全部落在 cost cap。 |
 | BDP v0 | `[~]` | 已有 deterministic projection；尚非完整 active-pair outer-loop／方向搜尋版本。 |
-| Official 100-case replay | `[blocked]` | 目前尚未取得並完成官方 validation 全量重播。 |
+| Official 100-case replay | `[x]` | 完整 runtime 與 fallback-only 均為 100/100 hard-feasible；見 [`hcfp5090_p0_correctness_2026-08-01.md`](hcfp5090_p0_correctness_2026-08-01.md)。 |
 | 1M data shards／labels | `[ ]` | 尚未建立資料清單、切分、label extractor 與 shard manifest。 |
 | SCENE／POP-INIT | `[ ]` | 尚未訓練。 |
 | HiCoDy learned residual dynamics | `[ ]` | 尚未訓練；必須先完成 one-step recovery gate。 |
 | CAL／ETR／PVR | `[ ]` | 尚未建立 contact/event/projection-value labels。 |
 | Submission freeze／package proof | `[ ]` | 尚未做正式資料 replay、portable smoke、hash 與 dry run。 |
 
-因此目前正確定位是：**P0 主體已落地，P1 有 analytic／BDP v0 雛形；P0
-的正式資料證據與 P1 的效益、穩定性、長尾 gate 仍未關閉。**
+因此目前正確定位是：**P0 correctness gate 已通過，P1 有 analytic／BDP v0
+與 opt-in telemetry；P1 因 100 個正式 validation case 全部 `cost >= 9.99`
+而維持 HOLD，必須先改善 exact QoR。**
 
 ## 3. 階段依賴與停止點
 
@@ -73,7 +74,7 @@ P0 合約與安全基線
 
 | 階段 | 建議時窗 | 主要結果 | 退出 gate | 目前狀態 |
 | --- | --- | --- | --- | --- |
-| P0 | D1–D2 | 官方合約、parity、fallback、determinism | correctness gate 100% | 進行中 |
+| P0 | D1–D2 | 官方合約、parity、fallback、determinism | correctness gate 100% | 通過 |
 | P1 | D3–D5 | Analytic population、typed dynamics、BDP、telemetry | post-BDP 改善且 N120/K32 穩定 | 進行中 |
 | P2 | D6–D8 | 訓練 split、labels、shards、corruptions | audit／round-trip／leakage 全通過 | 未開始 |
 | P3 | D9–D11 | SCENE、POP-INIT、oracle@K | post-BDP oracle@K 優於 analytic seeds | 未開始 |
@@ -104,13 +105,16 @@ P0 合約與安全基線
 - `[x] P0.3` 建立 deterministic shelf fallback 與 incumbent-preserving guard。
 - `[x] P0.4` 提供 Python submission API 與 JSON stdin/stdout executable。
 - `[x] P0.5` pin 官方 evaluator commit 與檔案 SHA256。
-- `[ ] P0.6` 對可取得的官方 validation cases 執行 fallback-only 全量重播。
-- `[ ] P0.7` 補齊 boundary 16 種 bitmask、MIB 可相容／不可相容、cluster、
+- `[x] P0.6` 對可取得的官方 validation cases 執行 fallback-only 全量重播。
+- `[x] P0.7` 補齊 boundary 16 種 bitmask、MIB 可相容／不可相容、cluster、
   fixed/preplaced obstacle 的 edge-case fixtures。
-- `[ ] P0.8` 同一輸入重跑至少 10 次，確認 CPU 與 CUDA 各自 bitwise 或
+- `[x] P0.8` 同一輸入重跑至少 10 次，確認 CPU 與 CUDA 各自 bitwise 或
   tolerance-bounded deterministic；記錄允許的差異來源。
-- `[ ] P0.9` 產生單一 P0 correctness report，包含 case 數、hard feasibility、
+- `[~] P0.9` 產生單一 P0 correctness report，包含 case 數、hard feasibility、
   parity mismatch、fallback 使用率、例外與 non-finite 計數。
+
+P0.9 的 correctness report 已完成；官方輸出不含 full-runtime 的 fallback
+selection rate，因此該觀測欄位保留為 P1 incumbent manager 的必要輸出。
 
 ### 退出條件
 
@@ -131,8 +135,11 @@ displacement，再把它作為所有模型的可靠 teacher、baseline 與 fallb
   population seeds；至少包含 safe、compact、pin-aware 與方向多樣性。
 - `[~] P1.2` 完成 net、pin、overlap、precedence、group、boundary、compaction、
   anchor 與 MIB shape 的 FP32 typed channels。
-- `[ ] P1.3` 增加 candidate telemetry：每步 energy、overlap component、HPWL、
+- `[~] P1.3` 增加 candidate telemetry：每步 energy、overlap component、HPWL、
   bbox、soft violation、projection displacement、是否 exact-feasible。
+
+P1.3 已有 opt-in per-candidate metrics 與 energy history；尚缺 overlap component
+數量與 incumbent selection source，不將 telemetry 放進 submission fast path。
 - `[ ] P1.4` 將 BDP v0 升級為 per-candidate 結果，明確回傳 success、residual、
   displacement、active-pair 數與 failure reason。
 - `[ ] P1.5` 加入 active-pair outer rebuild 與 bounded direction beam；只對
@@ -366,17 +373,17 @@ payload smoke。模型未成熟時，P1 本身就是最低可提交主線。
 
 ## 16. 下一個執行批次
 
-下一批工作先關閉 P0 與 P1，不開始資料訓練：
+P0 correctness 已由官方 100-case replay 關閉。下一批只推進 P1 exact QoR，
+不開始資料訓練：
 
 | 優先序 | Task | 輸入 | 必須產出 | Done 證據 |
 | --- | --- | --- | --- | --- |
-| 1 | P0.6 正式資料可用性與 fallback sweep | 本地 FloorSet cache／官方格式 | case inventory + correctness report | 所有可用 cases hard-feasible；缺資料明確列為 blocker |
-| 2 | P0.7 edge-case parity fixtures | v10 evaluator predicates | boundary/MIB/group/target fixtures | local 與 official predicate 全一致 |
-| 3 | P0.8 determinism audit | 固定 seeds、CPU/CUDA | repeatability report | 差異在明確 tolerance 內，無隱藏 randomness |
-| 4 | P1.3 telemetry | 現有 analytic runner | per-step/per-candidate metrics | 可定位 overlap、projection displacement 與 tail failure |
-| 5 | P1.4–P1.5 BDP 強化 | BDP v0 + conflict components | structured result + bounded outer loop | success/failure 可解釋，無無界迴圈 |
-| 6 | P1.6 incumbent tiers | verifier + candidate metrics | safe/fast/exact manager | 任意 failure 都保留 verified incumbent |
-| 7 | P1.7–P1.8 benchmark | fixed buckets與基線 seeds | exact QoR + p50/p95/p99 report | P1 promotion gate 可做明確判定 |
+| 1 | 完成 P1.3 telemetry | 現有 analytic runner | overlap components + selection source | 可量化 fallback rate 與 tail failure |
+| 2 | P1.4 structured projection | BDP v0 | per-candidate success/residual/displacement/reason | 每個候選結果可解釋 |
+| 3 | P1.5 active-pair／direction beam | conflict components | bounded outer rebuild + local direction search | 無無界迴圈，projection success 提升 |
+| 4 | P1.6 incumbent tiers | verifier + candidate metrics | safe/fast/exact manager | 任意 failure 都保留 verified incumbent |
+| 5 | P1.7 exact comparisons | fixed seeds 與同一 exact tail | fallback/random/analytic/BDP per-case report | 改善來自哪一層可歸因 |
+| 6 | P1.8 N120/K32 benchmark | CPU/CUDA fixed buckets | exact QoR + p50/p95/p99 report | P1 promotion gate 可做明確判定 |
 
 完成這批後，先產出 `PROMOTE／HOLD／REJECT` 的 P1 決策，再決定是否進入 P2；
 不以「程式已寫完」取代 promotion evidence。

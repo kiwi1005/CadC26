@@ -2,8 +2,10 @@
 
 > Detailed staged tasks, dependencies, current status, and exit gates are tracked
 > in [`hcfp5090_staged_execution_roadmap.md`](hcfp5090_staged_execution_roadmap.md).
-> The current implementation covers the P0 core and an initial P1 analytic/BDP
-> slice; the full P0/P1 evidence gates remain open.
+> P0 correctness is closed by the official 100-case replay documented in
+> [`hcfp5090_p0_correctness_2026-08-01.md`](hcfp5090_p0_correctness_2026-08-01.md).
+> The initial P1 analytic/BDP and telemetry slice remains on HOLD because its
+> exact validation QoR is still at the feasible cost cap.
 
 ## Goal
 
