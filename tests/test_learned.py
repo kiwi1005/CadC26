@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 import torch
 
 from hcfp.analytic import AnalyticConfig
@@ -49,7 +51,7 @@ def test_checkpoint_lane_runs_through_exact_safe_tail(tmp_path: Path) -> None:
     assert result.failure_reason is None
     assert verify_feasible(_case(), result.selected)
     assert result.flow_steps == 6
-    assert result.candidate_count == 2
+    assert result.candidate_count == 4
 
 
 def test_multistep_flow_population_preserves_exact_safe_output(tmp_path: Path) -> None:
@@ -61,6 +63,18 @@ def test_multistep_flow_population_preserves_exact_safe_output(tmp_path: Path) -
 
     assert result.used_checkpoint is True
     assert result.flow_steps == 3
+    assert verify_feasible(_case(), result.selected)
+
+
+def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    config = LearnedConfig(analytic=_config(), tail_topk=1)
+
+    result = solve_case_with_checkpoint(_case(), checkpoint, config)
+
+    assert result.used_checkpoint is True
+    assert result.candidate_count == 3
     assert verify_feasible(_case(), result.selected)
 
 
@@ -81,3 +95,55 @@ def test_normalization_mismatch_fails_closed(tmp_path: Path) -> None:
 
     assert result.used_checkpoint is False
     assert result.failure_reason is not None and "normalization mismatch" in result.failure_reason
+
+
+def test_raw_infeasible_learned_output_replays_analytic_incumbent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import hcfp.learned as learned
+
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    source = SimpleNamespace(
+        block_count=2,
+        area_targets=[4.0, 4.0],
+        b2b_connectivity=[],
+        p2b_connectivity=[],
+        pins_pos=[],
+        constraints=[[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+        target_positions=None,
+    )
+    analytic = [(0.0, 0.0, 2.0, 2.0), (3.0, 0.0, 2.0, 2.0)]
+    monkeypatch.setattr(
+        learned,
+        "to_official_placements",
+        lambda *_args: [(0.0, 0.0, 2.0, 2.0), (1.0, 0.0, 2.0, 2.0)],
+    )
+    monkeypatch.setattr(learned, "solve_analytic", lambda *_args, **_kwargs: analytic)
+
+    result = learned.solve(source, checkpoint=checkpoint, config=_config(), require_checkpoint=True)
+
+    assert result == analytic
+
+
+def test_raw_infeasible_analytic_replay_uses_safe_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import hcfp.learned as learned
+
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    source = SimpleNamespace(
+        block_count=2,
+        area_targets=[4.0, 4.0],
+        b2b_connectivity=[],
+        p2b_connectivity=[],
+        pins_pos=[],
+        constraints=[[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+        target_positions=None,
+    )
+    overlap = [(0.0, 0.0, 2.0, 2.0), (1.0, 0.0, 2.0, 2.0)]
+    safe = [(0.0, 0.0, 2.0, 2.0), (3.0, 0.0, 2.0, 2.0)]
+    monkeypatch.setattr(learned, "to_official_placements", lambda *_args: overlap)
+    monkeypatch.setattr(learned, "solve_analytic", lambda *_args, **_kwargs: overlap)
+    monkeypatch.setattr(learned, "safe_fallback", lambda *_args, **_kwargs: safe)
+
+    result = learned.solve(source, checkpoint=checkpoint, config=_config(), require_checkpoint=True)
+
+    assert result == safe

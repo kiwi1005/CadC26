@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,9 @@ from hcfp.case import FloorplanCase, from_official
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
 from hcfp.dynamics import initialize_population
-from hcfp.fallback import safe_shelf
+from hcfp.fallback import safe_fallback, safe_shelf
 from hcfp.geometry import xywh_from_state
+from hcfp.verify import verify_feasible
 
 
 Tensor = torch.Tensor
@@ -151,7 +153,14 @@ def solve(
         result = solve_case_with_checkpoint(case, checkpoint, config)
         if require_checkpoint and not result.used_checkpoint:
             raise RuntimeError(result.failure_reason or "checkpoint was not used")
-        return to_official_placements(source, case, result.selected)
+        placements = to_official_placements(source, case, result.selected)
+        if not verify_feasible(source, placements):
+            analytic = solve_analytic(source, _learned_config(config).analytic, device=device)
+            if verify_feasible(source, analytic):
+                return analytic
+            fallback = safe_fallback(source)
+            return [tuple(float(value) for value in row) for row in fallback]
+        return placements
     except Exception:
         if require_checkpoint:
             raise
@@ -166,7 +175,11 @@ def _field(source: Any, name: str) -> Any:
 
 def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedConfig:
     if config is None:
-        return LearnedConfig()
+        tail = os.environ.get("HCFP_TAIL_TOPK")
+        return LearnedConfig(
+            flow_steps=int(os.environ.get("HCFP_FLOW_STEPS", "6")),
+            tail_topk=int(tail) if tail else None,
+        )
     if isinstance(config, AnalyticConfig):
         return LearnedConfig(analytic=config)
     return config
@@ -182,6 +195,7 @@ def _learned_population(
     population = config.analytic.dynamics.population
     fallback = safe_shelf(case).to(device=case.area.device, dtype=torch.float32)
     base = initialize_population(case, config.analytic.dynamics, fallback)
+    analytic_boxes = xywh_from_state(case, base.center, base.log_aspect)
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     noise = torch.randn((population, case.n, 3), generator=generator, dtype=torch.float32)
     residual = noise.to(device=case.area.device) * config.flow_noise_scale
@@ -217,11 +231,11 @@ def _learned_population(
 
     center = base.center + output.center_residual
     log_aspect = (base.log_aspect + output.log_aspect_residual).clamp(-4.0, 4.0)
-    boxes = xywh_from_state(case, center, log_aspect)
+    learned_boxes = xywh_from_state(case, center, log_aspect)
     if config.tail_topk is not None and config.tail_topk < population:
-        features = candidate_features(case, boxes, fallback)
+        features = candidate_features(case, learned_boxes, fallback)
         with torch.inference_mode():
             scores = model.ranker(output.embedding, population, features)
         keep = torch.argsort(scores, stable=True)[: config.tail_topk]
-        boxes = boxes[keep]
-    return boxes
+        learned_boxes = learned_boxes[keep]
+    return torch.cat((analytic_boxes, learned_boxes), dim=0)

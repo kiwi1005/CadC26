@@ -77,6 +77,10 @@ def test_official_benchmark_audits_valid_checkpoint_usage(tmp_path: Path) -> Non
             "0",
             "--device",
             "cpu",
+            "--flow-steps",
+            "2",
+            "--tail-topk",
+            "1",
             "--output",
             str(output),
         ],
@@ -90,3 +94,5 @@ def test_official_benchmark_audits_valid_checkpoint_usage(tmp_path: Path) -> Non
     assert report["lane_summary"]["learned"]["feasible"] == 1
     assert report["lane_metadata"]["learned"]["checkpoint_hash"] == checkpoint_hash
     assert report["lane_metadata"]["learned"]["required"] is True
+    assert report["lane_metadata"]["learned"]["flow_steps"] == 2
+    assert report["lane_metadata"]["learned"]["tail_topk"] == 1

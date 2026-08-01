@@ -8,11 +8,16 @@ learned lane.
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import sys
 
-import submission.optimizer as submission_optimizer
+ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from hcfp.learned import solve as solve_learned
-from hcfp.runtime import SolveCase
+import submission.optimizer as submission_optimizer  # noqa: E402
+
+from hcfp.learned import solve as solve_learned  # noqa: E402
+from hcfp.runtime import SolveCase  # noqa: E402
 
 
 class Optimizer(submission_optimizer.HCFPOptimizer):

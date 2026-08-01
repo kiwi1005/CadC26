@@ -37,7 +37,7 @@ def record_from_analysis(
 ) -> ReplayRecord:
     """Label learned initial candidates with their exact projected outcomes."""
 
-    start, stop = 1, population + 1
+    start, stop = population + 1, 2 * population + 1
     boxes = raw_candidates[start:stop]
     features = candidate_features(sample.case.to(device=boxes.device), boxes, safe_shelf(sample.case).to(boxes.device))
     feasible = telemetry.hard_feasible[start:stop].float()
