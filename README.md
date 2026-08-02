@@ -124,6 +124,9 @@ The raw-safe reselection implementation and 100-case evidence are recorded in
 The official-baseline replay, selector training, deterministic seed contract,
 and latest 100-case HOLD decision are recorded in
 [`docs/research/hcfp5090_official_selector_results_2026-08-02.md`](docs/research/hcfp5090_official_selector_results_2026-08-02.md).
+The split-tail Pareto guard, clean-provenance validation 100, and current
+runtime-limited HOLD decision are recorded in
+[`docs/research/hcfp5090_runtime_pareto_guard_results_2026-08-02.md`](docs/research/hcfp5090_runtime_pareto_guard_results_2026-08-02.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,

@@ -114,3 +114,8 @@ case_99.html 7d9c6f988b229217c54845dc8b62642e67ccd299c8d178dbb17ff9941fdd3c6a
    and soft violation together.
 3. Profile candidate-count/tail steps on the 10 materially changed cases.
 4. Re-run official 100 only after cases 88 and 97 are non-regressing.
+
+These gates are complete. The split-tail implementation, clean-provenance
+validation 100, runtime measurements, determinism evidence, and continued HOLD
+decision are recorded in
+[`hcfp5090_runtime_pareto_guard_results_2026-08-02.md`](hcfp5090_runtime_pareto_guard_results_2026-08-02.md).
