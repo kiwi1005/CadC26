@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--score-aware", action="store_true")
-    parser.add_argument("--samples-per-file", type=int, default=16)
+    parser.add_argument("--layouts-per-file", type=int, default=16)
     parser.add_argument("--device", default="auto")
     args = parser.parse_args(argv)
     counts = {
@@ -77,8 +77,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("all activation split counts must be positive")
     if args.tail_topk <= 0 or args.tail_topk > args.population:
         parser.error("--tail-topk must be in [1, population]")
-    if args.samples_per_file <= 0:
-        parser.error("--samples-per-file must be positive")
+    if args.layouts_per_file <= 0:
+        parser.error("--layouts-per-file must be positive")
 
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(args.seed)
@@ -112,7 +112,7 @@ def main(argv: list[str] | None = None) -> int:
         limit=total,
         seed=args.seed,
         score_aware=args.score_aware,
-        max_samples_per_file=args.samples_per_file,
+        max_layouts_per_file=args.layouts_per_file,
     )
     for split_name, (sample, source) in zip(_interleaved_split_names(counts), source_stream):
         split_records[split_name].append(
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             "root": str(Path(args.floorset_lite_root).resolve()),
             "seed": args.seed,
             "score_aware": args.score_aware,
-            "samples_per_file": args.samples_per_file,
+            "layouts_per_file": args.layouts_per_file,
         },
         "checkpoint": {
             "path": args.checkpoint,

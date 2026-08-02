@@ -105,7 +105,7 @@ def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: 
     assert torch.equal(sourced[0][1]["target_positions"][0], torch.tensor([0.0, 0.0, 2.0, 2.0]))
 
 
-def test_training_stream_can_cap_samples_per_source_file(tmp_path: Path) -> None:
+def test_training_stream_can_cap_layouts_per_source_file(tmp_path: Path) -> None:
     first = tmp_path / "floorset_lite/worker_0/layouts_0.pth"
     second = tmp_path / "floorset_lite/worker_1/layouts_0.pth"
     first.parent.mkdir(parents=True)
@@ -118,11 +118,37 @@ def test_training_stream_can_cap_samples_per_source_file(tmp_path: Path) -> None
         iter_floorset_lite(
             tmp_path,
             limit=2,
-            max_samples_per_file=1,
+            max_layouts_per_file=1,
         )
     )
 
     assert [sample.sample_id.split("/")[0] for sample in samples] == ["worker_0", "worker_1"]
+
+
+def test_file_cap_counts_score_aware_rejections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = tmp_path / "floorset_lite/worker_0/layouts_0.pth"
+    layout.parent.mkdir(parents=True)
+    mixed = [tensor.repeat((2,) + (1,) * (tensor.ndim - 1)) for tensor in _layout_payload()]
+    mixed[0][1, 2, 0] = -1.0
+    torch.save(mixed, layout)
+    monkeypatch.setattr(
+        "hcfp.floorset_lite.score_aware_acceptance",
+        lambda block_count: 0.0 if block_count == 3 else 1.0,
+    )
+
+    samples = list(
+        iter_floorset_lite(
+            tmp_path,
+            limit=1,
+            score_aware=True,
+            max_layouts_per_file=1,
+        )
+    )
+
+    assert samples == []
 
 
 @pytest.mark.parametrize(("index", "value"), [(0, -1.0), (6, float("nan"))])
