@@ -127,6 +127,9 @@ and latest 100-case HOLD decision are recorded in
 The split-tail Pareto guard, clean-provenance validation 100, and current
 runtime-limited HOLD decision are recorded in
 [`docs/research/hcfp5090_runtime_pareto_guard_results_2026-08-02.md`](docs/research/hcfp5090_runtime_pareto_guard_results_2026-08-02.md).
+The exact-overlap vectorization, byte-identical validation 100 replay, and
+remaining median-runtime gate are recorded in
+[`docs/research/hcfp5090_runtime_vectorization_results_2026-08-02.md`](docs/research/hcfp5090_runtime_vectorization_results_2026-08-02.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,
