@@ -91,6 +91,39 @@ official live runtime evidence and must not be used for promotion.
 | training report | `f812561efc4e9bba04802c7fbcaa8b93d3db5c21d7767e1aa35626d1355507fa` |
 | held-out evaluation | `4309ea0c2c61f0e5ed2b055fb021bee25d28264b2504e1f32744e60865db5a6a` |
 
+## Placement and visualization smoke
+
+A fresh official-data smoke on cases `0,50,99` completed with both fallback and
+analytic lanes at `3/3` hard feasibility. Both lanes remained at the cost cap,
+so the promotion decision was `HOLD`. The comparison report and deterministic
+visualizations were generated successfully:
+
+| Artifact | SHA256 |
+| --- | --- |
+| three-case comparison JSON | `7b125cf9c0e30eb00452a2441376f329a6ff1f15ba23d6afe0f8c6a71621ef79` |
+| case 0 comparison HTML | `584b15d2941e2a0ea9f9ae27ec2611938840f9be365b4f83051a5c7cc1d39a64` |
+| case 50 comparison HTML | `7feaf3cbb08576e6517746dd42569eca1b3c875434aa03c0401b79a3c8a028bc` |
+| case 99 comparison HTML | `5bec215d9497eb3cc788961882913af1d86bb2733b173a899a810f995a337caf` |
+| case 50 analytic SVG | `65168823d7effdd8c4f6a3b857f0fd82d0bc2b0ad481a7154f169ff56c91ef91` |
+| case 50 analytic PNG | `58e468c885514a5fa9514b34fb82d5ad7548cf052cdd945f6aa66d6752f6c6a1` |
+
+The PNG was visually inspected: all 71 labeled blocks and pin markers render
+inside the bounding outline, and the image agrees with exact hard-feasibility
+reported by the benchmark.
+
+## Final contract verification
+
+- Pinned FloorSet checkout: `aadddcc2238695eb21e6542b8a6cd9e9fe6b80fa`.
+- Pinned evaluator SHA256: `64db37865b42baf11add62bdbf035690dca086cd4be7b5b4e58db756f20d8498`.
+- A detached repo-local audit worktree passed with `clean=true` and `ok=true`.
+- The JSON binary smoke passed from both the repository root and the
+  `submission/` working directory.
+- Both binary invocations returned three rectangles and copied the preplaced
+  target exactly as `[10.0, 5.0, 2.0, 2.0]`.
+
+The primary FloorSet checkout intentionally contains untracked training data,
+so it is not used as clean-reference evidence and was not modified or cleaned.
+
 ## Next action
 
 Do not add activation inference to the contest entrypoint. Preserve this lane as

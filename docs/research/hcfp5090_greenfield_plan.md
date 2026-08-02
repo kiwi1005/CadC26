@@ -9,6 +9,10 @@
 > The first official-data training/replay/ranker loop is documented in
 > [`hcfp5090_training_closed_loop_2026-08-01.md`](hcfp5090_training_closed_loop_2026-08-01.md);
 > it is 100/100 hard-feasible but remains HOLD on QoR and runtime.
+> The learned-tail activation replay/training/evaluation framework is complete,
+> but its first disjoint held-out policy achieved only 75% positive recall and
+> 44.14% skip rate. It therefore remains shadow-only as documented in
+> [`hcfp5090_activation_shadow_results_2026-08-02.md`](hcfp5090_activation_shadow_results_2026-08-02.md).
 
 ## Goal
 

@@ -90,6 +90,31 @@ PYTHONPATH=src python scripts/audit_hcfp_oracle.py \
   --cases all --device cuda --population 8 --flow-steps 6
 ```
 
+Build a disjoint learned-tail activation replay and run the hash-bound shadow
+training/evaluation loop:
+
+```bash
+PYTHONPATH=src python scripts/generate_hcfp_activation_replay.py \
+  --floorset-lite-root artifacts/floorset-v10 \
+  --checkpoint artifacts/checkpoints/hcfp-ranked.pt \
+  --output-prefix artifacts/replay/hcfp-activation \
+  --train-count 1024 --calibration-count 512 --heldout-count 512 \
+  --layouts-per-file 16 --seed 20260806 --device cuda
+PYTHONPATH=src python scripts/train_hcfp_activation.py \
+  --train-replay artifacts/replay/hcfp-activation.train.jsonl \
+  --calibration-replay artifacts/replay/hcfp-activation.calibration.jsonl \
+  --output artifacts/checkpoints/hcfp-activation.json --device cuda
+PYTHONPATH=src python scripts/eval_hcfp_activation.py \
+  --policy artifacts/checkpoints/hcfp-activation.json \
+  --training-report artifacts/checkpoints/hcfp-activation.json.training.json \
+  --replay heldout=artifacts/replay/hcfp-activation.heldout.jsonl \
+  --output artifacts/benchmarks/hcfp-activation-heldout.json
+```
+
+The trainer requires at least 32 train and 16 calibration positives by default.
+The current shadow policy failed disjoint held-out recall/skip gates, so no
+activation policy is connected to the contest runtime.
+
 The oracle audit keeps all learned candidates by default, applies the same
 analytic/BDP tail as runtime, and attributes raw and post-BDP official quality
 to fallback, analytic, and learned sources. `--tail-topk` is only for a
@@ -130,6 +155,9 @@ runtime-limited HOLD decision are recorded in
 The exact-overlap vectorization, byte-identical validation 100 replay, and
 remaining median-runtime gate are recorded in
 [`docs/research/hcfp5090_runtime_vectorization_results_2026-08-02.md`](docs/research/hcfp5090_runtime_vectorization_results_2026-08-02.md).
+The training-only activation replay, shadow policy result, held-out failure,
+and explicit no-promotion decision are recorded in
+[`docs/research/hcfp5090_activation_shadow_results_2026-08-02.md`](docs/research/hcfp5090_activation_shadow_results_2026-08-02.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,
