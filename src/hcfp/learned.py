@@ -150,11 +150,27 @@ def solve(
             _field(source, "target_positions"),
             device=selected_device,
         )
-        result = solve_case_with_checkpoint(case, checkpoint, config)
+        analysis = analyze_case_with_checkpoint(case, checkpoint, config)
+        result = analysis.result
         if require_checkpoint and not result.used_checkpoint:
             raise RuntimeError(result.failure_reason or "checkpoint was not used")
         placements = to_official_placements(source, case, result.selected)
         if not verify_feasible(source, placements):
+            telemetry = analysis.analytic.telemetry
+            candidates = analysis.analytic.projected_candidates.detach().to(device="cpu", dtype=torch.float32)
+            hard_feasible = telemetry.hard_feasible.detach().to(device="cpu", dtype=torch.bool)
+            soft_violation = telemetry.soft_violation.detach().to(device="cpu", dtype=torch.float32)
+            quality = (telemetry.bbox_area + 0.05 * telemetry.hpwl).detach().to(device="cpu", dtype=torch.float32)
+            order = sorted(
+                (index for index in range(len(candidates)) if bool(hard_feasible[index])),
+                key=lambda index: (float(soft_violation[index]), float(quality[index]), index),
+            )
+            for index in order:
+                candidate = to_official_placements(source, case, candidates[index])
+                if verify_feasible(source, candidate):
+                    if index == 0:
+                        break
+                    return candidate
             analytic = solve_analytic(source, _learned_config(config).analytic, device=device)
             if verify_feasible(source, analytic):
                 return analytic

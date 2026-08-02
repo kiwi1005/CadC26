@@ -39,7 +39,7 @@
 | Data shards／labels | `[~]` | 已盤點 1.008M cases、direct streaming、100-sample raw audit、score-aware sampling；stratified internal split 尚未執行。 |
 | SCENE／POP-INIT | `[~]` | structure 1k + all-head 3k 正式短訓練完成；100-case attribution 顯示 learned oracle 0 wins，gate REJECT。 |
 | Rectified flow／controller／ranker | `[~]` | 6-step flow、32-record exact replay、ranker 500-step/top-4 已閉環；QoR/runtime gate HOLD。 |
-| Learned runtime | `[~]` | additive analytic+learned sidecar、raw official replay gate與 100/100 feasibility 已完成；預設關閉。 |
+| Learned runtime | `[~]` | additive sidecar、raw-safe pool reselection與 100/100 feasibility 已完成；7 failure cases 避免重算，預設關閉。 |
 | Benchmark／visualization | `[x]` | 官方 weighted/bucket report、promotion decision 與 deterministic SVG/HTML 已完成。 |
 | Runtime profile | `[~]` | N120/K32 CUDA profile 已通過穩定性／記憶體 gate；cold-start 與 A100 profile 尚待補。 |
 | Submission freeze／package proof | `[~]` | 正式 100-case replay 與 hashes 已完成；payload freeze、portable smoke 與 dry run 尚未做。 |
@@ -393,11 +393,11 @@ visualization，且第一輪 1.008M direct-stream training／exact replay 已完
 
 | 優先序 | Task | 輸入 | 必須產出 | Done 證據 |
 | --- | --- | --- | --- | --- |
-| 1 | Raw-safe candidate reselection | 12 raw-infeasible incumbents | candidate-pool retry，不全量重算 | 100/100 feasible 且 p95 下降 |
-| 2 | Official-objective selector labels | training `metrics_sol` + exact tail | baseline-normalized outcome labels | 43-case miss 明顯下降 |
-| 3 | Learned feasibility supervision | raw overlap／BDP／repair telemetry | hard-negative structure/flow loss | learned raw/post-BDP feasibility 上升 |
-| 4 | Soft-constraint force repair | grouping/boundary/MIB telemetry | typed-force ablation | 解除 capped cost 且 large case 不退步 |
-| 5 | Stratified internal split | 1.008M training source | source/split/checksum manifest | validation leakage = 0 |
+| 完成 | Raw-safe candidate reselection | 12 raw-infeasible incumbents | 7 pool reuse／5 analytic replay | 100/100 feasible、變更案 7/7 QoR 改善 |
+| 1 | Official-objective selector labels | training `metrics_sol` + exact tail | baseline-normalized outcome labels | 43-case miss 明顯下降 |
+| 2 | Learned feasibility supervision | raw overlap／BDP／repair telemetry | hard-negative structure/flow loss | learned raw/post-BDP feasibility 上升 |
+| 3 | Soft-constraint force repair | grouping/boundary/MIB telemetry | typed-force ablation | 解除 capped cost 且 large case 不退步 |
+| 4 | Stratified internal split | 1.008M training source | source/split/checksum manifest | validation leakage = 0 |
 
 「框架可執行且已短訓練」不等於 learned lane 已 promotion；只有上述 exact
 QoR、large-case 與 runtime gates 全通過後，`HCFP_CHECKPOINT` 才能從 opt-in

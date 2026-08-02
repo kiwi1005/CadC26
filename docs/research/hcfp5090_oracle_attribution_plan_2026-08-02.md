@@ -111,7 +111,9 @@ analytic 勝出。large-case comparable cases 為 6，learned 也是 0/6。
 指出兩個下一步，順序不可顛倒：
 
 1. 先讓 raw official infeasible 的 normalized incumbent 在既有 candidate pool
-   內選下一個合法候選，避免 12-case analytic 全量重算。
+   內選下一個合法候選；已完成 QoR-safe 版本，7 cases 重用非-fallback pool、
+   5 cases 保留 analytic replay。證據見
+   [`hcfp5090_raw_reselection_2026-08-02.md`](hcfp5090_raw_reselection_2026-08-02.md)。
 2. 使用 training `metrics_sol` 建立 official-objective-aligned selector labels，
    修復 43-case incumbent miss；validation 僅作 promotion，不回灌 threshold。
 3. 對 learned raw overlap、post-BDP feasibility 與 repair displacement 加入明確

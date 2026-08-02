@@ -98,6 +98,9 @@ For effect attribution, benchmark `scripts/audit_learned_optimizer.py` with
 `--checkpoint learned=/absolute/path/model.pt`; this strict adapter requires a
 valid checkpoint while the per-case raw gate still retains the verified
 analytic/safe incumbent when a learned winner is not officially legal.
+If a normalized winner fails only after raw denormalization, the lane first
+reuses a verified non-fallback projected candidate; fallback-only pools retain
+the analytic replay to avoid trading quality for runtime.
 
 The official submission surface is `submission/optimizer.py`; the standalone
 JSON stdin/stdout executable is `submission/binary_main.py`. Geometry remains
@@ -112,6 +115,8 @@ The first complete-framework effect result is recorded in
 The official-data training, exact replay, learned sidecar, 100-case benchmark,
 and current HOLD decision are recorded in
 [`docs/research/hcfp5090_training_closed_loop_2026-08-01.md`](docs/research/hcfp5090_training_closed_loop_2026-08-01.md).
+The raw-safe reselection implementation and 100-case evidence are recorded in
+[`docs/research/hcfp5090_raw_reselection_2026-08-02.md`](docs/research/hcfp5090_raw_reselection_2026-08-02.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,
