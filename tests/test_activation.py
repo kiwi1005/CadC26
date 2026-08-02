@@ -25,10 +25,7 @@ from hcfp.activation import (
     write_activation_replay,
 )
 from hcfp.analytic import AnalyticConfig, solve_case_with_telemetry
-from hcfp.case import from_official
-from hcfp.data import DataSample, extract_labels
 from hcfp.dynamics import DynamicsConfig
-from hcfp.fallback import safe_shelf
 from hcfp.profile import synthetic_case
 
 
@@ -182,36 +179,6 @@ def test_activation_outcome_uses_uncapped_runtime_independent_objective() -> Non
     assert outcome.feasible
     assert outcome.runtime_seconds == 123.0
     assert outcome.objective > 0.0
-
-
-def test_activation_raw_source_preserves_official_missing_target_sentinel() -> None:
-    from scripts.generate_hcfp_activation_replay import _raw_source
-
-    case = synthetic_case(32, device="cpu")
-    sample = DataSample(
-        "synthetic-raw-source",
-        case,
-        extract_labels(case, safe_shelf(case), normalized=True),
-    )
-
-    source = _raw_source(sample)
-    invalid = ~case.target_valid_mask
-    rebuilt = from_official(
-        source["block_count"],
-        source["area_targets"],
-        source["b2b_connectivity"],
-        source["p2b_connectivity"],
-        source["pins_pos"],
-        source["constraints"],
-        source["target_positions"],
-    )
-
-    assert invalid.any()
-    assert torch.equal(
-        source["target_positions"][invalid],
-        torch.full((int(invalid.sum()), 4), -1.0),
-    )
-    assert torch.equal(rebuilt.target_valid_mask, case.target_valid_mask)
 
 
 @pytest.mark.parametrize(

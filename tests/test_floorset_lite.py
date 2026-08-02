@@ -5,10 +5,13 @@ from pathlib import Path
 import pytest
 import torch
 
+from hcfp.case import from_official
 from hcfp.floorset_lite import (
     fp_sol_to_xywh,
     iter_floorset_lite,
+    iter_floorset_lite_with_source,
     sample_from_lite_tensors,
+    sample_with_source_from_lite_tensors,
     score_aware_acceptance,
     target_positions_from_solution,
 )
@@ -56,6 +59,35 @@ def test_lite_rectangles_and_targets_match_official_semantics() -> None:
     assert sample.labels.baseline_hpwl.item() == pytest.approx(10.0)
 
 
+def test_lite_runtime_source_preserves_exact_official_targets() -> None:
+    payload = _layout_payload()
+    sample, source = sample_with_source_from_lite_tensors(
+        "worker/layout:0",
+        payload[0][0],
+        payload[1][0],
+        payload[2][0],
+        payload[3][0],
+        payload[5][0],
+        payload[6][0],
+    )
+    rebuilt = from_official(
+        source["block_count"],
+        source["area_targets"],
+        source["b2b_connectivity"],
+        source["p2b_connectivity"],
+        source["pins_pos"],
+        source["constraints"],
+        source["target_positions"],
+    )
+
+    assert torch.equal(source["target_positions"][0], torch.tensor([0.0, 0.0, 2.0, 2.0]))
+    assert torch.equal(source["target_positions"][2], torch.full((4,), -1.0))
+    assert torch.equal(source["preplaced_mask"], sample.case.preplaced_mask)
+    assert torch.equal(rebuilt.area, sample.case.area)
+    assert torch.equal(rebuilt.target, sample.case.target)
+    assert torch.equal(rebuilt.target_valid_mask, sample.case.target_valid_mask)
+
+
 def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: Path) -> None:
     layout = tmp_path / "floorset_lite/worker_0/layouts_0.pth"
     layout.parent.mkdir(parents=True)
@@ -67,6 +99,10 @@ def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: 
     assert samples[0].labels.baseline_area.item() == pytest.approx(120.0)
     assert samples[0].labels.baseline_hpwl.item() == pytest.approx(10.0)
     assert not list(tmp_path.rglob("*.tar"))
+
+    sourced = list(iter_floorset_lite_with_source(tmp_path, limit=1))
+    assert sourced[0][0].sample_id == samples[0].sample_id
+    assert torch.equal(sourced[0][1]["target_positions"][0], torch.tensor([0.0, 0.0, 2.0, 2.0]))
 
 
 @pytest.mark.parametrize(("index", "value"), [(0, -1.0), (6, float("nan"))])

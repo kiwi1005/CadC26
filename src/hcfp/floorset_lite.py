@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import random
-from typing import Iterator
+from typing import Any, Iterator
 
 import torch
 
@@ -61,6 +61,29 @@ def sample_from_lite_tensors(
     fp_sol: Tensor,
     metrics_sol: Tensor | None = None,
 ) -> DataSample:
+    sample, _ = sample_with_source_from_lite_tensors(
+        sample_id,
+        area_constraints,
+        b2b_connectivity,
+        p2b_connectivity,
+        pins_pos,
+        fp_sol,
+        metrics_sol,
+    )
+    return sample
+
+
+def sample_with_source_from_lite_tensors(
+    sample_id: str,
+    area_constraints: Tensor,
+    b2b_connectivity: Tensor,
+    p2b_connectivity: Tensor,
+    pins_pos: Tensor,
+    fp_sol: Tensor,
+    metrics_sol: Tensor | None = None,
+) -> tuple[DataSample, dict[str, Any]]:
+    """Return a sample plus its exact official-coordinate runtime source."""
+
     area_constraints = torch.as_tensor(area_constraints)
     if area_constraints.ndim != 2 or area_constraints.shape[1] < 6:
         raise ValueError("area/constraint tensor must have columns [area,fixed,preplaced,mib,cluster,boundary]")
@@ -82,7 +105,7 @@ def sample_from_lite_tensors(
     baseline_area = baseline_hpwl = None
     if metrics_sol is not None:
         baseline_area, baseline_hpwl = _metrics_baselines(metrics_sol)
-    return DataSample(
+    sample = DataSample(
         sample_id,
         case,
         extract_labels(
@@ -92,6 +115,23 @@ def sample_from_lite_tensors(
             baseline_hpwl=baseline_hpwl,
         ),
     )
+    source = {
+        "normalized": False,
+        "block_count": block_count,
+        "area_targets": area,
+        "b2b_connectivity": torch.as_tensor(b2b_connectivity),
+        "p2b_connectivity": torch.as_tensor(p2b_connectivity),
+        "pins_pos": torch.as_tensor(pins_pos),
+        "constraints": constraints,
+        "target_positions": targets,
+        "fixed_mask": case.fixed_mask,
+        "preplaced_mask": case.preplaced_mask,
+        "boundary_bits": case.boundary_bits,
+        "group_membership": case.group_membership,
+        "mib_membership": case.mib_membership,
+        "raw_preplaced_validated": True,
+    }
+    return sample, source
 
 
 def _metrics_baselines(metrics_sol: Tensor) -> tuple[float, float]:
@@ -123,6 +163,40 @@ def iter_floorset_lite(
 ) -> Iterator[DataSample]:
     """Yield training samples one source file at a time without copying 1M cases."""
 
+    for sample, _ in _iter_floorset_lite_with_source(
+        root,
+        limit=limit,
+        seed=seed,
+        score_aware=score_aware,
+    ):
+        yield sample
+
+
+def iter_floorset_lite_with_source(
+    root: str | Path,
+    *,
+    limit: int | None = None,
+    seed: int | None = None,
+    score_aware: bool = False,
+) -> Iterator[tuple[DataSample, dict[str, Any]]]:
+    """Yield samples with exact official-coordinate sources for raw replay."""
+
+    yield from _iter_floorset_lite_with_source(
+        root,
+        limit=limit,
+        seed=seed,
+        score_aware=score_aware,
+    )
+
+
+def _iter_floorset_lite_with_source(
+    root: str | Path,
+    *,
+    limit: int | None,
+    seed: int | None,
+    score_aware: bool,
+) -> Iterator[tuple[DataSample, dict[str, Any]]]:
+
     root = Path(root).resolve()
     if any(token in str(root).lower() for token in ("litetensordatatest", "validation", "visible")):
         raise ValueError("visible validation/test paths are forbidden for training")
@@ -143,7 +217,7 @@ def iter_floorset_lite(
             block_count = int((payload[0][layout_index][:, 0] != -1).sum().item())
             if score_aware and generator.random() > score_aware_acceptance(block_count):
                 continue
-            yield sample_from_lite_tensors(
+            yield sample_with_source_from_lite_tensors(
                 f"{path.parent.name}/{path.name}:{layout_index}",
                 payload[0][layout_index],
                 payload[1][layout_index],

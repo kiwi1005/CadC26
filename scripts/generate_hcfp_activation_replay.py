@@ -37,8 +37,7 @@ from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.data import DataSample, file_sha256  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
 from hcfp.fallback import safe_shelf  # noqa: E402
-from hcfp.floorset_lite import iter_floorset_lite  # noqa: E402
-from hcfp.geometry import denormalize_xywh  # noqa: E402
+from hcfp.floorset_lite import iter_floorset_lite_with_source  # noqa: E402
 from hcfp.learned import (  # noqa: E402
     LearnedAnalysis,
     LearnedConfig,
@@ -105,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
     total = sum(counts.values())
     records = []
-    for sample in iter_floorset_lite(
+    for sample, source in iter_floorset_lite_with_source(
         args.floorset_lite_root,
         limit=total,
         seed=args.seed,
@@ -119,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
                 config_hash,
                 config,
                 device,
+                source,
             )
         )
     if len(records) != total:
@@ -181,6 +181,7 @@ def _record(
     config_hash: str,
     config: LearnedConfig,
     device: torch.device,
+    source: dict[str, object],
 ) -> ActivationRecord:
     case = sample.case.to(device=device, dtype=torch.float32)
     torch.cuda.synchronize() if case.area.is_cuda else None
@@ -209,7 +210,6 @@ def _record(
     torch.cuda.synchronize() if case.area.is_cuda else None
     feature_seconds = time.perf_counter() - feature_start
 
-    source = _raw_source(sample)
     analytic_wrapper = _standalone_wrapper(analytic)
     selector_start = time.perf_counter()
     analytic_placements = select_official_from_analysis(
@@ -308,37 +308,6 @@ def _standalone_wrapper(analytic) -> LearnedAnalysis:
     )
     guarded = replace(analytic, incumbent_snapshot=snapshot)
     return LearnedAnalysis(LearnedResult(analytic.selected, False, None, None), guarded)
-
-
-def _raw_source(sample: DataSample) -> dict[str, object]:
-    case = sample.case.to(device="cpu", dtype=torch.float32)
-    scale = float(case.scale)
-    raw_target = denormalize_xywh(case, case.target).to(dtype=torch.float64)
-    raw_target[~case.target_valid_mask] = -1.0
-    raw_pins = case.pins.to(dtype=torch.float64) * scale + case.origin.to(dtype=torch.float64)
-    b2b_indices = torch.nonzero(torch.triu(case.b2b_weight, diagonal=1) > 0.0)
-    b2b_connectivity = [
-        (int(i), int(j), float(case.b2b_weight[i, j])) for i, j in b2b_indices.tolist()
-    ]
-    return {
-        "normalized": False,
-        "block_count": case.n,
-        "area_targets": case.area.to(dtype=torch.float64) * (scale * scale),
-        "b2b_weight": case.b2b_weight,
-        "b2b_connectivity": b2b_connectivity,
-        "p2b_edges": case.p2b_edges,
-        "p2b_connectivity": case.p2b_edges,
-        "pins": raw_pins,
-        "pins_pos": raw_pins,
-        "constraints": case.constraints,
-        "target_positions": raw_target,
-        "fixed_mask": case.fixed_mask,
-        "preplaced_mask": case.preplaced_mask,
-        "boundary_bits": case.boundary_bits,
-        "group_membership": case.group_membership,
-        "mib_membership": case.mib_membership,
-        "raw_preplaced_validated": case.raw_preplaced_validated,
-    }
 
 
 if __name__ == "__main__":
