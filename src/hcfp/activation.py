@@ -331,16 +331,23 @@ def fit_activation_policy(
         optimizer.step()
         history.append(float(loss.detach()))
 
+    mean_cpu = mean.detach().cpu()
+    scale_cpu = scale.detach().cpu()
+    weight_cpu = weight.detach().cpu()
+    bias_cpu = float(bias.detach().cpu())
     with torch.inference_mode():
-        probabilities = torch.sigmoid(((x_calibration - mean) / scale) @ weight + bias)
-        threshold = float(probabilities[y_calibration.bool()].min().detach().cpu())
+        cpu_probabilities = torch.sigmoid(
+            ((x_calibration.detach().cpu() - mean_cpu) / scale_cpu) @ weight_cpu + bias_cpu
+        )
+        minimum_positive = float(cpu_probabilities[y_calibration.detach().cpu().bool()].min())
+        threshold = max(0.0, minimum_positive - 1.0e-7)
     policy = ActivationPolicy(
         checkpoint_hash,
         config_hash,
-        mean.detach().cpu(),
-        scale.detach().cpu(),
-        weight.detach().cpu(),
-        float(bias.detach().cpu()),
+        mean_cpu,
+        scale_cpu,
+        weight_cpu,
+        bias_cpu,
         threshold,
     )
     return policy, history

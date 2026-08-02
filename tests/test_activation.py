@@ -267,6 +267,9 @@ def test_activation_policy_fit_calibrate_roundtrip_and_metrics(tmp_path: Path) -
         learning_rate=0.05,
     )
     metrics = activation_policy_metrics(policy, calibration, force_large_min=121)
+    calibration_probabilities = policy.probability(
+        torch.stack([record.features for record in calibration])
+    )
     path = tmp_path / "activation-policy.json"
     saved_hash = save_activation_policy(policy, path)
     loaded = load_activation_policy(path)
@@ -275,6 +278,7 @@ def test_activation_policy_fit_calibrate_roundtrip_and_metrics(tmp_path: Path) -
     assert history[-1] < history[0]
     assert metrics["recall"] == 1.0
     assert metrics["false_skip_sample_ids"] == []
+    assert policy.threshold < float(calibration_probabilities[1])
     assert saved_hash
     assert torch.equal(policy.probability(train[0].features), loaded.probability(train[0].features))
 

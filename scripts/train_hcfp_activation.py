@@ -80,8 +80,8 @@ def main(argv: list[str] | None = None) -> int:
             "calibration": _split_report(Path(args.calibration_replay), calibration),
         },
         "metrics": {
-            "train": activation_policy_metrics(policy, train),
-            "calibration": activation_policy_metrics(policy, calibration),
+            "train": _summary_metrics(policy, train),
+            "calibration": _summary_metrics(policy, calibration),
         },
     }
     report_path = Path(f"{args.output}.training.json")
@@ -100,6 +100,12 @@ def _split_report(path: Path, records) -> dict[str, object]:
             "\n".join(record.sample_id for record in records).encode()
         ).hexdigest(),
     }
+
+
+def _summary_metrics(policy, records) -> dict[str, object]:
+    metrics = activation_policy_metrics(policy, records)
+    metrics.pop("probabilities")
+    return metrics
 
 
 if __name__ == "__main__":
