@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", default="all", help="all or comma-separated test ids")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--flow-seed", type=int, default=0)
+    parser.add_argument("--execution-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
     parser.add_argument(
         "--checkpoint",
@@ -48,6 +50,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--visualize-dir")
     parser.add_argument("--visualize-cases", default="")
     args = parser.parse_args(argv)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True)
+    torch.manual_seed(args.execution_seed)
 
     specs = _assignments(args.optimizer or args.result or [])
     checkpoints = _assignments(args.checkpoint or [])
@@ -64,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
             args.device,
             checkpoints,
             args.flow_steps,
+            args.flow_seed,
             args.tail_topk,
         )
         mode = "optimizer"
@@ -126,6 +132,7 @@ def _run_optimizers(
     device: str,
     checkpoints: dict[str, Path],
     flow_steps: int,
+    flow_seed: int,
     tail_topk: int | None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
     evaluator_module = _load_evaluator(data_path)
@@ -135,6 +142,7 @@ def _run_optimizers(
     with (
         _environment("HCFP_DEVICE", device),
         _environment("HCFP_FLOW_STEPS", str(flow_steps)),
+        _environment("HCFP_FLOW_SEED", str(flow_seed)),
         _environment("HCFP_TAIL_TOPK", str(tail_topk) if tail_topk is not None else None),
     ):
         for name, path in specs.items():
@@ -151,6 +159,7 @@ def _run_optimizers(
                     "normalization": checkpoint_metadata["normalization"],
                     "required": True,
                     "flow_steps": flow_steps,
+                    "flow_seed": flow_seed,
                     "tail_topk": tail_topk,
                 }
             else:

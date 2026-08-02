@@ -59,6 +59,7 @@ def sample_from_lite_tensors(
     p2b_connectivity: Tensor,
     pins_pos: Tensor,
     fp_sol: Tensor,
+    metrics_sol: Tensor | None = None,
 ) -> DataSample:
     area_constraints = torch.as_tensor(area_constraints)
     if area_constraints.ndim != 2 or area_constraints.shape[1] < 6:
@@ -78,7 +79,32 @@ def sample_from_lite_tensors(
         constraints,
         targets,
     )
-    return DataSample(sample_id, case, extract_labels(case, rectangles))
+    baseline_area = baseline_hpwl = None
+    if metrics_sol is not None:
+        baseline_area, baseline_hpwl = _metrics_baselines(metrics_sol)
+    return DataSample(
+        sample_id,
+        case,
+        extract_labels(
+            case,
+            rectangles,
+            baseline_area=baseline_area,
+            baseline_hpwl=baseline_hpwl,
+        ),
+    )
+
+
+def _metrics_baselines(metrics_sol: Tensor) -> tuple[float, float]:
+    metrics = torch.as_tensor(metrics_sol, dtype=torch.float64).reshape(-1)
+    if metrics.numel() < 8:
+        raise ValueError("metrics_sol must contain at least 8 values")
+    selected = metrics[[0, 6, 7]]
+    if not bool(torch.isfinite(selected).all()) or bool((selected < 0.0).any()):
+        raise ValueError("metrics_sol baselines must be finite and non-negative")
+    baseline_hpwl = selected[1] + selected[2]
+    if not bool(torch.isfinite(baseline_hpwl)):
+        raise ValueError("metrics_sol baselines must be finite and non-negative")
+    return float(selected[0]), float(baseline_hpwl)
 
 
 def score_aware_acceptance(block_count: int) -> float:
@@ -124,6 +150,7 @@ def iter_floorset_lite(
                 payload[2][layout_index],
                 payload[3][layout_index],
                 payload[5][layout_index],
+                payload[6][layout_index] if len(payload) > 6 else None,
             )
             yielded += 1
             if limit is not None and yielded >= limit:

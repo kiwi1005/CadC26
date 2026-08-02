@@ -20,7 +20,14 @@ from hcfp.case import (
     FloorplanCase,
     from_official,
 )
-from hcfp.geometry import centers_from_xywh, log_aspect_from_xywh, normalize_xywh, xywh_from_state
+from hcfp.geometry import (
+    bbox_area_tensor,
+    centers_from_xywh,
+    hpwl_tensor,
+    log_aspect_from_xywh,
+    normalize_xywh,
+    xywh_from_state,
+)
 
 
 REL_LEFT = 0
@@ -48,6 +55,8 @@ class SolutionLabels:
     pairwise_precedence: torch.Tensor
     precedence_tie_mask: torch.Tensor
     outline: torch.Tensor
+    baseline_area: torch.Tensor
+    baseline_hpwl: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -57,7 +66,14 @@ class DataSample:
     labels: SolutionLabels
 
 
-def extract_labels(case: FloorplanCase, solution_xywh: Any, *, normalized: bool = False) -> SolutionLabels:
+def extract_labels(
+    case: FloorplanCase,
+    solution_xywh: Any,
+    *,
+    normalized: bool = False,
+    baseline_area: Any | None = None,
+    baseline_hpwl: Any | None = None,
+) -> SolutionLabels:
     rects = torch.as_tensor(solution_xywh, dtype=torch.float32, device=case.area.device).reshape(case.n, 4)
     if not normalized:
         rects = normalize_xywh(case, rects)
@@ -72,7 +88,41 @@ def extract_labels(case: FloorplanCase, solution_xywh: Any, *, normalized: bool 
     height = (top - bottom).clamp_min(1.0e-12)
     utilization = case.area.sum() / (width * height)
     outline = torch.stack((width, height, utilization, width / height)).float()
-    return SolutionLabels(rects.float(), centers.float(), log_aspect.float(), relation, tie, outline)
+    derived = _raw_baselines(case, rects) if baseline_area is None or baseline_hpwl is None else None
+    area = derived[0] if baseline_area is None else _baseline_scalar("baseline_area", baseline_area, case.area.device)
+    hpwl = derived[1] if baseline_hpwl is None else _baseline_scalar("baseline_hpwl", baseline_hpwl, case.area.device)
+    return SolutionLabels(
+        rects.float(),
+        centers.float(),
+        log_aspect.float(),
+        relation,
+        tie,
+        outline,
+        area,
+        hpwl,
+    )
+
+
+def _raw_baselines(
+    case: FloorplanCase,
+    rectangles: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    area = bbox_area_tensor(rectangles) * (case.scale * case.scale)
+    hpwl = hpwl_tensor(case, centers_from_xywh(rectangles)) * case.scale
+    return (
+        _baseline_scalar("baseline_area", area, case.area.device),
+        _baseline_scalar("baseline_hpwl", hpwl, case.area.device),
+    )
+
+
+def _baseline_scalar(name: str, value: Any, device: torch.device) -> torch.Tensor:
+    scalar = torch.as_tensor(value, dtype=torch.float32, device=device)
+    if scalar.numel() != 1:
+        raise ValueError(f"{name} must be a scalar")
+    scalar = scalar.reshape(())
+    if not bool(torch.isfinite(scalar)) or float(scalar) < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative")
+    return scalar
 
 
 def pairwise_precedence(rects: torch.Tensor, tol: float = 1.0e-7) -> tuple[torch.Tensor, torch.Tensor]:
@@ -109,7 +159,17 @@ def transform_sample(sample: DataSample, name: str) -> DataSample:
     bounds = _rect_bounds(sample.labels.rectangles)
     case = _transform_case(sample.case, name, bounds)
     rects = _transform_rectangles(sample.labels.rectangles, name, bounds)
-    return DataSample(f"{sample.sample_id}:{name}", case, extract_labels(case, rects, normalized=True))
+    return DataSample(
+        f"{sample.sample_id}:{name}",
+        case,
+        extract_labels(
+            case,
+            rects,
+            normalized=True,
+            baseline_area=sample.labels.baseline_area,
+            baseline_hpwl=sample.labels.baseline_hpwl,
+        ),
+    )
 
 
 def inverse_transform(name: str) -> str:
@@ -215,10 +275,11 @@ def sample_to_payload(sample: DataSample) -> dict[str, Any]:
 
 
 def sample_from_payload(payload: dict[str, Any]) -> DataSample:
+    case = case_from_payload(payload["case"])
     sample = DataSample(
         str(payload["sample_id"]),
-        case_from_payload(payload["case"]),
-        labels_from_payload(payload["labels"]),
+        case,
+        labels_from_payload(payload["labels"], case=case),
     )
     validate_sample(sample)
     return sample
@@ -278,14 +339,35 @@ def labels_to_payload(labels: SolutionLabels) -> dict[str, Any]:
     return {key: value.detach().cpu().tolist() for key, value in asdict(labels).items()}
 
 
-def labels_from_payload(payload: dict[str, Any]) -> SolutionLabels:
+def labels_from_payload(
+    payload: dict[str, Any],
+    *,
+    case: FloorplanCase | None = None,
+) -> SolutionLabels:
+    rectangles = torch.as_tensor(payload["rectangles"], dtype=torch.float32)
+    centers = torch.as_tensor(payload["centers"], dtype=torch.float32)
+    missing_area = "baseline_area" not in payload
+    missing_hpwl = "baseline_hpwl" not in payload
+    if (missing_area or missing_hpwl) and case is None:
+        raise ValueError("legacy label payload needs case data to derive baselines")
+    derived = _raw_baselines(case, rectangles) if missing_area or missing_hpwl else None
+    if "baseline_area" in payload:
+        baseline_area = _baseline_scalar("baseline_area", payload["baseline_area"], rectangles.device)
+    else:
+        baseline_area = derived[0]
+    if "baseline_hpwl" in payload:
+        baseline_hpwl = _baseline_scalar("baseline_hpwl", payload["baseline_hpwl"], rectangles.device)
+    else:
+        baseline_hpwl = derived[1]
     return SolutionLabels(
-        rectangles=torch.as_tensor(payload["rectangles"], dtype=torch.float32),
-        centers=torch.as_tensor(payload["centers"], dtype=torch.float32),
+        rectangles=rectangles,
+        centers=centers,
         log_aspect=torch.as_tensor(payload["log_aspect"], dtype=torch.float32),
         pairwise_precedence=torch.as_tensor(payload["pairwise_precedence"], dtype=torch.long),
         precedence_tie_mask=torch.as_tensor(payload["precedence_tie_mask"], dtype=torch.bool),
         outline=torch.as_tensor(payload["outline"], dtype=torch.float32),
+        baseline_area=baseline_area,
+        baseline_hpwl=baseline_hpwl,
     )
 
 
@@ -295,6 +377,8 @@ def validate_sample(sample: DataSample) -> None:
     case, labels = sample.case, sample.labels
     if labels.rectangles.shape != (case.n, 4):
         raise ValueError("label rectangles must have shape [N,4]")
+    _baseline_scalar("baseline_area", labels.baseline_area, labels.rectangles.device)
+    _baseline_scalar("baseline_hpwl", labels.baseline_hpwl, labels.rectangles.device)
     if not bool(torch.isfinite(labels.rectangles).all()) or not bool((labels.rectangles[:, 2:4] > 0.0).all()):
         raise ValueError("label rectangles must be finite with positive dimensions")
     actual_area = labels.rectangles[:, 2:4].prod(dim=1)

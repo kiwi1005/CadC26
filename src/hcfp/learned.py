@@ -55,6 +55,7 @@ class LearnedConfig:
     max_position_residual: float = 0.50
     max_aspect_residual: float = 1.0
     tail_topk: int | None = None
+    seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.flow_steps < 0:
@@ -99,7 +100,11 @@ def analyze_case_with_checkpoint(
             case,
             model,
             learned_cfg,
-            seed=int(str(metadata["state_hash"])[:8], 16),
+            seed=(
+                int(str(metadata["state_hash"])[:8], 16)
+                if learned_cfg.seed is None
+                else learned_cfg.seed
+            ),
         )
         if population.shape[0] != cfg.dynamics.population:
             cfg = replace(cfg, dynamics=replace(cfg.dynamics, population=int(population.shape[0])))
@@ -192,9 +197,11 @@ def _field(source: Any, name: str) -> Any:
 def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedConfig:
     if config is None:
         tail = os.environ.get("HCFP_TAIL_TOPK")
+        seed = os.environ.get("HCFP_FLOW_SEED")
         return LearnedConfig(
             flow_steps=int(os.environ.get("HCFP_FLOW_STEPS", "6")),
             tail_topk=int(tail) if tail else None,
+            seed=int(seed) if seed is not None else None,
         )
     if isinstance(config, AnalyticConfig):
         return LearnedConfig(analytic=config)

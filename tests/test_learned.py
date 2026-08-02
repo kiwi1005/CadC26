@@ -10,7 +10,7 @@ from hcfp.analytic import AnalyticConfig
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
-from hcfp.learned import LearnedConfig, solve_case_with_checkpoint
+from hcfp.learned import LearnedConfig, analyze_case_with_checkpoint, solve_case_with_checkpoint
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.verify import verify_feasible
 
@@ -115,6 +115,24 @@ def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:
     assert result.used_checkpoint is True
     assert result.candidate_count == 3
     assert verify_feasible(_case(), result.selected)
+
+
+def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(tmp_path: Path) -> None:
+    first = tmp_path / "first.pt"
+    second = tmp_path / "second.pt"
+    model = HCFPModel(ModelConfig(hidden_dim=16))
+    save_checkpoint(model, first, RUNTIME_NORMALIZATION)
+    with torch.no_grad():
+        for parameter in model.ranker.parameters():
+            parameter.add_(0.25)
+    save_checkpoint(model, second, RUNTIME_NORMALIZATION)
+    config = LearnedConfig(analytic=_config(), flow_steps=1, seed=17)
+
+    first_analysis = analyze_case_with_checkpoint(_case(), first, config)
+    second_analysis = analyze_case_with_checkpoint(_case(), second, config)
+
+    assert first_analysis.result.checkpoint_hash != second_analysis.result.checkpoint_hash
+    assert torch.equal(first_analysis.analytic.raw_candidates, second_analysis.analytic.raw_candidates)
 
 
 def test_missing_checkpoint_fails_closed_to_analytic_lane(tmp_path: Path) -> None:

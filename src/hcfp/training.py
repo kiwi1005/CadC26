@@ -193,4 +193,6 @@ def _labels_to(labels: SolutionLabels, device: torch.device) -> SolutionLabels:
         pairwise_precedence=labels.pairwise_precedence.to(device=device),
         precedence_tie_mask=labels.precedence_tie_mask.to(device=device),
         outline=labels.outline.to(device=device),
+        baseline_area=labels.baseline_area.to(device=device),
+        baseline_hpwl=labels.baseline_hpwl.to(device=device),
     )

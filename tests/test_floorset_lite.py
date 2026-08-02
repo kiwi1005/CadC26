@@ -27,7 +27,7 @@ def _layout_payload() -> list[torch.Tensor]:
     pins = torch.tensor([[[-1.0, -1.0]]])
     tree = torch.zeros(1, 2, 3)
     fp_sol = torch.tensor([[[2.0, 2.0, 0.0, 0.0], [3.0, 3.0, 3.0, 0.0], [4.0, 4.0, 0.0, 4.0]]])
-    metrics = torch.zeros(1, 8)
+    metrics = torch.tensor([[120.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, 3.0]])
     return [area_constraints, b2b, p2b, pins, tree, fp_sol, metrics]
 
 
@@ -36,7 +36,15 @@ def test_lite_rectangles_and_targets_match_official_semantics() -> None:
     rectangles = fp_sol_to_xywh(payload[5][0], 3)
     constraints = payload[0][0, :, 1:6]
     targets = target_positions_from_solution(constraints, rectangles)
-    sample = sample_from_lite_tensors("worker/layout:0", payload[0][0], payload[1][0], payload[2][0], payload[3][0], payload[5][0])
+    sample = sample_from_lite_tensors(
+        "worker/layout:0",
+        payload[0][0],
+        payload[1][0],
+        payload[2][0],
+        payload[3][0],
+        payload[5][0],
+        payload[6][0],
+    )
 
     assert torch.equal(rectangles[0], torch.tensor([0.0, 0.0, 2.0, 2.0]))
     assert torch.equal(targets[0], rectangles[0])
@@ -44,6 +52,8 @@ def test_lite_rectangles_and_targets_match_official_semantics() -> None:
     assert torch.equal(targets[2], torch.full((4,), -1.0))
     assert sample.case.preplaced_mask.tolist() == [True, False, False]
     assert sample.case.fixed_mask.tolist() == [False, True, False]
+    assert sample.labels.baseline_area.item() == pytest.approx(120.0)
+    assert sample.labels.baseline_hpwl.item() == pytest.approx(10.0)
 
 
 def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: Path) -> None:
@@ -54,7 +64,27 @@ def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: 
     samples = list(iter_floorset_lite(tmp_path, limit=1))
 
     assert [sample.sample_id for sample in samples] == ["worker_0/layouts_0.pth:0"]
+    assert samples[0].labels.baseline_area.item() == pytest.approx(120.0)
+    assert samples[0].labels.baseline_hpwl.item() == pytest.approx(10.0)
     assert not list(tmp_path.rglob("*.tar"))
+
+
+@pytest.mark.parametrize(("index", "value"), [(0, -1.0), (6, float("nan"))])
+def test_lite_metrics_reject_invalid_baselines(index: int, value: float) -> None:
+    payload = _layout_payload()
+    metrics = payload[6][0].clone()
+    metrics[index] = value
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        sample_from_lite_tensors(
+            "worker/layout:0",
+            payload[0][0],
+            payload[1][0],
+            payload[2][0],
+            payload[3][0],
+            payload[5][0],
+            metrics,
+        )
 
 
 def test_visible_validation_path_is_rejected(tmp_path: Path) -> None:

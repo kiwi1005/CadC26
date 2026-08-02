@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         default=AnalyticConfig().direction_beam,
     )
     parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
     args = parser.parse_args(argv)
 
@@ -73,6 +74,7 @@ def main(argv: list[str] | None = None) -> int:
         analytic=analytic,
         flow_steps=args.flow_steps,
         tail_topk=args.tail_topk,
+        seed=args.flow_seed,
     )
 
     data_path = Path(args.data_path)
@@ -112,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             "projection_steps": args.projection_steps,
             "direction_beam": args.direction_beam,
             "flow_steps": args.flow_steps,
+            "flow_seed": args.flow_seed,
             "tail_topk": args.tail_topk,
         },
         "cases": cases,

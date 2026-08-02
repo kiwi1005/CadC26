@@ -273,10 +273,12 @@ post-projection 價值，降低無效 BDP 與 exact tail 次數。
   perturb、component translation、boundary slot change。
 - `[ ] P5.4` 先用 exhaustive small-component replay 產生 BDP direction outcome，
   再訓練 direction proposal；exact projector 仍負責最後判定。
-- `[x] P5.5` repair-aware ranker 已由 32-record exact replay 訓練 500 steps，
-  loss `0.318158 -> 0.125271`；checkpoint 維持 default-off。
+- `[x] P5.5` official baseline 已由 `metrics_sol` 進入 schema-v2 exact replay；
+  32-record selector 訓練 2000 steps，heldout16 top-1 `5 -> 8`、mean regret
+  `0.266364 -> 0.090488`，checkpoint 維持 default-off。
 - `[~] P5.6` top-M 只裁 learned 增量並永遠保留完整 analytic candidates；top-4
-  已降低三案 tail runtime，但 top-1 regret、top-M recall 與 calibration 尚未達 gate。
+  official 100 維持 100/100 feasible，但 weighted uncapped objective 退步 6.57%，
+  runtime p95 為 analytic 的 2.26x，且 cases 88/97 regression，維持 HOLD。
 
 ### 退出條件
 
@@ -325,7 +327,9 @@ post-projection 價值，降低無效 BDP 與 exact tail 次數。
 
 - `[ ] P7.1` internal dev／test 各跑固定多 seeds，輸出 per-case exact metrics、
   failure atlas、weighted score、median/p95/p99 與 fallback rate。
-- `[~] P7.2` 106–120 bucket 已驗 15/15 hard-feasible並辨識 case 88/97；
+- `[~] P7.2` 106–120 bucket 已驗 15/15 hard-feasible；uncapped weighted objective
+  退步 15.99%，case 88/97 regression，preplaced/group/MIB/boundary-heavy 與
+  disconnected-net 分層待補。
   preplaced/group/MIB/boundary-heavy 與 disconnected-net 分層待補。
 - `[~] P7.3` 已固定 analytic vs additive flow+ranker ablation與相同 exact tail；
   CAL/ETR、完整 PVR 與 acceleration 尚未進 gate。

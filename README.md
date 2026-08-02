@@ -79,6 +79,10 @@ PYTHONPATH=src python scripts/train_hcfp_ranker.py \
   artifacts/replay/hcfp-exact-tail.jsonl \
   --checkpoint artifacts/checkpoints/hcfp-flow.pt \
   --output artifacts/checkpoints/hcfp-ranked.pt --steps 500 --device cuda
+PYTHONPATH=src python scripts/eval_hcfp_ranker.py \
+  --replay heldout=artifacts/replay/hcfp-exact-tail-heldout.jsonl \
+  --checkpoint ranked=artifacts/checkpoints/hcfp-ranked.pt \
+  --output artifacts/benchmarks/hcfp-ranker-regret.json --device cuda
 PYTHONPATH=src python scripts/audit_hcfp_oracle.py \
   --data-path artifacts/floorset-v10 \
   --checkpoint artifacts/checkpoints/hcfp-ranked.pt \
@@ -117,6 +121,9 @@ and current HOLD decision are recorded in
 [`docs/research/hcfp5090_training_closed_loop_2026-08-01.md`](docs/research/hcfp5090_training_closed_loop_2026-08-01.md).
 The raw-safe reselection implementation and 100-case evidence are recorded in
 [`docs/research/hcfp5090_raw_reselection_2026-08-02.md`](docs/research/hcfp5090_raw_reselection_2026-08-02.md).
+The official-baseline replay, selector training, deterministic seed contract,
+and latest 100-case HOLD decision are recorded in
+[`docs/research/hcfp5090_official_selector_results_2026-08-02.md`](docs/research/hcfp5090_official_selector_results_2026-08-02.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,

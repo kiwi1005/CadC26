@@ -63,6 +63,8 @@ def test_extract_labels_has_geometry_and_pairwise_precedence() -> None:
     assert labels.pairwise_precedence.shape == (4, 4)
     assert labels.precedence_tie_mask.shape == (4, 4)
     assert labels.outline.shape == (4,)
+    assert labels.baseline_area.item() == pytest.approx(100.0)
+    assert labels.baseline_hpwl.item() == pytest.approx(50.0)
     assert int(labels.pairwise_precedence[0, 1]) == 0
     assert int(labels.pairwise_precedence[2, 0]) == 2
     assert bool(labels.precedence_tie_mask[0, 0])
@@ -80,6 +82,10 @@ def test_d4_transform_roundtrip_preserves_area_and_remaps_boundary() -> None:
     assert torch.equal(rotated.case.boundary_bits[3], torch.tensor([False, True, False, False]))
     assert torch.allclose(restored.labels.rectangles, sample.labels.rectangles, atol=1.0e-6)
     assert torch.equal(restored.case.boundary_bits, sample.case.boundary_bits)
+    assert torch.equal(rotated.labels.baseline_area, sample.labels.baseline_area)
+    assert torch.equal(rotated.labels.baseline_hpwl, sample.labels.baseline_hpwl)
+    assert torch.equal(restored.labels.baseline_area, sample.labels.baseline_area)
+    assert torch.equal(restored.labels.baseline_hpwl, sample.labels.baseline_hpwl)
 
 
 def test_diagonal_pair_is_ambiguous_instead_of_arbitrary_axis() -> None:
@@ -111,6 +117,20 @@ def test_shard_roundtrip_and_checksum(tmp_path: Path) -> None:
     assert len(loaded) == 1
     assert loaded[0].sample_id == "toy-0"
     assert torch.allclose(loaded[0].labels.rectangles, _sample().labels.rectangles)
+    assert torch.equal(loaded[0].labels.baseline_area, _sample().labels.baseline_area)
+    assert torch.equal(loaded[0].labels.baseline_hpwl, _sample().labels.baseline_hpwl)
+
+
+def test_legacy_payload_derives_raw_baselines_from_rectangles_and_case() -> None:
+    sample = _sample()
+    payload = json.loads(json.dumps(sample_to_payload(sample)))
+    del payload["labels"]["baseline_area"]
+    del payload["labels"]["baseline_hpwl"]
+
+    loaded = sample_from_payload(payload)
+
+    assert torch.equal(loaded.labels.baseline_area, sample.labels.baseline_area)
+    assert torch.equal(loaded.labels.baseline_hpwl, sample.labels.baseline_hpwl)
 
 
 def test_build_shards_cli_skips_denylisted_validation_ids(tmp_path: Path) -> None:
