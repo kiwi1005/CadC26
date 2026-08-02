@@ -166,6 +166,20 @@ def test_activation_failure_reason_requires_infeasible_learned_outcome() -> None
         )
 
 
+def test_activation_split_schedule_interleaves_exact_counts() -> None:
+    from scripts.generate_hcfp_activation_replay import _interleaved_split_names
+
+    schedule = _interleaved_split_names({"train": 256, "calibration": 64, "heldout": 64})
+
+    assert len(schedule) == 384
+    assert schedule.count("train") == 256
+    assert schedule.count("calibration") == 64
+    assert schedule.count("heldout") == 64
+    assert schedule[:6].count("train") == 4
+    assert schedule[:6].count("calibration") == 1
+    assert schedule[:6].count("heldout") == 1
+
+
 def test_activation_outcome_uses_uncapped_runtime_independent_objective() -> None:
     case, analysis = _analysis()
     outcome = activation_outcome(

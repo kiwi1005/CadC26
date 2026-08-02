@@ -103,14 +103,15 @@ def main(argv: list[str] | None = None) -> int:
     ).hexdigest()
 
     total = sum(counts.values())
-    records = []
-    for sample, source in iter_floorset_lite_with_source(
+    split_records: dict[str, list[ActivationRecord]] = {name: [] for name in counts}
+    source_stream = iter_floorset_lite_with_source(
         args.floorset_lite_root,
         limit=total,
         seed=args.seed,
         score_aware=args.score_aware,
-    ):
-        records.append(
+    )
+    for split_name, (sample, source) in zip(_interleaved_split_names(counts), source_stream):
+        split_records[split_name].append(
             _record(
                 sample,
                 model,
@@ -121,18 +122,14 @@ def main(argv: list[str] | None = None) -> int:
                 source,
             )
         )
-    if len(records) != total:
-        raise RuntimeError(f"activation source produced {len(records)} records, expected {total}")
-    sample_ids = [record.sample_id for record in records]
+    produced = sum(len(records) for records in split_records.values())
+    if produced != total:
+        raise RuntimeError(f"activation source produced {produced} records, expected {total}")
+    sample_ids = [record.sample_id for records in split_records.values() for record in records]
     if len(sample_ids) != len(set(sample_ids)):
         raise RuntimeError("activation source produced duplicate sample IDs")
 
     prefix = Path(args.output_prefix)
-    split_records = {}
-    offset = 0
-    for name, count in counts.items():
-        split_records[name] = records[offset : offset + count]
-        offset += count
     paths = {name: Path(f"{prefix}.{name}.jsonl") for name in counts}
     reports = {}
     for name, subset in split_records.items():
@@ -143,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
             "records": len(subset),
             "positives": sum(record.tail_needed for record in subset),
             "learned_failures": sum(record.failure_reason is not None for record in subset),
+            "block_count_buckets": _block_count_buckets(subset),
             "sample_id_sha256": hashlib.sha256(
                 "\n".join(record.sample_id for record in subset).encode()
             ).hexdigest(),
@@ -308,6 +306,30 @@ def _standalone_wrapper(analytic) -> LearnedAnalysis:
     )
     guarded = replace(analytic, incumbent_snapshot=snapshot)
     return LearnedAnalysis(LearnedResult(analytic.selected, False, None, None), guarded)
+
+
+def _interleaved_split_names(counts: dict[str, int]) -> list[str]:
+    """Interleave exact split counts so source-file buckets cannot segregate them."""
+
+    total = sum(counts.values())
+    assigned = {name: 0 for name in counts}
+    result = []
+    for position in range(total):
+        available = [name for name in counts if assigned[name] < counts[name]]
+        selected = max(
+            available,
+            key=lambda name: ((position + 1) * counts[name] / total - assigned[name]),
+        )
+        assigned[selected] += 1
+        result.append(selected)
+    return result
+
+
+def _block_count_buckets(records: list[ActivationRecord]) -> dict[str, int]:
+    return {
+        f"{lower}-{upper}": sum(lower <= record.block_count <= upper for record in records)
+        for lower, upper in ((1, 32), (33, 64), (65, 96), (97, 105), (106, 120))
+    }
 
 
 if __name__ == "__main__":
