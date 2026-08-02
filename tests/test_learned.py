@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from hcfp.analytic import AnalyticConfig
+from hcfp.analytic import AnalyticConfig, solve_case_with_telemetry
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
@@ -74,6 +75,82 @@ def _analysis(*, used_checkpoint: bool = True) -> SimpleNamespace:
     )
 
 
+def _pareto_analysis(
+    *,
+    analytic_metrics: tuple[float, float, float] = (1.0, 10.0, 10.0),
+    analytic_source: str = "candidate_2",
+    analytic_exact_source: str = "candidate_2",
+    analytic_fast_source: str = "candidate_1",
+) -> SimpleNamespace:
+    candidates = torch.stack(
+        [
+            torch.tensor([[x, 0.0, 2.0, 2.0], [x + 3.0, 0.0, 2.0, 2.0]])
+            for x in (0.0, 10.0, 20.0, 30.0, 40.0)
+        ]
+    )
+    soft, area, hpwl = analytic_metrics
+    return SimpleNamespace(
+        result=SimpleNamespace(
+            selected=candidates[2],
+            used_checkpoint=True,
+            failure_reason=None,
+            candidate_count=2,
+        ),
+        analytic=SimpleNamespace(
+            projected_candidates=candidates,
+            incumbent_snapshot={
+                "exact_source": analytic_source,
+                "analytic_exact_source": analytic_exact_source,
+                "analytic_fast_source": analytic_fast_source,
+            },
+            telemetry=SimpleNamespace(
+                hard_feasible=torch.tensor([True, False, True, True, True]),
+                soft_violation=torch.tensor([4.0, soft, 2.0, 3.0, 0.0]),
+                bbox_area=torch.tensor([40.0, area, 20.0, 5.0, 1.0]),
+                hpwl=torch.tensor([40.0, hpwl, 20.0, 5.0, 1.0]),
+            ),
+        ),
+    )
+
+
+def _pareto_config() -> AnalyticConfig:
+    return AnalyticConfig(
+        dynamics=DynamicsConfig(population=1, steps=0),
+        projection_iterations=4,
+        direction_beam=1,
+    )
+
+
+def _solve_pareto(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    analysis: SimpleNamespace,
+    *,
+    feasible_x: set[float],
+    quality: dict[float, tuple[float, float, float]],
+):
+    import hcfp.learned as learned
+
+    conversions: list[float] = []
+
+    def to_official(_source, _case, candidate):
+        x = float(candidate[0, 0])
+        conversions.append(x)
+        return [(x, 0.0, 2.0, 2.0), (x + 3.0, 0.0, 2.0, 2.0)]
+
+    monkeypatch.setattr(learned, "analyze_case_with_checkpoint", lambda *_args: analysis)
+    monkeypatch.setattr(learned, "to_official_placements", to_official)
+    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] in feasible_x)
+    monkeypatch.setattr(learned, "_raw_quality", lambda _source, _case, rows: quality[rows[0][0]])
+    result = learned.solve(
+        _source(),
+        checkpoint=tmp_path / "model.pt",
+        config=_pareto_config(),
+        require_checkpoint=True,
+    )
+    return result, conversions
+
+
 def test_checkpoint_lane_runs_through_exact_safe_tail(tmp_path: Path) -> None:
     torch.manual_seed(5)
     checkpoint = tmp_path / "model.pt"
@@ -115,6 +192,42 @@ def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:
     assert result.used_checkpoint is True
     assert result.candidate_count == 3
     assert verify_feasible(_case(), result.selected)
+
+
+def test_split_tail_preserves_standalone_analytic_candidates(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+
+    analysis = analyze_case_with_checkpoint(_case(), checkpoint, _config())
+    standalone = solve_case_with_telemetry(_case(), _config())
+
+    assert torch.equal(analysis.analytic.raw_candidates[:3], standalone.raw_candidates[:3])
+    assert torch.equal(analysis.analytic.raw_candidates[5:7], standalone.raw_candidates[3:5])
+    assert torch.equal(analysis.analytic.projected_candidates[:3], standalone.projected_candidates[:3])
+    assert torch.equal(analysis.analytic.projected_candidates[5:7], standalone.projected_candidates[3:5])
+    assert analysis.analytic.incumbent_snapshot["analytic_exact_source"] is not None
+    assert analysis.analytic.incumbent_snapshot["analytic_fast_source"] is not None
+
+
+def test_split_tail_carries_normalized_infeasible_analytic_fast_source() -> None:
+    import hcfp.learned as learned
+
+    standalone = solve_case_with_telemetry(_case(), _config())
+    hard = standalone.telemetry.hard_feasible.clone()
+    projection_ok = standalone.telemetry.projection_ok.clone()
+    hard[1] = False
+    projection_ok[1:3] = True
+    analytic = replace(
+        standalone,
+        telemetry=replace(standalone.telemetry, hard_feasible=hard, projection_ok=projection_ok),
+        incumbent_snapshot={"exact_source": "candidate_2", "fast_source": "candidate_1"},
+    )
+
+    merged = learned._merge_tail_analyses(_case(), analytic, standalone)
+
+    assert merged.incumbent_snapshot["analytic_exact_source"] == "candidate_2"
+    assert merged.incumbent_snapshot["analytic_fast_source"] == "candidate_1"
+    assert not bool(merged.telemetry.hard_feasible[1])
 
 
 def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(tmp_path: Path) -> None:
@@ -318,6 +431,79 @@ def test_raw_feasible_selected_keeps_fast_path_without_pool_scan(
 
     assert result == expected
     assert conversions == 1
+
+
+def test_raw_feasible_analytic_dominator_replaces_selected_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, _ = _solve_pareto(
+        monkeypatch,
+        tmp_path,
+        _pareto_analysis(),
+        feasible_x={10.0, 20.0},
+        quality={10.0: (1.0, 10.0, 10.0), 20.0: (2.0, 20.0, 20.0)},
+    )
+    assert result[0][0] == 10.0
+
+
+def test_raw_infeasible_or_tradeoff_candidate_cannot_trigger_pareto_guard(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, _ = _solve_pareto(
+        monkeypatch,
+        tmp_path,
+        _pareto_analysis(),
+        feasible_x={20.0},
+        quality={10.0: (1.0, 10.0, 10.0), 20.0: (2.0, 20.0, 20.0)},
+    )
+    assert result[0][0] == 20.0
+
+    result, _ = _solve_pareto(
+        monkeypatch,
+        tmp_path,
+        _pareto_analysis(),
+        feasible_x={10.0, 20.0},
+        quality={10.0: (1.0, 30.0, 10.0), 20.0: (2.0, 20.0, 20.0)},
+    )
+    assert result[0][0] == 20.0
+
+
+def test_unknown_incumbent_source_fails_closed_to_selected_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, _ = _solve_pareto(
+        monkeypatch,
+        tmp_path,
+        _pareto_analysis(
+            analytic_source="unknown",
+            analytic_exact_source="unknown",
+            analytic_fast_source="unknown",
+        ),
+        feasible_x={10.0, 20.0},
+        quality={},
+    )
+    assert result[0][0] == 20.0
+
+
+def test_selected_analytic_incumbent_skips_extra_pareto_conversion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, conversions = _solve_pareto(
+        monkeypatch,
+        tmp_path,
+        _pareto_analysis(
+            analytic_exact_source="candidate_2",
+            analytic_fast_source="candidate_2",
+        ),
+        feasible_x={20.0},
+        quality={},
+    )
+    assert result[0][0] == 20.0
+    assert conversions == [20.0]
 
 
 def test_require_checkpoint_failure_does_not_scan_pool_or_replay_analytic(
