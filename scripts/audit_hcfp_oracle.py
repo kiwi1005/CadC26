@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Attribute raw and post-BDP candidate quality with the pinned official evaluator."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+from typing import Any
+
+import torch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from benchmark_hcfp import _case_ids, _load_evaluator, _provenance  # noqa: E402
+from hcfp.analytic import AnalyticConfig, select_device, to_official_placements  # noqa: E402
+from hcfp.benchmark import (  # noqa: E402
+    candidate_oracles,
+    candidate_source_layout,
+    summarize_attribution_cases,
+    uncapped_objective,
+)
+from hcfp.case import from_official  # noqa: E402
+from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
+from hcfp.dynamics import DynamicsConfig  # noqa: E402
+from hcfp.learned import LearnedConfig, analyze_case_with_checkpoint  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-path", default="artifacts/floorset-v10")
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--cases", default="all", help="all or comma-separated validation ids")
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--population", type=int, default=8)
+    parser.add_argument("--dynamics-steps", type=int, default=DynamicsConfig().steps)
+    parser.add_argument(
+        "--projection-steps",
+        type=int,
+        default=AnalyticConfig().projection_iterations,
+    )
+    parser.add_argument(
+        "--direction-beam",
+        type=int,
+        default=AnalyticConfig().direction_beam,
+    )
+    parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--tail-topk", type=int)
+    args = parser.parse_args(argv)
+
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.use_deterministic_algorithms(True)
+    torch.manual_seed(0)
+    checkpoint = Path(args.checkpoint)
+    _, checkpoint_metadata = load_checkpoint(
+        checkpoint,
+        expected_normalization=RUNTIME_NORMALIZATION,
+        map_location="cpu",
+    )
+    checkpoint_hash = str(checkpoint_metadata["state_hash"])
+    device = select_device(args.device)
+    analytic = AnalyticConfig(
+        dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
+        projection_iterations=args.projection_steps,
+        direction_beam=args.direction_beam,
+    )
+    config = LearnedConfig(
+        analytic=analytic,
+        flow_steps=args.flow_steps,
+        tail_topk=args.tail_topk,
+    )
+
+    data_path = Path(args.data_path)
+    evaluator_module = _load_evaluator(data_path)
+    evaluator = evaluator_module.ContestEvaluator(str(data_path), verbose=False)
+    evaluator._load_dataset()
+    requested = _case_ids(args.cases)
+    test_ids = list(range(len(evaluator.dataset))) if requested is None else sorted(set(requested))
+    cases = [
+        _audit_case(
+            evaluator_module,
+            evaluator,
+            test_id,
+            checkpoint,
+            checkpoint_hash,
+            device,
+            config,
+            args.population,
+        )
+        for test_id in test_ids
+    ]
+    large_cases = [case for case in cases if 106 <= int(case["block_count"]) <= 120]
+    provenance = _provenance(data_path, str(device), "oracle_attribution")
+    provenance.update(
+        {
+            "checkpoint": str(checkpoint),
+            "checkpoint_hash": checkpoint_hash,
+            "checkpoint_normalization": checkpoint_metadata["normalization"],
+        }
+    )
+    report = {
+        "schema_version": 1,
+        "provenance": provenance,
+        "config": {
+            "population": args.population,
+            "dynamics_steps": args.dynamics_steps,
+            "projection_steps": args.projection_steps,
+            "direction_beam": args.direction_beam,
+            "flow_steps": args.flow_steps,
+            "tail_topk": args.tail_topk,
+        },
+        "cases": cases,
+        "summary": {
+            "all": summarize_attribution_cases(cases),
+            "106-120": summarize_attribution_cases(large_cases),
+        },
+    }
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(output)
+    print(json.dumps(report["summary"], indent=2, sort_keys=True))
+    return 0
+
+
+def _audit_case(
+    evaluator_module: Any,
+    evaluator: Any,
+    test_id: int,
+    checkpoint: Path,
+    checkpoint_hash: str,
+    device: torch.device,
+    config: LearnedConfig,
+    population: int,
+) -> dict[str, Any]:
+    sample = evaluator.dataset[test_id]
+    inputs, labels = sample["input"], sample["label"]
+    area, b2b, p2b, pins, constraints = inputs
+    block_count = int((area != -1).sum().item())
+    baseline, target_positions = evaluator._extract_baseline(
+        test_id,
+        labels,
+        b2b,
+        p2b,
+        pins,
+        block_count,
+    )
+    optimizer_targets = _optimizer_targets(constraints, target_positions, block_count)
+    source = {
+        "block_count": block_count,
+        "area_targets": area,
+        "b2b_connectivity": b2b,
+        "p2b_connectivity": p2b,
+        "pins_pos": pins,
+        "constraints": constraints,
+        "target_positions": optimizer_targets,
+    }
+    case = from_official(
+        block_count,
+        area,
+        b2b,
+        p2b,
+        pins,
+        constraints,
+        optimizer_targets,
+        device=device,
+    )
+    analysis = analyze_case_with_checkpoint(case, checkpoint, config)
+    if not analysis.result.used_checkpoint or analysis.result.checkpoint_hash != checkpoint_hash:
+        raise RuntimeError(
+            f"case {test_id}: {analysis.result.failure_reason or 'checkpoint was not used'}"
+        )
+
+    learned_count = analysis.result.candidate_count - population
+    sources = candidate_source_layout(population, learned_count)
+    raw = analysis.analytic.raw_candidates
+    projected = analysis.analytic.projected_candidates
+    if len(sources) != raw.shape[0] or raw.shape != projected.shape:
+        raise RuntimeError(
+            f"case {test_id}: source layout {len(sources)} does not match "
+            f"raw/projected candidates {tuple(raw.shape)}/{tuple(projected.shape)}"
+        )
+    metric_args = (baseline, constraints, b2b, p2b, pins, area, target_positions)
+    raw_records = _candidate_records(
+        evaluator_module,
+        source,
+        case,
+        raw,
+        sources,
+        metric_args,
+    )
+    projected_records = _candidate_records(
+        evaluator_module,
+        source,
+        case,
+        projected,
+        sources,
+        metric_args,
+    )
+    incumbent_index, incumbent_source = _incumbent_source(
+        analysis.analytic.incumbent_snapshot.get("exact_source"),
+        sources,
+    )
+    incumbent = _candidate_record(
+        evaluator_module,
+        source,
+        case,
+        analysis.result.selected,
+        incumbent_index,
+        incumbent_source,
+        metric_args,
+    )
+    return {
+        "test_id": test_id,
+        "block_count": block_count,
+        "baseline": {
+            "hpwl": float(baseline["hpwl_baseline"]),
+            "area": float(baseline["area_baseline"]),
+        },
+        "candidate_layout": {
+            "population": population,
+            "learned_count": learned_count,
+            "candidate_count": len(sources),
+        },
+        "raw": {"candidates": raw_records, "oracles": candidate_oracles(raw_records)},
+        "post_bdp": {
+            "candidates": projected_records,
+            "oracles": candidate_oracles(projected_records),
+        },
+        "incumbent": incumbent,
+    }
+
+
+def _optimizer_targets(constraints: torch.Tensor, targets: list[Any], block_count: int) -> torch.Tensor:
+    result = torch.full((block_count, 4), -1.0)
+    columns = constraints.shape[1] if constraints.dim() > 1 else 0
+    for index in range(block_count):
+        fixed = columns > 0 and constraints[index, 0] != 0
+        preplaced = columns > 1 and constraints[index, 1] != 0
+        if preplaced:
+            result[index] = torch.as_tensor(targets[index], dtype=torch.float32)
+        elif fixed:
+            result[index, 2:4] = torch.as_tensor(targets[index][2:4], dtype=torch.float32)
+    return result
+
+
+def _candidate_records(
+    evaluator_module: Any,
+    source: dict[str, Any],
+    case: Any,
+    boxes: torch.Tensor,
+    sources: tuple[str, ...],
+    metric_args: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    return [
+        _candidate_record(
+            evaluator_module,
+            source,
+            case,
+            candidate,
+            index,
+            candidate_source,
+            metric_args,
+        )
+        for index, (candidate_source, candidate) in enumerate(zip(sources, boxes))
+    ]
+
+
+def _candidate_record(
+    evaluator_module: Any,
+    source: dict[str, Any],
+    case: Any,
+    candidate: torch.Tensor,
+    index: int,
+    candidate_source: str,
+    metric_args: tuple[Any, ...],
+) -> dict[str, Any]:
+    positions = to_official_placements(source, case, candidate.detach().to(device="cpu"))
+    metrics = evaluator_module.evaluate_solution(
+        {"positions": positions, "runtime": 1.0},
+        *metric_args,
+        median_runtime=1.0,
+    )
+    objective = uncapped_objective(
+        metrics.hpwl_gap,
+        metrics.area_gap,
+        metrics.violations_relative,
+    )
+    return {
+        "candidate_index": int(index),
+        "source": candidate_source,
+        "hard_feasible": bool(metrics.is_feasible),
+        "hpwl_gap": float(metrics.hpwl_gap),
+        "area_gap": float(metrics.area_gap),
+        "violations_relative": float(metrics.violations_relative),
+        "official_capped_cost": float(metrics.cost),
+        "uncapped_objective": objective,
+    }
+
+
+def _incumbent_source(exact_source: object, sources: tuple[str, ...]) -> tuple[int, str]:
+    value = str(exact_source)
+    if value == "fallback":
+        return 0, "fallback"
+    prefix = "candidate_"
+    if not value.startswith(prefix):
+        raise RuntimeError(f"unknown exact incumbent source: {value}")
+    index = int(value.removeprefix(prefix))
+    if not 0 <= index < len(sources):
+        raise RuntimeError(f"exact incumbent index {index} is outside candidate layout")
+    return index, sources[index]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -79,7 +79,17 @@ PYTHONPATH=src python scripts/train_hcfp_ranker.py \
   artifacts/replay/hcfp-exact-tail.jsonl \
   --checkpoint artifacts/checkpoints/hcfp-flow.pt \
   --output artifacts/checkpoints/hcfp-ranked.pt --steps 500 --device cuda
+PYTHONPATH=src python scripts/audit_hcfp_oracle.py \
+  --data-path artifacts/floorset-v10 \
+  --checkpoint artifacts/checkpoints/hcfp-ranked.pt \
+  --output artifacts/benchmarks/hcfp-oracle-attribution.json \
+  --cases all --device cuda --population 8 --flow-steps 6
 ```
+
+The oracle audit keeps all learned candidates by default, applies the same
+analytic/BDP tail as runtime, and attributes raw and post-BDP official quality
+to fallback, analytic, and learned sources. `--tail-topk` is only for a
+secondary ranker-pruning comparison, not the primary oracle@K measurement.
 
 Set `HCFP_CHECKPOINT=/absolute/path/model.pt` to opt into the learned
 initializer. Loading is schema/hash/normalization checked; any missing,

@@ -37,7 +37,7 @@
 | BDP | `[x]` | 已有 bounded active-pair outer rebuild、方向 beam 與 per-candidate status。 |
 | Official 100-case replay | `[x]` | 完整 runtime 與 fallback-only 均為 100/100 hard-feasible；見 [`hcfp5090_p0_correctness_2026-08-01.md`](hcfp5090_p0_correctness_2026-08-01.md)。 |
 | Data shards／labels | `[~]` | 已盤點 1.008M cases、direct streaming、100-sample raw audit、score-aware sampling；stratified internal split 尚未執行。 |
-| SCENE／POP-INIT | `[~]` | structure 1k + all-head 3k 正式短訓練完成；oracle@K promotion gate 尚未通過。 |
+| SCENE／POP-INIT | `[~]` | structure 1k + all-head 3k 正式短訓練完成；100-case attribution 顯示 learned oracle 0 wins，gate REJECT。 |
 | Rectified flow／controller／ranker | `[~]` | 6-step flow、32-record exact replay、ranker 500-step/top-4 已閉環；QoR/runtime gate HOLD。 |
 | Learned runtime | `[~]` | additive analytic+learned sidecar、raw official replay gate與 100/100 feasibility 已完成；預設關閉。 |
 | Benchmark／visualization | `[x]` | 官方 weighted/bucket report、promotion decision 與 deterministic SVG/HTML 已完成。 |
@@ -215,8 +215,9 @@ P1.8 的 RTX 5090 warm profile 為 p50 `0.957574s`、p95 `0.962069s`、peak
 - `[x] P3.3` 實作 POP-INIT residual population generator，維持 hard projections。
 - `[x] P3.4` checkpoint contract、warm-start、EMA、periodic checkpoints 與
   schema/hash/normalization failure fallback 已完成。
-- `[~] P3.5` 已完成 structure 1k/all-head 3k 短訓練與 post-BDP full replay；
-  raw/post-BDP oracle@K attribution 仍是下一個 gate。
+- `[x] P3.5` 已完成 structure 1k/all-head 3k 短訓練與 100-case raw/post-BDP
+  attribution；raw learned 0/1,600 feasible，post-BDP learned oracle 0 wins，gate
+  REJECT。
 - `[~] P3.6` 已報 106–120 subset 15/15 feasible，並找到 case 88 regression、
   case 97 improvement；constraint-density 分層仍待補。
 
@@ -392,10 +393,10 @@ visualization，且第一輪 1.008M direct-stream training／exact replay 已完
 
 | 優先序 | Task | 輸入 | 必須產出 | Done 證據 |
 | --- | --- | --- | --- | --- |
-| 1 | Oracle/source attribution | trained checkpoint + exact tail | raw/post-BDP oracle@K、winner source | learned candidates 真正優於 analytic |
-| 2 | 擴充 hard-negative replay | case 44/51/88/97 + failure atlas | 數千 exact outcome records | top-M recall／regret 可量測 |
-| 3 | Soft-constraint force repair | grouping/boundary/MIB telemetry | typed-force ablation | 解除 capped cost 且 large case 不退步 |
-| 4 | Raw-margin ranker | denormalized overlap margin | calibrated raw-feasibility feature | 減少 analytic/safe replay 與 p95 |
+| 1 | Raw-safe candidate reselection | 12 raw-infeasible incumbents | candidate-pool retry，不全量重算 | 100/100 feasible 且 p95 下降 |
+| 2 | Official-objective selector labels | training `metrics_sol` + exact tail | baseline-normalized outcome labels | 43-case miss 明顯下降 |
+| 3 | Learned feasibility supervision | raw overlap／BDP／repair telemetry | hard-negative structure/flow loss | learned raw/post-BDP feasibility 上升 |
+| 4 | Soft-constraint force repair | grouping/boundary/MIB telemetry | typed-force ablation | 解除 capped cost 且 large case 不退步 |
 | 5 | Stratified internal split | 1.008M training source | source/split/checksum manifest | validation leakage = 0 |
 
 「框架可執行且已短訓練」不等於 learned lane 已 promotion；只有上述 exact
