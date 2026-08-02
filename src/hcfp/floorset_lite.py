@@ -160,6 +160,7 @@ def iter_floorset_lite(
     limit: int | None = None,
     seed: int | None = None,
     score_aware: bool = False,
+    max_samples_per_file: int | None = None,
 ) -> Iterator[DataSample]:
     """Yield training samples one source file at a time without copying 1M cases."""
 
@@ -168,6 +169,7 @@ def iter_floorset_lite(
         limit=limit,
         seed=seed,
         score_aware=score_aware,
+        max_samples_per_file=max_samples_per_file,
     ):
         yield sample
 
@@ -178,6 +180,7 @@ def iter_floorset_lite_with_source(
     limit: int | None = None,
     seed: int | None = None,
     score_aware: bool = False,
+    max_samples_per_file: int | None = None,
 ) -> Iterator[tuple[DataSample, dict[str, Any]]]:
     """Yield samples with exact official-coordinate sources for raw replay."""
 
@@ -186,6 +189,7 @@ def iter_floorset_lite_with_source(
         limit=limit,
         seed=seed,
         score_aware=score_aware,
+        max_samples_per_file=max_samples_per_file,
     )
 
 
@@ -195,11 +199,14 @@ def _iter_floorset_lite_with_source(
     limit: int | None,
     seed: int | None,
     score_aware: bool,
+    max_samples_per_file: int | None,
 ) -> Iterator[tuple[DataSample, dict[str, Any]]]:
 
     root = Path(root).resolve()
     if any(token in str(root).lower() for token in ("litetensordatatest", "validation", "visible")):
         raise ValueError("visible validation/test paths are forbidden for training")
+    if max_samples_per_file is not None and max_samples_per_file <= 0:
+        raise ValueError("max_samples_per_file must be positive")
     layout_root = root if root.name == "floorset_lite" else root / "floorset_lite"
     files = sorted(layout_root.glob("worker_*/layouts*"))
     if not files:
@@ -213,6 +220,7 @@ def _iter_floorset_lite_with_source(
         layout_indices = list(range(len(payload[0])))
         if seed is not None:
             generator.shuffle(layout_indices)
+        file_yielded = 0
         for layout_index in layout_indices:
             block_count = int((payload[0][layout_index][:, 0] != -1).sum().item())
             if score_aware and generator.random() > score_aware_acceptance(block_count):
@@ -227,5 +235,8 @@ def _iter_floorset_lite_with_source(
                 payload[6][layout_index] if len(payload) > 6 else None,
             )
             yielded += 1
+            file_yielded += 1
             if limit is not None and yielded >= limit:
                 return
+            if max_samples_per_file is not None and file_yielded >= max_samples_per_file:
+                break

@@ -105,6 +105,26 @@ def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: 
     assert torch.equal(sourced[0][1]["target_positions"][0], torch.tensor([0.0, 0.0, 2.0, 2.0]))
 
 
+def test_training_stream_can_cap_samples_per_source_file(tmp_path: Path) -> None:
+    first = tmp_path / "floorset_lite/worker_0/layouts_0.pth"
+    second = tmp_path / "floorset_lite/worker_1/layouts_0.pth"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    doubled = [tensor.repeat((2,) + (1,) * (tensor.ndim - 1)) for tensor in _layout_payload()]
+    torch.save(doubled, first)
+    torch.save(_layout_payload(), second)
+
+    samples = list(
+        iter_floorset_lite(
+            tmp_path,
+            limit=2,
+            max_samples_per_file=1,
+        )
+    )
+
+    assert [sample.sample_id.split("/")[0] for sample in samples] == ["worker_0", "worker_1"]
+
+
 @pytest.mark.parametrize(("index", "value"), [(0, -1.0), (6, float("nan"))])
 def test_lite_metrics_reject_invalid_baselines(index: int, value: float) -> None:
     payload = _layout_payload()
