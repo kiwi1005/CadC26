@@ -13,6 +13,23 @@ sys.path.insert(0, str(ROOT / "src"))
 from hcfp import verify as v  # noqa: E402
 
 
+def _scalar_overlap_pairs(xywh, eps: float) -> tuple[tuple[int, int], ...]:
+    boxes = v.as_xywh(xywh)
+    pairs = []
+    for i in range(int(boxes.shape[0])):
+        for j in range(i + 1, int(boxes.shape[0])):
+            a, b = boxes[i], boxes[j]
+            overlap_x = min(float(a[0] + a[2]), float(b[0] + b[2])) - max(
+                float(a[0]), float(b[0])
+            )
+            overlap_y = min(float(a[1] + a[3]), float(b[1] + b[3])) - max(
+                float(a[1]), float(b[1])
+            )
+            if overlap_x > eps and overlap_y > eps:
+                pairs.append((i, j))
+    return tuple(pairs)
+
+
 @dataclass(frozen=True)
 class Case:
     area: torch.Tensor
@@ -40,6 +57,53 @@ def test_overlap_epsilon_and_edge_touching() -> None:
     assert v.overlap_pairs(tiny) == ()
     assert v.overlap_pairs(positive) == ((0, 1),)
     assert v.overlap_pairs(thin_but_official_overlap) == ((0, 1),)
+
+
+def test_overlap_strict_epsilon_boundary_by_one_ulp() -> None:
+    eps = torch.tensor(0.125, dtype=torch.float64)
+    below = torch.nextafter(eps, torch.tensor(float("-inf"), dtype=torch.float64))
+    above = torch.nextafter(eps, torch.tensor(float("inf"), dtype=torch.float64))
+
+    def boxes(width: torch.Tensor) -> torch.Tensor:
+        return torch.tensor(
+            [[0.0, 0.0, 1.0, 1.0], [0.0, 0.0, float(width), 1.0]],
+            dtype=torch.float64,
+        )
+
+    assert v.overlap_pairs(boxes(below), eps=float(eps)) == ()
+    assert v.overlap_pairs(boxes(eps), eps=float(eps)) == ()
+    assert v.overlap_pairs(boxes(above), eps=float(eps)) == ((0, 1),)
+
+
+def test_overlap_pairs_preserve_scalar_row_major_order() -> None:
+    boxes = torch.tensor(
+        [
+            [0.0, 0.0, 3.0, 3.0],
+            [1.0, 1.0, 3.0, 3.0],
+            [2.0, 2.0, 3.0, 3.0],
+            [10.0, 10.0, 1.0, 1.0],
+            [2.5, -1.0, 1.0, 2.0],
+        ],
+        dtype=torch.float64,
+    )
+
+    expected = ((0, 1), (0, 2), (0, 4), (1, 2))
+    assert _scalar_overlap_pairs(boxes, v.OVERLAP_EPS) == expected
+    assert v.overlap_pairs(boxes) == expected
+
+
+def test_overlap_pairs_match_scalar_reference_on_deterministic_random_boxes() -> None:
+    generator = torch.Generator().manual_seed(5090)
+    eps_values = (0.0, 1.0e-12, v.OVERLAP_EPS, 0.125)
+
+    for block_count in (1, 2, 7, 32):
+        positions = 4.0 * torch.randn((block_count, 2), generator=generator, dtype=torch.float64)
+        dimensions = 0.05 + 3.0 * torch.rand(
+            (block_count, 2), generator=generator, dtype=torch.float64
+        )
+        boxes = torch.cat((positions, dimensions), dim=1)
+        for eps in eps_values:
+            assert v.overlap_pairs(boxes, eps=eps) == _scalar_overlap_pairs(boxes, eps)
 
 
 def test_hard_area_fixed_and_preplaced_tolerances() -> None:

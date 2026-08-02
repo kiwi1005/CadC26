@@ -179,15 +179,13 @@ def pair_overlap_area(a: torch.Tensor, b: torch.Tensor) -> float:
 
 def overlap_pairs(xywh: Any, eps: float = OVERLAP_EPS) -> tuple[tuple[int, int], ...]:
     boxes = as_xywh(xywh)
-    pairs: list[tuple[int, int]] = []
-    for i in range(int(boxes.shape[0])):
-        for j in range(i + 1, int(boxes.shape[0])):
-            a, b = boxes[i], boxes[j]
-            overlap_x = min(float(a[0] + a[2]), float(b[0] + b[2])) - max(float(a[0]), float(b[0]))
-            overlap_y = min(float(a[1] + a[3]), float(b[1] + b[3])) - max(float(a[1]), float(b[1]))
-            if overlap_x > eps and overlap_y > eps:
-                pairs.append((i, j))
-    return tuple(pairs)
+    low = boxes[:, :2]
+    high = low + boxes[:, 2:4]
+    overlap = torch.minimum(high[:, None], high[None, :]) - torch.maximum(
+        low[:, None], low[None, :]
+    )
+    active = torch.triu((overlap > eps).all(dim=-1), diagonal=1)
+    return tuple((int(i), int(j)) for i, j in torch.nonzero(active, as_tuple=False).tolist())
 
 
 def area_bad_blocks(case: Any, xywh: Any, rel_tol: float = SOFT_AREA_REL_TOL) -> tuple[int, ...]:
