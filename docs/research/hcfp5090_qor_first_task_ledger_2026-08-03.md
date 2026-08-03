@@ -8,12 +8,12 @@ A later stage does not start when its required promotion gate is blocked.
 
 ## Q0 — exact cap attribution
 
-- [~] Implement exact log-domain uncapped cost and cap margin.
-- [~] Attribute boundary, grouping, MIB, quality, and runtime terms.
-- [~] Calculate counterfactual soft/quality fixes and blocker class.
-- [~] Add deterministic JSON/Markdown reporting CLI.
-- [ ] Match pinned official evaluator on unit fixtures.
-- [ ] Run 100-case attribution and preserve its report artifact.
+- [x] Implement exact log-domain uncapped cost and cap margin.
+- [x] Attribute boundary, grouping, MIB, quality, and runtime terms.
+- [x] Calculate counterfactual soft/quality fixes and blocker class.
+- [x] Add deterministic JSON/Markdown reporting CLI.
+- [x] Match pinned official evaluator on unit fixtures.
+- [x] Run 100-case attribution and preserve its report artifact.
 - [ ] Commit Q0 with no runtime-selection diff.
 
 ## Q1 — cycle-free structured topology
@@ -87,4 +87,3 @@ git diff --check
 For GPU-bearing changes, add the existing device-parity smoke. For evaluator
 changes, include pinned official parity. Documentation-only commits require
 Markdown link/path inspection and `git diff --check`.
-
