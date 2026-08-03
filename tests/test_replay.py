@@ -24,6 +24,7 @@ from hcfp.replay import (
     record_from_analysis,
     train_ranker_steps,
     write_replay,
+    write_replay_v3,
 )
 
 
@@ -79,6 +80,227 @@ def test_replay_roundtrip_and_ranker_update(tmp_path: Path) -> None:
     assert any(not torch.equal(before[name], value.detach()) for name, value in model.ranker.named_parameters())
 
 
+def test_v3_replay_roundtrip_adds_stable_candidate_provenance(tmp_path: Path) -> None:
+    case = synthetic_case(32, device="cpu")
+    sample = DataSample("train-v3", case, extract_labels(case, safe_shelf(case), normalized=True))
+    config = AnalyticConfig(
+        dynamics=DynamicsConfig(population=3, steps=0),
+        projection_iterations=2,
+        direction_beam=1,
+    )
+    analysis = solve_case_with_telemetry(case, config)
+    record = record_from_analysis(
+        sample,
+        "c" * 64,
+        analysis.raw_candidates,
+        analysis.telemetry,
+        population=3,
+    )
+    legacy_path = tmp_path / "legacy-v2.jsonl"
+    v3_path = tmp_path / "replay-v3.jsonl"
+
+    assert write_replay([record], legacy_path) == 1
+    assert write_replay_v3([record], v3_path) == 1
+    legacy_payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+    v3_payload = json.loads(v3_path.read_text(encoding="utf-8"))
+    loaded = next(iter_replay(v3_path))
+
+    assert legacy_payload["schema_version"] == 2
+    assert "candidate_row_ids" not in legacy_payload
+    assert v3_payload["schema_version"] == 3
+    assert loaded.target_kind == OFFICIAL_TARGET_KIND
+    assert loaded.candidate_row_ids == record.candidate_row_ids
+    assert torch.equal(loaded.candidate_source_indices, record.candidate_source_indices)
+    assert loaded.candidate_kinds == ("learned", "learned", "learned")
+    assert loaded.candidate_source_types == loaded.candidate_kinds
+    assert loaded.candidate_geometry_sha256 == record.candidate_geometry_sha256
+    assert loaded.population_seed == 0
+    assert torch.equal(loaded.feasibility_tier, record.feasibility_tier)
+    assert torch.equal(loaded.target_rank, record.target_rank)
+
+
+def test_v3_row_id_tracks_geometry_not_slot_metadata(tmp_path: Path) -> None:
+    record = _v3_record()
+    # Build a second record from the same analysis path by perturbing one raw candidate slot.
+    case = record.sample.case
+    config = AnalyticConfig(
+        dynamics=DynamicsConfig(population=3, steps=0),
+        projection_iterations=2,
+        direction_beam=1,
+    )
+    analysis = solve_case_with_telemetry(case, config)
+    raw = analysis.raw_candidates.clone()
+    raw[4, 0] = raw[4, 0] + 0.123
+    changed = record_from_analysis(
+        record.sample,
+        "e" * 64,
+        raw,
+        analysis.telemetry,
+        population=3,
+        population_seed=7,
+    )
+
+    assert changed.candidate_source_indices.tolist() == record.candidate_source_indices.tolist()
+    assert changed.candidate_row_ids[0] != record.candidate_row_ids[0]
+    assert changed.candidate_row_ids[1:] == record.candidate_row_ids[1:]
+
+
+def test_v3_row_id_ignores_checkpoint_source_index_population_seed(tmp_path: Path) -> None:
+    payload = _v3_payload(tmp_path)
+    original_ids = tuple(payload["candidate_row_ids"])
+    payload["checkpoint_hash"] = "e" * 64
+    payload["candidate_source_indices"] = [101, 102, 103]
+    payload["candidate_population"] = 99
+    payload["population_seed"] = 12345
+    path = tmp_path / "audit-metadata-changed.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    loaded = next(iter_replay(path))
+    assert loaded.candidate_row_ids == original_ids
+    assert loaded.candidate_source_indices.tolist() == [101, 102, 103]
+    assert loaded.candidate_population == 99
+    assert loaded.population_seed == 12345
+
+
+def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) -> None:
+    payload = _v3_payload(tmp_path)
+    count = len(payload["target_score"])
+    payload["target_score"] = [1.0] * count
+    payload["feasibility_tier"] = [0] * count
+    ordered_ids = sorted(range(count), key=lambda index: payload["candidate_row_ids"][index])
+    ranks = [0] * count
+    for rank, row in enumerate(ordered_ids):
+        ranks[row] = rank
+    payload["target_rank"] = ranks
+    path = tmp_path / "tie.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    loaded = next(iter_replay(path))
+    assert loaded.target_rank.tolist() == ranks
+    before_mapping = {
+        row_id: {
+            "target_rank": payload["target_rank"][index],
+            "target_score": payload["target_score"][index],
+            "feasibility_tier": payload["feasibility_tier"][index],
+            "candidate_source_indices": payload["candidate_source_indices"][index],
+            "candidate_kind": payload["candidate_kinds"][index],
+            "candidate_source_type": payload["candidate_source_types"][index],
+            "candidate_geometry_sha256": payload["candidate_geometry_sha256"][index],
+        }
+        for index, row_id in enumerate(payload["candidate_row_ids"])
+    }
+
+    permutation = [2, 0, 1]
+    for key in (
+        "candidate_features",
+        "target_score",
+        "candidate_row_ids",
+        "candidate_source_indices",
+        "candidate_kinds",
+        "candidate_source_types",
+        "candidate_geometry_sha256",
+        "feasibility_tier",
+        "target_rank",
+    ):
+        payload[key] = [payload[key][index] for index in permutation]
+    permuted = tmp_path / "tie-permuted.jsonl"
+    permuted.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    loaded_permuted = next(iter_replay(permuted))
+    after_mapping = {
+        row_id: {
+            "target_rank": payload["target_rank"][index],
+            "target_score": payload["target_score"][index],
+            "feasibility_tier": payload["feasibility_tier"][index],
+            "candidate_source_indices": payload["candidate_source_indices"][index],
+            "candidate_kind": payload["candidate_kinds"][index],
+            "candidate_source_type": payload["candidate_source_types"][index],
+            "candidate_geometry_sha256": payload["candidate_geometry_sha256"][index],
+        }
+        for index, row_id in enumerate(payload["candidate_row_ids"])
+    }
+    assert loaded_permuted.candidate_row_ids == tuple(payload["candidate_row_ids"])
+    assert after_mapping == before_mapping
+
+
+@pytest.mark.parametrize(
+    ("field", "mutate", "message"),
+    (
+        ("candidate_row_ids", lambda value: [value[0], value[0], value[2]], "unique"),
+        ("target_rank", lambda _value: [0, 0, 1], "target_rank"),
+        ("candidate_kinds", lambda value: [*value[:1], "bad-kind", *value[2:]], "candidate kind"),
+        ("feasibility_tier", lambda value: [*value[:1], 9, *value[2:]], "feasibility tier"),
+        ("candidate_source_indices", lambda value: [*value[:1], -1, *value[2:]], "source_indices"),
+        ("candidate_source_types", lambda value: [*value[:1], "bad-source", *value[2:]], "source type"),
+        ("candidate_geometry_sha256", lambda value: [*value[:1], "not-a-sha", *value[2:]], "geometry_sha256"),
+        ("target_score", lambda value: value[:-1], "align"),
+        ("target_kind", lambda _value: "wrong_target", "target_kind"),
+        ("checkpoint_hash", lambda _value: "not-a-sha", "checkpoint_hash"),
+        ("candidate_stage", lambda _value: "", "candidate_stage"),
+        ("population_seed", lambda _value: 1.5, "population_seed"),
+        ("population_seed", lambda _value: True, "population_seed"),
+    ),
+)
+def test_v3_replay_validation_fails_closed_on_tamper(
+    tmp_path: Path,
+    field: str,
+    mutate,
+    message: str,
+) -> None:
+    payload = _v3_payload(tmp_path)
+    payload[field] = mutate(payload[field])
+    path = tmp_path / f"bad-{field}.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        next(iter_replay(path))
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("candidate_source_indices", [1.5, 5, 6]),
+        ("candidate_source_indices", [True, 5, 6]),
+        ("feasibility_tier", [0, 1.5, 2]),
+        ("feasibility_tier", [0, False, 2]),
+        ("target_rank", [0, 1.5, 2]),
+        ("target_rank", [0, True, 2]),
+    ),
+)
+def test_v3_replay_rejects_non_exact_integer_lists(
+    tmp_path: Path,
+    field: str,
+    replacement: list[object],
+) -> None:
+    payload = _v3_payload(tmp_path)
+    payload[field] = replacement
+    path = tmp_path / f"bad-int-{field}.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exact integers"):
+        next(iter_replay(path))
+
+
+def test_v3_row_id_includes_candidate_source_type(tmp_path: Path) -> None:
+    payload = _v3_payload(tmp_path)
+    payload["candidate_source_types"] = ["constraint", "constraint", "constraint"]
+    path = tmp_path / "source-type-tamper.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="row_ids"):
+        next(iter_replay(path))
+
+
+def test_v3_row_id_includes_candidate_geometry_hash(tmp_path: Path) -> None:
+    payload = _v3_payload(tmp_path)
+    payload["candidate_geometry_sha256"][1] = "f" * 64
+    path = tmp_path / "geometry-hash-tamper.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="row_ids"):
+        next(iter_replay(path))
+
+
 def test_legacy_proxy_replay_remains_readable_but_cannot_train(tmp_path: Path) -> None:
     case = synthetic_case(32, device="cpu")
     sample = DataSample("legacy-0", case, extract_labels(case, safe_shelf(case), normalized=True))
@@ -98,6 +320,32 @@ def test_legacy_proxy_replay_remains_readable_but_cannot_train(tmp_path: Path) -
     optimizer = torch.optim.AdamW(model.ranker.parameters(), lr=1.0e-3)
     with pytest.raises(ValueError, match="official v10 replay targets"):
         train_ranker_steps(model, [record], optimizer, steps=1)
+
+
+def _v3_payload(tmp_path: Path) -> dict[str, object]:
+    record = _v3_record()
+    path = tmp_path / "helper-v3.jsonl"
+    write_replay_v3([record], path)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _v3_record():
+    case = synthetic_case(32, device="cpu")
+    sample = DataSample("helper-v3", case, extract_labels(case, safe_shelf(case), normalized=True))
+    config = AnalyticConfig(
+        dynamics=DynamicsConfig(population=3, steps=0),
+        projection_iterations=2,
+        direction_beam=1,
+    )
+    analysis = solve_case_with_telemetry(case, config)
+    record = record_from_analysis(
+        sample,
+        "d" * 64,
+        analysis.raw_candidates,
+        analysis.telemetry,
+        population=3,
+    )
+    return record
 
 
 def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> None:
