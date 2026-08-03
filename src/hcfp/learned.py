@@ -552,18 +552,13 @@ def _merge_tail_analyses(
         seed_orders = tuple(topology_provenance.get("topology_seed_orders", ()))
         if len(seed_orders) != topology_count:
             seed_orders = tuple({} for _ in range(topology_count))
-        candidates = tuple(
-            {
-                **dict(seed_orders[index]),
-                "source": f"candidate_{start + topology_offset + index}",
-                "candidate_type": "topology",
-                "stage": stage,
-            }
-            for stage, start in (
-                ("initial", initial_start),
-                ("post_relax", final_start),
-            )
-            for index in range(topology_count)
+        candidates, topology_stale_sources = _seed_stage_records(
+            seed_orders,
+            raw_candidates,
+            initial_start=initial_start + topology_offset,
+            final_start=final_start + topology_offset,
+            count=topology_count,
+            candidate_type="topology",
         )
         snapshot.update(topology_provenance)
         snapshot["topology_seed_sources"] = tuple(
@@ -573,6 +568,8 @@ def _merge_tail_analyses(
             str(candidate["stage"]) for candidate in candidates
         )
         snapshot["topology_seed_provenance"] = candidates
+        if topology_stale_sources:
+            snapshot["topology_seed_stale_sources"] = tuple(topology_stale_sources)
         constraint_count = min(
             int(topology_provenance.get("constraint_seed_count", 0)),
             learned_count - topology_count,
@@ -584,35 +581,20 @@ def _merge_tail_analyses(
             )
             if len(constraint_records) != constraint_count:
                 constraint_records = tuple({} for _ in range(constraint_count))
-            constraint_candidates = []
-            stale_sources = []
-            for stage, start in (
-                ("initial", initial_start),
-                ("post_relax", final_start),
-            ):
-                for index in range(constraint_count):
-                    candidate_index = start + residual_count + index
-                    record = dict(constraint_records[index])
-                    source = f"candidate_{candidate_index}"
-                    if record.get("candidate_sha256") != _tensor_sha256(
-                        raw_candidates[candidate_index]
-                    ):
-                        stale_sources.append(source)
-                        continue
-                    constraint_candidates.append(
-                        {
-                            **record,
-                            "source": source,
-                            "candidate_type": "constraint",
-                            "stage": stage,
-                        }
-                    )
-            constraint_candidates = tuple(constraint_candidates)
+            constraint_candidates, stale_sources = _seed_stage_records(
+                constraint_records,
+                raw_candidates,
+                initial_start=initial_start + residual_count,
+                final_start=final_start + residual_count,
+                count=constraint_count,
+                candidate_type="constraint",
+            )
             snapshot["constraint_seed_sources"] = tuple(
                 str(candidate["source"]) for candidate in constraint_candidates
             )
             snapshot["constraint_seed_provenance"] = constraint_candidates
-            snapshot["constraint_seed_stale_sources"] = tuple(stale_sources)
+            if stale_sources:
+                snapshot["constraint_seed_stale_sources"] = tuple(stale_sources)
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -632,6 +614,56 @@ def _merge_tail_analyses(
         projection_status=status,
         incumbent_snapshot=snapshot,
     )
+
+
+def _seed_stage_records(
+    records: tuple[object, ...],
+    raw_candidates: Tensor,
+    *,
+    initial_start: int,
+    final_start: int,
+    count: int,
+    candidate_type: str,
+) -> tuple[tuple[dict[str, object], ...], tuple[str, ...]]:
+    candidates: list[dict[str, object]] = []
+    stale_sources: list[str] = []
+    for index in range(count):
+        record = dict(records[index]) if index < len(records) else {}
+        initial_index = initial_start + index
+        final_index = final_start + index
+        initial_source = f"candidate_{initial_index}"
+        initial_hash = _tensor_sha256(raw_candidates[initial_index])
+        expected_hash = record.get("candidate_sha256")
+        if expected_hash is None and candidate_type != "topology":
+            stale_sources.append(initial_source)
+            continue
+        if expected_hash is not None and expected_hash != initial_hash:
+            stale_sources.append(initial_source)
+            continue
+        record["candidate_sha256"] = initial_hash
+        candidates.append(
+            {
+                **record,
+                "source": initial_source,
+                "candidate_type": candidate_type,
+                "stage": "initial",
+            }
+        )
+        final_source = f"candidate_{final_index}"
+        final_hash = _tensor_sha256(raw_candidates[final_index])
+        transform = "identity" if final_hash == initial_hash else "population_relaxation"
+        candidates.append(
+            {
+                **record,
+                "source": final_source,
+                "candidate_type": candidate_type,
+                "stage": "post_relax",
+                "transform": transform,
+                "parent_candidate_sha256": initial_hash,
+                "candidate_sha256": final_hash,
+            }
+        )
+    return tuple(candidates), tuple(stale_sources)
 
 
 def _merge_energy_history(first: Tensor, second: Tensor) -> Tensor:

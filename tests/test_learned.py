@@ -7,13 +7,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from hcfp.analytic import AnalyticConfig, solve_case_with_telemetry
+from hcfp.analytic import AnalyticConfig, AnalyticResult, CandidateTelemetry, solve_case_with_telemetry
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, _payload_hash, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
 from hcfp.learned import (
     LearnedConfig,
     _merge_energy_history,
+    _tensor_sha256,
     analyze_case_with_checkpoint,
     effective_collective_steps,
     effective_flow_steps,
@@ -141,6 +142,136 @@ def _pareto_config() -> AnalyticConfig:
     )
 
 
+def _constant_candidates(values: tuple[float, ...]) -> torch.Tensor:
+    return torch.stack(
+        [
+            torch.full((4, 4), value, dtype=torch.float32)
+            for value in values
+        ]
+    )
+
+
+def _telemetry(count: int) -> CandidateTelemetry:
+    zeros = torch.zeros(count, dtype=torch.float32)
+    bools = torch.ones(count, dtype=torch.bool)
+    xywh = torch.zeros((count, 4, 4), dtype=torch.float32)
+    return CandidateTelemetry(
+        hard_feasible=bools,
+        raw_overlap=zeros,
+        projected_overlap=zeros,
+        overlap_components=zeros,
+        projection_ok=bools,
+        projection_active_pairs=zeros,
+        hpwl=zeros,
+        bbox_area=zeros,
+        soft_violation=zeros,
+        projection_displacement=zeros,
+        projection_failure_reasons=tuple("" for _ in range(count)),
+        projection_initial_pairs=zeros,
+        projection_final_pairs=zeros,
+        projection_component_rebuilds=zeros,
+        projection_new_pairs=zeros,
+        projection_resets=zeros,
+        projection_beam_states=zeros,
+        projection_max_component_size=zeros,
+        component_proposal_available=torch.zeros(count, dtype=torch.bool),
+        component_proposal_xywh=xywh,
+        component_proposal_hard_ok=torch.zeros(count, dtype=torch.bool),
+        component_proposal_structure_ok=torch.zeros(count, dtype=torch.bool),
+        component_proposal_final_pair_count=zeros,
+        component_proposal_displacement=zeros,
+        component_proposal_rollback_reason=tuple("" for _ in range(count)),
+    )
+
+
+def _synthetic_result(values: tuple[float, ...]) -> AnalyticResult:
+    candidates = _constant_candidates(values)
+    return AnalyticResult(
+        selected=candidates[0],
+        raw_candidates=candidates,
+        projected_candidates=candidates.clone(),
+        telemetry=_telemetry(len(values)),
+        energy_history=torch.zeros((1, 0, 3), dtype=torch.float32),
+        projection_status="ok",
+        incumbent_snapshot={"exact_source": "fallback", "fast_source": "fallback"},
+    )
+
+
+def _provenance_for_synthetic_merge(
+    learned: AnalyticResult,
+    *,
+    tamper_constraint_initial: bool = False,
+    omit_constraint_hash: bool = False,
+) -> dict[str, object]:
+    constraint_records = []
+    for index in range(2):
+        digest = _tensor_sha256(learned.raw_candidates[1 + index])
+        record = {
+            "kind": "combined",
+            "topology_seed_index": index,
+            "details": {"moves": ()},
+        }
+        if not (index == 0 and omit_constraint_hash):
+            record["candidate_sha256"] = (
+                "bad" if index == 0 and tamper_constraint_initial else digest
+            )
+        constraint_records.append(record)
+    topology_records = []
+    for index in range(2):
+        topology_records.append(
+            {
+                "order_variant": f"variant_{index}",
+                "candidate_sha256": _tensor_sha256(learned.raw_candidates[3 + index]),
+            }
+        )
+    return {
+        "topology_seed_attempted": True,
+        "topology_seed_count": 2,
+        "constraint_seed_count": 2,
+        "constraint_seed_records": tuple(constraint_records),
+        "topology_seed_orders": tuple(topology_records),
+    }
+
+
+def _merged_synthetic_provenance(
+    *,
+    tamper_constraint_initial: bool = False,
+    omit_constraint_hash: bool = False,
+    changed_post_relax: bool = True,
+) -> AnalyticResult:
+    import hcfp.learned as learned_module
+
+    analytic = _synthetic_result((0.0, 1.0, 2.0))
+    post = (110.0, 120.0, 130.0, 140.0) if changed_post_relax else (10.0, 20.0, 30.0, 40.0)
+    learned = _synthetic_result((0.0, 10.0, 20.0, 30.0, 40.0, *post))
+    return learned_module._merge_tail_analyses(
+        _case(),
+        analytic,
+        learned,
+        topology_provenance=_provenance_for_synthetic_merge(
+            learned,
+            tamper_constraint_initial=tamper_constraint_initial,
+            omit_constraint_hash=omit_constraint_hash,
+        ),
+    )
+
+
+def _assert_sources_match_raw_hashes(
+    snapshot: dict[str, object],
+    raw_candidates: torch.Tensor,
+    key: str,
+) -> None:
+    records = tuple(snapshot[key])
+    sources_key = key.replace("_provenance", "_sources")
+    assert tuple(snapshot[sources_key]) == tuple(record["source"] for record in records)
+    for record in records:
+        index = int(str(record["source"]).removeprefix("candidate_"))
+        assert record["candidate_sha256"] == _tensor_sha256(raw_candidates[index])
+        if record["stage"] == "post_relax":
+            assert record["parent_candidate_sha256"]
+            assert record["transform"] in {"identity", "population_relaxation"}
+
+
 def _solve_pareto(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -253,6 +384,98 @@ def test_energy_history_merge_repeats_last_observation_for_shorter_tail() -> Non
 
     assert merged.shape == (2, 2, 3)
     assert torch.equal(merged[1, 1], learned[0, 0])
+
+
+def test_post_relax_seed_provenance_keeps_derived_hashes_for_changed_rows() -> None:
+    merged = _merged_synthetic_provenance(changed_post_relax=True)
+    snapshot = merged.incumbent_snapshot
+
+    assert len(snapshot["constraint_seed_sources"]) == 4
+    assert len(snapshot["topology_seed_sources"]) == 4
+    _assert_sources_match_raw_hashes(
+        snapshot,
+        merged.raw_candidates,
+        "constraint_seed_provenance",
+    )
+    _assert_sources_match_raw_hashes(
+        snapshot,
+        merged.raw_candidates,
+        "topology_seed_provenance",
+    )
+    assert {
+        record["transform"]
+        for record in snapshot["constraint_seed_provenance"]
+        if record["stage"] == "post_relax"
+    } == {"population_relaxation"}
+    assert {
+        record["transform"]
+        for record in snapshot["topology_seed_provenance"]
+        if record["stage"] == "post_relax"
+    } == {"population_relaxation"}
+
+
+def test_post_relax_seed_provenance_marks_tampered_initial_stale() -> None:
+    merged = _merged_synthetic_provenance(
+        changed_post_relax=True,
+        tamper_constraint_initial=True,
+    )
+    snapshot = merged.incumbent_snapshot
+
+    assert "candidate_2" in snapshot["constraint_seed_stale_sources"]
+    assert "candidate_2" not in snapshot["constraint_seed_sources"]
+    assert "candidate_7" not in snapshot["constraint_seed_sources"]
+    assert len(snapshot["constraint_seed_sources"]) == 2
+    _assert_sources_match_raw_hashes(
+        snapshot,
+        merged.raw_candidates,
+        "constraint_seed_provenance",
+    )
+    assert len(snapshot["topology_seed_sources"]) == 4
+
+
+def test_constraint_seed_provenance_missing_initial_hash_fails_closed() -> None:
+    merged = _merged_synthetic_provenance(
+        changed_post_relax=True,
+        omit_constraint_hash=True,
+    )
+    snapshot = merged.incumbent_snapshot
+
+    assert "candidate_2" in snapshot["constraint_seed_stale_sources"]
+    assert "candidate_2" not in snapshot["constraint_seed_sources"]
+    assert "candidate_7" not in snapshot["constraint_seed_sources"]
+    assert tuple(snapshot["constraint_seed_sources"]) == ("candidate_3", "candidate_8")
+    assert len(snapshot["constraint_seed_provenance"]) == 2
+    _assert_sources_match_raw_hashes(
+        snapshot,
+        merged.raw_candidates,
+        "constraint_seed_provenance",
+    )
+    assert len(snapshot["topology_seed_sources"]) == 4
+
+
+def test_post_relax_seed_provenance_keeps_identity_hash_semantics() -> None:
+    merged = _merged_synthetic_provenance(changed_post_relax=False)
+    snapshot = merged.incumbent_snapshot
+
+    _assert_sources_match_raw_hashes(
+        snapshot,
+        merged.raw_candidates,
+        "constraint_seed_provenance",
+    )
+    _assert_sources_match_raw_hashes(
+        snapshot,
+        merged.raw_candidates,
+        "topology_seed_provenance",
+    )
+    post_records = (
+        tuple(snapshot["constraint_seed_provenance"])[1::2]
+        + tuple(snapshot["topology_seed_provenance"])[1::2]
+    )
+    assert {record["transform"] for record in post_records} == {"identity"}
+    assert all(
+        record["candidate_sha256"] == record["parent_candidate_sha256"]
+        for record in post_records
+    )
 
 
 def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path: Path) -> None:

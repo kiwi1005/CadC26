@@ -23,6 +23,7 @@ from hcfp.fallback import safe_shelf
 from hcfp.learned import (
     LearnedConfig,
     _learned_population,
+    _tensor_sha256,
     _topology_seed_candidates,
     analyze_case_with_checkpoint,
 )
@@ -314,7 +315,7 @@ def test_opt_in_constraint_seeds_follow_topology_and_keep_source_provenance(
     assert snapshot["constraint_seed_kind_counts"]
 
 
-def test_post_relax_constraint_provenance_fails_closed_after_geometry_changes(
+def test_post_relax_constraint_provenance_tracks_derived_geometry(
     tmp_path: Path,
 ) -> None:
     torch.manual_seed(29)
@@ -343,9 +344,22 @@ def test_post_relax_constraint_provenance_fails_closed_after_geometry_changes(
     analysis = analyze_case_with_checkpoint(case, checkpoint, config)
     snapshot = analysis.analytic.incumbent_snapshot
 
-    assert len(snapshot["constraint_seed_sources"]) == 1
-    assert len(snapshot["constraint_seed_provenance"]) == 1
-    assert len(snapshot["constraint_seed_stale_sources"]) == 1
+    sources = tuple(snapshot["constraint_seed_sources"])
+    records = tuple(snapshot["constraint_seed_provenance"])
+    assert len(sources) == 2
+    assert len(records) == 2
+    assert "constraint_seed_stale_sources" not in snapshot
+    assert tuple(record["source"] for record in records) == sources
+    initial, post_relax = records
+    assert initial["stage"] == "initial"
+    assert post_relax["stage"] == "post_relax"
+    assert post_relax["transform"] == "population_relaxation"
+    assert post_relax["parent_candidate_sha256"] == initial["candidate_sha256"]
+    for record in records:
+        index = int(str(record["source"]).removeprefix("candidate_"))
+        assert record["candidate_sha256"] == _tensor_sha256(
+            analysis.analytic.raw_candidates[index]
+        )
 
 
 def test_constraint_seeds_require_topology_seeds() -> None:
@@ -584,7 +598,7 @@ def test_training_cli_reports_explicit_topology_flag(tmp_path: Path) -> None:
     )
 
     report = json.loads(Path(f"{checkpoint}.training.json").read_text(encoding="utf-8"))
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["command"][0] == "scripts/train_hcfp.py"
     assert report["seed"] == 0
     loaded, _ = load_checkpoint(
