@@ -172,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
         source_metadata,
     )
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
+    trainable_parameter_names = _select_trainable_parameters(model, args.stage)
+    optimizer = torch.optim.AdamW(
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
+        lr=args.learning_rate,
+    )
     ema = ExponentialMovingAverage(model, args.ema_decay) if args.ema_decay > 0.0 else None
 
     def checkpoint_step(step: int, _report) -> None:
@@ -239,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
         "topology_enabled": model.config.topology_enabled,
         "constraint_enabled": model.config.constraint_enabled,
         "collective_enabled": model.config.collective_enabled,
+        "trainable_parameter_names": trainable_parameter_names,
         "ema_decay": args.ema_decay if ema is not None else None,
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,
@@ -300,6 +305,18 @@ def _training_checkpoint_metadata(
         "training_objective_version": objective,
         "parent_state_hash": source.get("state_hash") if source is not None else None,
     }
+
+
+def _select_trainable_parameters(model: HCFPModel, stage: str) -> list[str]:
+    names = []
+    for name, parameter in model.named_parameters():
+        trainable = stage != "collective" or name.startswith("collective.")
+        parameter.requires_grad_(trainable)
+        if trainable:
+            names.append(name)
+    if not names:
+        raise ValueError(f"stage {stage!r} has no trainable parameters")
+    return names
 
 
 if __name__ == "__main__":

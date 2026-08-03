@@ -454,6 +454,7 @@ def test_training_cli_warm_starts_collective_head_and_declares_capability(
         capture_output=True,
     )
 
+    source_model, _ = load_checkpoint(source)
     loaded, metadata = load_checkpoint(
         output,
         expected_normalization=RUNTIME_NORMALIZATION,
@@ -463,6 +464,14 @@ def test_training_cli_warm_starts_collective_head_and_declares_capability(
     assert "collective" in metadata["trained_heads"]
     assert metadata["training_objective_version"] == "collective_rollout_v1"
     assert metadata["parent_state_hash"] == source_hash
+    for name, value in source_model.state_dict().items():
+        assert torch.equal(value, loaded.state_dict()[name])
+    report = json.loads(Path(f"{output}.training.json").read_text(encoding="utf-8"))
+    assert report["trainable_parameter_names"]
+    assert all(
+        name.startswith("collective.")
+        for name in report["trainable_parameter_names"]
+    )
 
 
 def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path: Path) -> None:
