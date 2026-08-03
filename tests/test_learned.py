@@ -13,7 +13,9 @@ from hcfp.checkpoint import RUNTIME_NORMALIZATION, _payload_hash, save_checkpoin
 from hcfp.dynamics import DynamicsConfig
 from hcfp.learned import (
     LearnedConfig,
+    _merge_energy_history,
     analyze_case_with_checkpoint,
+    effective_collective_steps,
     effective_flow_steps,
     solve_case_with_checkpoint,
 )
@@ -25,6 +27,12 @@ FLOW_METADATA = {
     "capabilities": {"flow": True},
     "trained_heads": ["flow"],
     "training_objective_version": "supervised_loss_v1",
+}
+
+COLLECTIVE_METADATA = {
+    "capabilities": {"collective": True},
+    "trained_heads": ["collective"],
+    "training_objective_version": "collective_loss_v1",
 }
 
 
@@ -199,9 +207,52 @@ def test_multistep_flow_population_preserves_exact_safe_output(tmp_path: Path) -
     assert verify_feasible(_case(), result.selected)
 
 
+def test_effective_collective_steps_requires_all_checkpoint_and_model_gates() -> None:
+    enabled = ModelConfig(hidden_dim=16, collective_enabled=True)
+
+    assert effective_collective_steps(2, COLLECTIVE_METADATA, enabled) == 2
+    assert (
+        effective_collective_steps(
+            2,
+            {**COLLECTIVE_METADATA, "capabilities": {"collective": False}},
+            enabled,
+        )
+        == 0
+    )
+    assert (
+        effective_collective_steps(
+            2,
+            {**COLLECTIVE_METADATA, "trained_heads": []},
+            enabled,
+        )
+        == 0
+    )
+    assert effective_collective_steps(2, COLLECTIVE_METADATA, ModelConfig(hidden_dim=16)) == 0
+
+
 def test_effective_flow_steps_rejects_negative_requests_before_capability_gate() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         effective_flow_steps(-1, {"capabilities": {"flow": False}})
+
+
+def test_effective_collective_steps_rejects_negative_requests_before_capability_gate() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        effective_collective_steps(-1, {"capabilities": {"collective": False}}, {})
+
+
+def test_learned_config_rejects_negative_collective_steps() -> None:
+    with pytest.raises(ValueError, match="collective_steps must be non-negative"):
+        LearnedConfig(collective_steps=-1)
+
+
+def test_energy_history_merge_repeats_last_observation_for_shorter_tail() -> None:
+    analytic = torch.tensor([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]])
+    learned = torch.tensor([[[7.0, 8.0, 9.0]]])
+
+    merged = _merge_energy_history(analytic, learned)
+
+    assert merged.shape == (2, 2, 3)
+    assert torch.equal(merged[1, 1], learned[0, 0])
 
 
 def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path: Path) -> None:
@@ -239,6 +290,121 @@ def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path
     assert result.failure_reason is None
     assert result.flow_steps == 0
     assert result.topology_seed_attempted is True
+
+
+def test_collective_capability_false_disables_requested_steps_without_falling_back(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"collective": False},
+            "trained_heads": ["collective"],
+            "training_objective_version": "collective_loss_v1",
+        },
+    )
+
+    result = solve_case_with_checkpoint(
+        _case(),
+        checkpoint,
+        LearnedConfig(analytic=_config(), collective_steps=2),
+    )
+
+    assert result.used_checkpoint is True
+    assert result.failure_reason is None
+    assert result.collective_steps == 0
+    assert result.collective_used is False
+    assert result.collective_calls == 0
+    assert verify_feasible(_case(), result.selected)
+
+
+def test_collective_tail_runs_when_checkpoint_and_model_gates_pass(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata=COLLECTIVE_METADATA,
+    )
+
+    result = solve_case_with_checkpoint(
+        _case(),
+        checkpoint,
+        LearnedConfig(analytic=_config(), collective_steps=2),
+    )
+
+    assert result.used_checkpoint is True
+    assert result.collective_steps == 2
+    assert result.collective_used is True
+    assert result.collective_calls == 2
+    assert verify_feasible(_case(), result.selected)
+
+
+def test_collective_tail_keeps_topology_and_constraint_provenance_with_bdp_disabled(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(
+        HCFPModel(
+            ModelConfig(
+                hidden_dim=16,
+                topology_enabled=True,
+                constraint_enabled=True,
+                collective_enabled=True,
+            )
+        ),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata=COLLECTIVE_METADATA,
+    )
+
+    analysis = analyze_case_with_checkpoint(
+        _case(),
+        checkpoint,
+        LearnedConfig(
+            analytic=_config(),
+            topology_seeds=1,
+            constraint_seeds=1,
+            collective_steps=1,
+        ),
+    )
+
+    assert analysis.result.used_checkpoint is True
+    assert analysis.result.collective_calls == 1
+    assert analysis.result.topology_seed_attempted is True
+    assert analysis.result.topology_seed_accepted is True
+    assert analysis.result.constraint_seed_attempted is True
+    assert "topology_seed_provenance" in analysis.analytic.incumbent_snapshot
+    assert "constraint_seed_failure_reason" in analysis.analytic.incumbent_snapshot
+
+
+def test_collective_default_off_preserves_selected_and_candidate_pool(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata=COLLECTIVE_METADATA,
+    )
+
+    legacy = analyze_case_with_checkpoint(_case(), checkpoint, _config())
+    default_off = analyze_case_with_checkpoint(
+        _case(),
+        checkpoint,
+        LearnedConfig(analytic=_config(), collective_steps=0),
+    )
+
+    assert default_off.result.collective_steps == 0
+    assert default_off.result.collective_used is False
+    assert torch.equal(default_off.result.selected, legacy.result.selected)
+    assert torch.equal(default_off.analytic.raw_candidates, legacy.analytic.raw_candidates)
+    assert torch.equal(
+        default_off.analytic.projected_candidates,
+        legacy.analytic.projected_candidates,
+    )
 
 
 def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:

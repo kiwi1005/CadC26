@@ -23,6 +23,7 @@ from hcfp.analytic import (
 from hcfp.case import FloorplanCase, from_official
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
+from hcfp.collective_runtime import CollectiveForceController
 from hcfp.constraints.construction import construct_constraint_variants
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
@@ -65,6 +66,9 @@ class LearnedResult:
     constraint_seed_attempted: bool = False
     constraint_seed_accepted: bool = False
     constraint_seed_count: int = 0
+    collective_steps: int = 0
+    collective_used: bool = False
+    collective_calls: int = 0
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,7 @@ class LearnedConfig:
     seed: int | None = None
     topology_seeds: int = 0
     constraint_seeds: int = 0
+    collective_steps: int = 0
 
     def __post_init__(self) -> None:
         if self.flow_steps < 0:
@@ -101,6 +106,8 @@ class LearnedConfig:
             raise ValueError("topology_seeds must be non-negative")
         if self.constraint_seeds < 0:
             raise ValueError("constraint_seeds must be non-negative")
+        if self.collective_steps < 0:
+            raise ValueError("collective_steps must be non-negative")
         if self.constraint_seeds and not self.topology_seeds:
             raise ValueError("constraint_seeds require topology_seeds")
 
@@ -112,6 +119,33 @@ def effective_flow_steps(requested: int, checkpoint_metadata: dict[str, Any]) ->
         raise ValueError("flow_steps must be non-negative")
     capabilities = checkpoint_metadata.get("capabilities", {})
     return requested if isinstance(capabilities, dict) and capabilities.get("flow") is True else 0
+
+
+def effective_collective_steps(
+    requested: int,
+    checkpoint_metadata: dict[str, Any],
+    model_config: Any,
+) -> int:
+    """Enable collective controls only for explicitly trained capable models."""
+
+    if requested < 0:
+        raise ValueError("collective_steps must be non-negative")
+    capabilities = checkpoint_metadata.get("capabilities", {})
+    trained_heads = checkpoint_metadata.get("trained_heads", [])
+    collective_enabled = (
+        bool(model_config.get("collective_enabled", False))
+        if isinstance(model_config, dict)
+        else bool(getattr(model_config, "collective_enabled", False))
+    )
+    if (
+        isinstance(capabilities, dict)
+        and capabilities.get("collective") is True
+        and isinstance(trained_heads, (list, tuple))
+        and "collective" in trained_heads
+        and collective_enabled
+    ):
+        return requested
+    return 0
 
 
 def solve_case_with_checkpoint(
@@ -142,6 +176,11 @@ def analyze_case_with_checkpoint(
         learned_cfg = replace(
             learned_cfg,
             flow_steps=effective_flow_steps(learned_cfg.flow_steps, metadata),
+            collective_steps=effective_collective_steps(
+                learned_cfg.collective_steps,
+                metadata,
+                model.config,
+            ),
         )
         model = model.to(device=case.area.device).eval()
         topology_provenance: dict[str, object] = {}
@@ -165,7 +204,7 @@ def analyze_case_with_checkpoint(
         residual_count = (
             int(learned_population.shape[0]) - topology_count - constraint_count
         )
-        projection_guidance = (
+        population_guidance = (
             build_population_guidance(
                 case,
                 topology_provenance,
@@ -173,8 +212,11 @@ def analyze_case_with_checkpoint(
                 constraint_count=constraint_count,
                 topology_count=topology_count,
             )
-            if cfg.component_bdp.enabled and topology_count
+            if topology_count
             else None
+        )
+        projection_guidance = (
+            population_guidance if cfg.component_bdp.enabled and topology_count else None
         )
         # Keep the established analytic comparator on v0. Q4 applies only to
         # provenance-bearing learned structure and remains Pareto-guarded.
@@ -182,9 +224,26 @@ def analyze_case_with_checkpoint(
             case,
             replace(cfg, component_bdp=ComponentBDPConfig()),
         )
+        force_controller = None
+        if learned_cfg.collective_steps:
+            device_type = "cuda" if case.area.is_cuda else "cpu"
+            with torch.inference_mode(), torch.autocast(
+                device_type=device_type,
+                dtype=torch.bfloat16,
+                enabled=model.config.compute_dtype == "bfloat16",
+            ):
+                static_embedding = model.encoder(case).float()
+            force_controller = CollectiveForceController.from_guidance(
+                model,
+                static_embedding,
+                population_guidance,
+            )
+        dynamics_cfg = replace(cfg.dynamics, population=int(learned_population.shape[0]))
+        if learned_cfg.collective_steps:
+            dynamics_cfg = replace(dynamics_cfg, steps=learned_cfg.collective_steps)
         learned_tail_cfg = replace(
             cfg,
-            dynamics=replace(cfg.dynamics, population=int(learned_population.shape[0])),
+            dynamics=dynamics_cfg,
             component_bdp=(
                 cfg.component_bdp
                 if projection_guidance is not None
@@ -196,6 +255,7 @@ def analyze_case_with_checkpoint(
             learned_population,
             learned_tail_cfg,
             projection_guidance=projection_guidance,
+            force_controller=force_controller,
         )
         analysis = _merge_tail_analyses(
             case,
@@ -206,18 +266,35 @@ def analyze_case_with_checkpoint(
         candidate_count = cfg.dynamics.population + int(learned_population.shape[0])
         return LearnedAnalysis(
             LearnedResult(
-                analysis.selected,
-                True,
-                str(metadata["state_hash"]),
-                None,
-                learned_cfg.flow_steps,
-                candidate_count,
-                bool(topology_provenance.get("topology_seed_attempted", False)),
-                bool(topology_provenance.get("topology_seed_accepted", False)),
-                int(topology_provenance.get("topology_seed_count", 0)),
-                bool(topology_provenance.get("constraint_seed_attempted", False)),
-                bool(topology_provenance.get("constraint_seed_accepted", False)),
-                int(topology_provenance.get("constraint_seed_count", 0)),
+                selected=analysis.selected,
+                used_checkpoint=True,
+                checkpoint_hash=str(metadata["state_hash"]),
+                failure_reason=None,
+                flow_steps=learned_cfg.flow_steps,
+                candidate_count=candidate_count,
+                topology_seed_attempted=bool(
+                    topology_provenance.get("topology_seed_attempted", False)
+                ),
+                topology_seed_accepted=bool(
+                    topology_provenance.get("topology_seed_accepted", False)
+                ),
+                topology_seed_count=int(
+                    topology_provenance.get("topology_seed_count", 0)
+                ),
+                constraint_seed_attempted=bool(
+                    topology_provenance.get("constraint_seed_attempted", False)
+                ),
+                constraint_seed_accepted=bool(
+                    topology_provenance.get("constraint_seed_accepted", False)
+                ),
+                constraint_seed_count=int(
+                    topology_provenance.get("constraint_seed_count", 0)
+                ),
+                collective_steps=learned_cfg.collective_steps,
+                collective_used=force_controller is not None,
+                collective_calls=(
+                    0 if force_controller is None else int(force_controller.calls)
+                ),
             ),
             analysis,
         )
@@ -225,10 +302,10 @@ def analyze_case_with_checkpoint(
         analysis = solve_case_with_telemetry(case, cfg)
         return LearnedAnalysis(
             LearnedResult(
-                analysis.selected,
-                False,
-                None,
-                f"{type(exc).__name__}: {exc}",
+                selected=analysis.selected,
+                used_checkpoint=False,
+                checkpoint_hash=None,
+                failure_reason=f"{type(exc).__name__}: {exc}",
             ),
             analysis,
         )
@@ -357,6 +434,7 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             seed=int(seed) if seed is not None else None,
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
             constraint_seeds=int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "0")),
+            collective_steps=int(os.environ.get("HCFP_COLLECTIVE_STEPS", "0")),
         )
     if isinstance(config, AnalyticConfig):
         return LearnedConfig(analytic=config)
@@ -547,12 +625,32 @@ def _merge_tail_analyses(
         raw_candidates=raw_candidates,
         projected_candidates=projected,
         telemetry=telemetry,
-        energy_history=torch.cat(
-            (analytic.energy_history, learned.energy_history), dim=0
+        energy_history=_merge_energy_history(
+            analytic.energy_history,
+            learned.energy_history,
         ),
         projection_status=status,
         incumbent_snapshot=snapshot,
     )
+
+
+def _merge_energy_history(first: Tensor, second: Tensor) -> Tensor:
+    if first.shape[1:] == second.shape[1:]:
+        return torch.cat((first, second), dim=0)
+    if first.ndim != 3 or second.ndim != 3 or first.shape[2] != second.shape[2]:
+        raise ValueError("energy history shape mismatch")
+    steps = max(int(first.shape[1]), int(second.shape[1]))
+
+    def padded(value: Tensor) -> Tensor:
+        if int(value.shape[1]) == steps:
+            return value
+        out = value.new_zeros((value.shape[0], steps, value.shape[2]))
+        if value.shape[1]:
+            out[:] = value[:, -1:, :]
+        out[:, : value.shape[1], :] = value
+        return out
+
+    return torch.cat((padded(first), padded(second)), dim=0)
 
 
 def _raw_analytic_pareto_guard(
