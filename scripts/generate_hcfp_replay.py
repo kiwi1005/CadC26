@@ -18,14 +18,14 @@ from hcfp.analytic import AnalyticConfig, select_device  # noqa: E402
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.data import file_sha256  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
-from hcfp.floorset_lite import iter_floorset_lite  # noqa: E402
+from hcfp.floorset_lite import iter_floorset_lite_with_source  # noqa: E402
 from hcfp.learned import (  # noqa: E402
     LearnedConfig,
     analyze_case_with_checkpoint,
     effective_collective_steps,
     effective_flow_steps,
 )
-from hcfp.replay import OFFICIAL_TARGET_KIND, record_from_analysis, write_replay  # noqa: E402
+from hcfp.replay import OFFICIAL_TARGET_KIND, records_from_learned_analysis, write_replay_v3  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--projection-steps", type=int, default=8)
     parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
+    parser.add_argument("--topology-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--constraint-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--score-aware", action="store_true")
@@ -69,10 +71,12 @@ def main(argv: list[str] | None = None) -> int:
         flow_steps=flow_steps,
         collective_steps=collective_steps,
         seed=args.flow_seed,
+        topology_seeds=args.topology_seeds,
+        constraint_seeds=args.constraint_seeds,
     )
 
     def records():
-        for sample in iter_floorset_lite(
+        for sample, source in iter_floorset_lite_with_source(
             args.floorset_lite_root,
             limit=args.limit,
             seed=args.seed,
@@ -82,27 +86,36 @@ def main(argv: list[str] | None = None) -> int:
             analysis = analyze_case_with_checkpoint(device_sample, args.checkpoint, config)
             if not analysis.result.used_checkpoint or analysis.result.checkpoint_hash is None:
                 raise RuntimeError(analysis.result.failure_reason or "checkpoint was not used")
-            yield record_from_analysis(
+            yield from records_from_learned_analysis(
                 sample,
+                source,
                 analysis.result.checkpoint_hash,
-                analysis.analytic.raw_candidates,
-                analysis.analytic.telemetry,
-                population=args.population,
+                analysis,
+                analytic_population=args.population,
+                population_seed=args.flow_seed,
             )
 
     replay_records = list(records())
-    count = write_replay(replay_records, args.output)
+    count = write_replay_v3(replay_records, args.output)
     values = [float(value) for record in replay_records for value in record.target_score]
-    sample_ids = [record.sample.sample_id for record in replay_records]
+    sample_ids = list(dict.fromkeys(record.sample.sample_id for record in replay_records))
     sample_id_sha256 = hashlib.sha256("\n".join(sample_ids).encode()).hexdigest()
+    stage_counts = {
+        stage: sum(record.candidate_stage == stage for record in replay_records)
+        for stage in sorted({str(record.candidate_stage) for record in replay_records})
+    }
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "records": count,
         "target_kind": OFFICIAL_TARGET_KIND,
+        "stages": stage_counts,
+        "mid_flow_state_recorded": False,
+        "mid_flow_state_note": "not available in current LearnedAnalysis; replay records initial and post_relax only",
         "dataset": {
             "root": str(Path(args.floorset_lite_root).resolve()),
             "seed": args.seed,
             "score_aware": args.score_aware,
+            "samples": len(sample_ids),
             "sample_id_sha256": sample_id_sha256,
         },
         "checkpoint": {
@@ -121,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
             "flow_steps": flow_steps,
             "requested_collective_steps": args.collective_steps,
             "collective_steps": collective_steps,
+            "topology_seeds": args.topology_seeds,
+            "constraint_seeds": args.constraint_seeds,
             "flow_seed": args.flow_seed,
         },
         "target_distribution": {

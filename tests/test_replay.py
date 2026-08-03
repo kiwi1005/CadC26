@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib.util
 from pathlib import Path
 import json
+import math
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint, save_checkpo
 from hcfp.data import DataSample, extract_labels, sample_to_payload
 from hcfp.dynamics import DynamicsConfig
 from hcfp.fallback import safe_shelf
+from hcfp.geometry import centers_from_xywh
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
 from hcfp.replay import (
@@ -22,6 +25,7 @@ from hcfp.replay import (
     iter_replay,
     official_replay_scores,
     record_from_analysis,
+    records_from_learned_analysis,
     train_ranker_steps,
     write_replay,
     write_replay_v3,
@@ -96,11 +100,12 @@ def test_v3_replay_roundtrip_adds_stable_candidate_provenance(tmp_path: Path) ->
         analysis.telemetry,
         population=3,
     )
+    v3_record = _v3_record()
     legacy_path = tmp_path / "legacy-v2.jsonl"
     v3_path = tmp_path / "replay-v3.jsonl"
 
     assert write_replay([record], legacy_path) == 1
-    assert write_replay_v3([record], v3_path) == 1
+    assert write_replay_v3([v3_record], v3_path) == 1
     legacy_payload = json.loads(legacy_path.read_text(encoding="utf-8"))
     v3_payload = json.loads(v3_path.read_text(encoding="utf-8"))
     loaded = next(iter_replay(v3_path))
@@ -109,40 +114,33 @@ def test_v3_replay_roundtrip_adds_stable_candidate_provenance(tmp_path: Path) ->
     assert "candidate_row_ids" not in legacy_payload
     assert v3_payload["schema_version"] == 3
     assert loaded.target_kind == OFFICIAL_TARGET_KIND
-    assert loaded.candidate_row_ids == record.candidate_row_ids
-    assert torch.equal(loaded.candidate_source_indices, record.candidate_source_indices)
-    assert loaded.candidate_kinds == ("learned", "learned", "learned")
-    assert loaded.candidate_source_types == loaded.candidate_kinds
-    assert loaded.candidate_geometry_sha256 == record.candidate_geometry_sha256
+    assert loaded.candidate_row_ids == v3_record.candidate_row_ids
+    assert torch.equal(loaded.candidate_source_indices, v3_record.candidate_source_indices)
+    assert loaded.candidate_kinds == v3_record.candidate_kinds
+    assert loaded.candidate_source_types == v3_record.candidate_source_types
+    assert loaded.candidate_geometry_sha256 == v3_record.candidate_geometry_sha256
     assert loaded.population_seed == 0
-    assert torch.equal(loaded.feasibility_tier, record.feasibility_tier)
-    assert torch.equal(loaded.target_rank, record.target_rank)
+    assert torch.equal(loaded.feasibility_tier, v3_record.feasibility_tier)
+    assert torch.equal(loaded.target_rank, v3_record.target_rank)
 
 
 def test_v3_row_id_tracks_geometry_not_slot_metadata(tmp_path: Path) -> None:
     record = _v3_record()
-    # Build a second record from the same analysis path by perturbing one raw candidate slot.
-    case = record.sample.case
-    config = AnalyticConfig(
-        dynamics=DynamicsConfig(population=3, steps=0),
-        projection_iterations=2,
-        direction_beam=1,
-    )
-    analysis = solve_case_with_telemetry(case, config)
-    raw = analysis.raw_candidates.clone()
-    raw[4, 0] = raw[4, 0] + 0.123
-    changed = record_from_analysis(
-        record.sample,
+    sample, source, analysis = _merged_replay_fixture()
+    analysis.analytic.raw_candidates[3, 0, 0] += 0.123
+    changed = records_from_learned_analysis(
+        sample,
+        source,
         "e" * 64,
-        raw,
-        analysis.telemetry,
-        population=3,
+        analysis,
+        analytic_population=2,
         population_seed=7,
-    )
+    )[0]
 
     assert changed.candidate_source_indices.tolist() == record.candidate_source_indices.tolist()
     assert changed.candidate_row_ids[0] != record.candidate_row_ids[0]
-    assert changed.candidate_row_ids[1:] == record.candidate_row_ids[1:]
+    assert changed.candidate_row_ids[1] == record.candidate_row_ids[1]
+    assert changed.candidate_row_ids[2] == record.candidate_row_ids[2]
 
 
 def test_v3_row_id_ignores_checkpoint_source_index_population_seed(tmp_path: Path) -> None:
@@ -162,10 +160,125 @@ def test_v3_row_id_ignores_checkpoint_source_index_population_seed(tmp_path: Pat
     assert loaded.population_seed == 12345
 
 
+def test_records_from_learned_analysis_emits_initial_and_post_relax_stages() -> None:
+    sample, source, analysis = _merged_replay_fixture()
+
+    initial, post_relax = records_from_learned_analysis(
+        sample,
+        source,
+        "a" * 64,
+        analysis,
+        analytic_population=2,
+        population_seed=17,
+    )
+
+    assert (initial.candidate_stage, post_relax.candidate_stage) == ("initial", "post_relax")
+    assert initial.candidate_geometry.shape == post_relax.candidate_geometry.shape == (3, sample.case.n, 4)
+    assert initial.candidate_source_indices.tolist() == [3, 4, 5]
+    assert post_relax.candidate_source_indices.tolist() == [8, 9, 10]
+    assert initial.population_seed == post_relax.population_seed == 17
+    assert initial.candidate_kinds == ("learned", "constraint", "topology")
+    assert post_relax.candidate_kinds == ("learned", "constraint", "topology")
+    assert torch.equal(initial.post_repair_log_uncapped_cost, initial.target_score)
+    assert torch.equal(post_relax.post_repair_log_uncapped_cost, post_relax.target_score)
+
+
+def test_records_from_learned_analysis_constraint_repair_and_teacher_delta() -> None:
+    sample, source, analysis = _merged_replay_fixture()
+    initial, _post_relax = records_from_learned_analysis(
+        sample,
+        source,
+        "b" * 64,
+        analysis,
+        analytic_population=2,
+        population_seed=0,
+    )
+
+    assert initial.candidate_kinds[1] == "constraint"
+    assert not torch.equal(initial.post_repair_geometry[1], initial.post_bdp_geometry[1])
+    expected = centers_from_xywh(initial.post_repair_geometry) - centers_from_xywh(initial.candidate_geometry)
+    assert torch.allclose(initial.teacher_delta_xy, expected)
+    assert torch.all(initial.repair_displacement >= 0.0)
+
+
+def test_records_from_learned_analysis_post_relax_hard_negative() -> None:
+    sample, source, analysis = _merged_replay_fixture()
+    _initial, post_relax = records_from_learned_analysis(
+        sample,
+        source,
+        "c" * 64,
+        analysis,
+        analytic_population=2,
+        population_seed=0,
+    )
+
+    assert post_relax.post_repair_hard_feasible.dtype == torch.bool
+    assert bool((~post_relax.post_repair_hard_feasible).any())
+    assert bool((post_relax.feasibility_tier > 0).any())
+
+
+def test_cli_generate_replay_emits_two_v3_stage_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sample, source, analysis = _merged_replay_fixture()
+    checkpoint = tmp_path / "model.pt"
+    checkpoint_hash = save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    analysis = SimpleNamespace(
+        result=SimpleNamespace(
+            used_checkpoint=True,
+            checkpoint_hash=checkpoint_hash,
+            failure_reason=None,
+            candidate_count=5,
+            topology_seed_count=1,
+            constraint_seed_count=1,
+        ),
+        analytic=analysis.analytic,
+    )
+    monkeypatch.setattr(generate_replay, "iter_floorset_lite_with_source", lambda *_args, **_kwargs: iter(((sample, source),)))
+    monkeypatch.setattr(generate_replay, "analyze_case_with_checkpoint", lambda *_args, **_kwargs: analysis)
+    output = tmp_path / "replay.jsonl"
+
+    assert generate_replay.main(
+        [
+            "--floorset-lite-root",
+            str(tmp_path),
+            "--checkpoint",
+            str(checkpoint),
+            "--output",
+            str(output),
+            "--limit",
+            "1",
+            "--population",
+            "2",
+            "--dynamics-steps",
+            "1",
+            "--projection-steps",
+            "2",
+            "--flow-seed",
+            "123",
+            "--topology-seeds",
+            "1",
+            "--constraint-seeds",
+            "1",
+            "--device",
+            "cpu",
+        ]
+    ) == 0
+
+    loaded = list(iter_replay(output))
+    report = json.loads(Path(f"{output}.report.json").read_text(encoding="utf-8"))
+    assert [record.candidate_stage for record in loaded] == ["initial", "post_relax"]
+    assert report["schema_version"] == 3
+    assert report["stages"] == {"initial": 1, "post_relax": 1}
+    assert report["dataset"]["samples"] == 1
+    assert report["mid_flow_state_recorded"] is False
+
+
 def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) -> None:
     payload = _v3_payload(tmp_path)
     count = len(payload["target_score"])
     payload["target_score"] = [1.0] * count
+    payload["post_repair_log_uncapped_cost"] = [1.0] * count
+    payload["post_repair_cap_margin"] = [math.log(10.0) - 1.0] * count
+    payload["post_repair_hard_feasible"] = [True] * count
     payload["feasibility_tier"] = [0] * count
     ordered_ids = sorted(range(count), key=lambda index: payload["candidate_row_ids"][index])
     ranks = [0] * count
@@ -186,6 +299,7 @@ def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) 
             "candidate_kind": payload["candidate_kinds"][index],
             "candidate_source_type": payload["candidate_source_types"][index],
             "candidate_geometry_sha256": payload["candidate_geometry_sha256"][index],
+            "candidate_geometry": payload["candidate_geometry"][index],
         }
         for index, row_id in enumerate(payload["candidate_row_ids"])
     }
@@ -201,6 +315,17 @@ def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) 
         "candidate_geometry_sha256",
         "feasibility_tier",
         "target_rank",
+        "candidate_geometry",
+        "post_bdp_geometry",
+        "post_repair_geometry",
+        "teacher_delta_xy",
+        "repair_displacement",
+        "post_repair_hard_feasible",
+        "post_repair_log_uncapped_cost",
+        "post_repair_cap_margin",
+        "boundary_violations",
+        "grouping_violations",
+        "mib_violations",
     ):
         payload[key] = [payload[key][index] for index in permutation]
     permuted = tmp_path / "tie-permuted.jsonl"
@@ -216,6 +341,7 @@ def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) 
             "candidate_kind": payload["candidate_kinds"][index],
             "candidate_source_type": payload["candidate_source_types"][index],
             "candidate_geometry_sha256": payload["candidate_geometry_sha256"][index],
+            "candidate_geometry": payload["candidate_geometry"][index],
         }
         for index, row_id in enumerate(payload["candidate_row_ids"])
     }
@@ -239,6 +365,12 @@ def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) 
         ("candidate_stage", lambda _value: "", "candidate_stage"),
         ("population_seed", lambda _value: 1.5, "population_seed"),
         ("population_seed", lambda _value: True, "population_seed"),
+        ("post_repair_log_uncapped_cost", lambda value: [value[0] + 1.0, *value[1:]], "target_score"),
+        ("post_repair_cap_margin", lambda value: [value[0] + 1.0, *value[1:]], "cap_margin"),
+        ("post_repair_hard_feasible", lambda value: [not value[0], *value[1:]], "hard_feasible"),
+        ("teacher_delta_xy", lambda value: [[[entry + 1.0 for entry in pair] for pair in value[0]], *value[1:]], "teacher_delta"),
+        ("repair_displacement", lambda value: [value[0] + 1.0, *value[1:]], "repair_displacement"),
+        ("boundary_violations", lambda value: [*value[:1], -1, *value[2:]], "boundary_violations"),
     ),
 )
 def test_v3_replay_validation_fails_closed_on_tamper(
@@ -265,6 +397,9 @@ def test_v3_replay_validation_fails_closed_on_tamper(
         ("feasibility_tier", [0, False, 2]),
         ("target_rank", [0, 1.5, 2]),
         ("target_rank", [0, True, 2]),
+        ("boundary_violations", [0, 1.5, 2]),
+        ("grouping_violations", [0, True, 2]),
+        ("mib_violations", [0, 1, False]),
     ),
 )
 def test_v3_replay_rejects_non_exact_integer_lists(
@@ -279,6 +414,90 @@ def test_v3_replay_rejects_non_exact_integer_lists(
 
     with pytest.raises(ValueError, match="exact integers"):
         next(iter_replay(path))
+
+
+def test_v3_replay_rejects_non_exact_boolean_hard_feasible(tmp_path: Path) -> None:
+    payload = _v3_payload(tmp_path)
+    payload["post_repair_hard_feasible"] = [1, False, True]
+    path = tmp_path / "bad-bool.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="exact booleans"):
+        next(iter_replay(path))
+
+
+def test_records_from_learned_analysis_fails_on_tampered_provenance_hash() -> None:
+    sample, source, analysis = _merged_replay_fixture()
+    bad = dict(analysis.analytic.incumbent_snapshot)
+    records = [dict(record) for record in bad["constraint_seed_provenance"]]
+    records[0]["candidate_sha256"] = "0" * 64
+    bad["constraint_seed_provenance"] = tuple(records)
+    analysis.analytic.incumbent_snapshot = bad
+
+    with pytest.raises(ValueError, match="candidate hash mismatch"):
+        records_from_learned_analysis(
+            sample,
+            source,
+            "a" * 64,
+            analysis,
+            analytic_population=2,
+            population_seed=0,
+        )
+
+
+@pytest.mark.parametrize("missing", ("count", "source", "record"))
+def test_records_from_learned_analysis_fails_on_missing_seed_provenance(missing: str) -> None:
+    sample, source, analysis = _merged_replay_fixture()
+    bad = dict(analysis.analytic.incumbent_snapshot)
+    if missing == "count":
+        bad.pop("constraint_seed_count")
+    elif missing == "source":
+        bad["constraint_seed_sources"] = tuple(bad["constraint_seed_sources"][:-1])
+    else:
+        bad["constraint_seed_provenance"] = tuple(bad["constraint_seed_provenance"][:-1])
+    analysis.analytic.incumbent_snapshot = bad
+
+    with pytest.raises(ValueError, match="constraint_seed"):
+        records_from_learned_analysis(
+            sample,
+            source,
+            "a" * 64,
+            analysis,
+            analytic_population=2,
+            population_seed=0,
+        )
+
+
+def test_v3_replay_rejects_candidate_features_not_derived_from_geometry(tmp_path: Path) -> None:
+    payload = _v3_payload(tmp_path)
+    payload["candidate_features"][0][0] += 1.0
+    path = tmp_path / "bad-features.jsonl"
+    path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="candidate_features"):
+        next(iter_replay(path))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("candidate_source_indices", torch.tensor([3.0, 4.0, 5.0]), "exact integers"),
+        ("feasibility_tier", torch.tensor([0.0, 1.0, 2.0]), "exact integers"),
+        ("target_rank", torch.tensor([0.0, 1.0, 2.0]), "exact integers"),
+        ("post_repair_hard_feasible", torch.tensor([1, 0, 1]), "exact booleans"),
+        ("candidate_population", 3.0, "must be an integer"),
+    ),
+)
+def test_v3_writer_rejects_silent_type_coercion(
+    tmp_path: Path,
+    field: str,
+    value,
+    message: str,
+) -> None:
+    record = replace(_v3_record(), **{field: value})
+
+    with pytest.raises(ValueError, match=message):
+        write_replay_v3([record], tmp_path / f"bad-writer-{field}.jsonl")
 
 
 def test_v3_row_id_includes_candidate_source_type(tmp_path: Path) -> None:
@@ -297,7 +516,7 @@ def test_v3_row_id_includes_candidate_geometry_hash(tmp_path: Path) -> None:
     path = tmp_path / "geometry-hash-tamper.jsonl"
     path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="row_ids"):
+    with pytest.raises(ValueError, match="candidate_geometry"):
         next(iter_replay(path))
 
 
@@ -330,22 +549,108 @@ def _v3_payload(tmp_path: Path) -> dict[str, object]:
 
 
 def _v3_record():
+    sample, source, analysis = _merged_replay_fixture()
+    record = records_from_learned_analysis(
+        sample,
+        source,
+        "d" * 64,
+        analysis,
+        analytic_population=2,
+        population_seed=0,
+    )[0]
+    return record
+
+
+def _merged_replay_fixture():
     case = synthetic_case(32, device="cpu")
-    sample = DataSample("helper-v3", case, extract_labels(case, safe_shelf(case), normalized=True))
+    sample = DataSample("merged-v3", case, extract_labels(case, safe_shelf(case), normalized=True))
     config = AnalyticConfig(
-        dynamics=DynamicsConfig(population=3, steps=0),
+        dynamics=DynamicsConfig(population=5, steps=1),
         projection_iterations=2,
         direction_beam=1,
     )
-    analysis = solve_case_with_telemetry(case, config)
-    record = record_from_analysis(
-        sample,
-        "d" * 64,
-        analysis.raw_candidates,
-        analysis.telemetry,
-        population=3,
+    analytic = solve_case_with_telemetry(case, config)
+    raw = analytic.raw_candidates.clone()
+    raw[9, 0, 0] += 0.05
+    source = {
+        "normalized": False,
+        "area_targets": case.area,
+        "b2b_weight": case.b2b_weight,
+        "pins": case.pins,
+        "p2b_edges": case.p2b_edges,
+        "boundary_bits": case.boundary_bits,
+        "group_membership": case.group_membership,
+        "mib_membership": case.mib_membership,
+    }
+    snapshot = {
+        "constraint_seed_count": 1,
+        "constraint_seed_sources": ("candidate_4", "candidate_9"),
+        "constraint_seed_provenance": (
+            {
+                "source": "candidate_4",
+                "candidate_type": "constraint",
+                "stage": "initial",
+                "candidate_sha256": _lineage_sha256(raw[4]),
+                "details": {"boundary": {"placed": [0]}},
+            },
+            {
+                "source": "candidate_9",
+                "candidate_type": "constraint",
+                "stage": "post_relax",
+                "parent_candidate_sha256": _lineage_sha256(raw[4]),
+                "candidate_sha256": _lineage_sha256(raw[9]),
+                "transform": (
+                    "identity"
+                    if _lineage_sha256(raw[9]) == _lineage_sha256(raw[4])
+                    else "population_relaxation"
+                ),
+                "details": {"boundary": {"placed": [0]}},
+            },
+        ),
+        "topology_seed_count": 1,
+        "topology_seed_sources": ("candidate_5", "candidate_10"),
+        "topology_seed_provenance": (
+            {
+                "source": "candidate_5",
+                "candidate_type": "topology",
+                "stage": "initial",
+                "candidate_sha256": _lineage_sha256(raw[5]),
+            },
+            {
+                "source": "candidate_10",
+                "candidate_type": "topology",
+                "stage": "post_relax",
+                "parent_candidate_sha256": _lineage_sha256(raw[5]),
+                "candidate_sha256": _lineage_sha256(raw[10]),
+                "transform": (
+                    "identity"
+                    if _lineage_sha256(raw[10]) == _lineage_sha256(raw[5])
+                    else "population_relaxation"
+                ),
+            },
+        ),
+    }
+    merged = SimpleNamespace(
+        result=SimpleNamespace(
+            candidate_count=5,
+            topology_seed_count=1,
+            constraint_seed_count=1,
+        ),
+        analytic=SimpleNamespace(
+            raw_candidates=raw,
+            projected_candidates=analytic.projected_candidates.clone(),
+            telemetry=analytic.telemetry,
+            incumbent_snapshot=snapshot,
+        ),
     )
-    return record
+    return sample, source, merged
+
+
+def _lineage_sha256(tensor: torch.Tensor) -> str:
+    raw = torch.as_tensor(tensor).detach().cpu().contiguous().view(torch.uint8)
+    import hashlib
+
+    return hashlib.sha256(raw.numpy().tobytes()).hexdigest()
 
 
 def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> None:
