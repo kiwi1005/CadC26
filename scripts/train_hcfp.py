@@ -236,8 +236,12 @@ def main(argv: list[str] | None = None) -> int:
             "unique_sample_id_sha256": _sample_id_hash(unique_sample_ids),
             "checkpoint_hash": checkpoint_hash,
         }
+    parent_training_report = _parent_training_report(
+        args.init_checkpoint,
+        source_metadata,
+    )
     report = {
-        "schema_version": 2,
+        "schema_version": 3,
         "command": ["scripts/train_hcfp.py", *command_args],
         "checkpoint": str(Path(args.output).resolve()),
         "checkpoint_hash": checkpoint_hash,
@@ -261,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         "sample_count": sample_count,
         "sampling": args.sampling,
         "direct_floorset_lite_stream": direct_stream,
+        "parent_training_report": parent_training_report,
         "shards": [{"path": str(path), "sha256": file_sha256(path)} for path in args.shards],
         "floorset_lite_root": args.floorset_lite_root,
         "first_loss": history[0],
@@ -274,6 +279,22 @@ def main(argv: list[str] | None = None) -> int:
 
 def _sample_id_hash(sample_ids: list[str]) -> str:
     return hashlib.sha256("\n".join(sample_ids).encode()).hexdigest()
+
+
+def _parent_training_report(
+    init_checkpoint: str | None,
+    source_metadata: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if not init_checkpoint or source_metadata is None:
+        return None
+    path = Path(f"{init_checkpoint}.training.json").resolve()
+    if not path.is_file():
+        return None
+    return {
+        "path": str(path),
+        "sha256": file_sha256(path),
+        "checkpoint_hash": source_metadata.get("state_hash"),
+    }
 
 
 def _training_checkpoint_metadata(

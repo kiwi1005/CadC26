@@ -10,9 +10,10 @@ import pytest
 import torch
 
 from hcfp.case import from_official
-from hcfp.checkpoint import RUNTIME_NORMALIZATION
+from hcfp.checkpoint import RUNTIME_NORMALIZATION, save_checkpoint
 from hcfp.data import DataSample, extract_labels
 from hcfp.fallback import safe_shelf
+from hcfp.model import HCFPModel, ModelConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,13 +64,23 @@ def _training_report_payload(
     source_limit: int | None = 2,
     checkpoint_hash: str = "state-hash",
     model_config: dict[str, object] | None = None,
+    checkpoint_metadata: dict[str, object] | None = None,
+    parent_training_report: dict[str, object] | None = None,
+    schema_version: int = 3,
 ) -> dict[str, object]:
     unique_ids = sorted(set(sample_ids))
     return {
-        "schema_version": 2,
+        "schema_version": schema_version,
         "command": ["scripts/train_hcfp.py", "--floorset-lite-root", str(root)],
         "checkpoint": str(checkpoint.resolve()),
         "checkpoint_hash": checkpoint_hash,
+        "checkpoint_metadata": checkpoint_metadata
+        or {
+            "capabilities": {"flow": False},
+            "parent_state_hash": None,
+            "trained_heads": [],
+            "training_objective_version": "supervised_loss_v1",
+        },
         "model_config": model_config or {"hidden_dim": 16},
         "steps": len(sample_ids),
         "direct_floorset_lite_stream": {
@@ -85,6 +96,7 @@ def _training_report_payload(
             "unique_sample_id_sha256": audit._sample_id_hash(unique_ids),
             "checkpoint_hash": checkpoint_hash,
         },
+        "parent_training_report": parent_training_report,
     }
 
 
@@ -264,11 +276,12 @@ def test_training_cli_reports_exact_consumed_direct_stream(
     report = json.loads(first)
     contract = report["direct_floorset_lite_stream"]
     consumed_ids = ["train/a", "train/b", "train/a", "train/b", "train/a"]
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["command"] == ["scripts/train_hcfp.py", *argv]
     assert report["checkpoint"] == str(checkpoint.resolve())
     assert report["checkpoint_hash"] == "state-hash"
     assert report["model_config"]["hidden_dim"] == 16
+    assert report["parent_training_report"] is None
     assert contract == {
         "checkpoint_hash": "state-hash",
         "consumed_count": 5,
@@ -282,6 +295,92 @@ def test_training_cli_reports_exact_consumed_direct_stream(
         "unique_sample_id_count": 2,
         "unique_sample_id_sha256": audit._sample_id_hash(["train/a", "train/b"]),
     }
+
+
+def test_training_cli_records_parent_report_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    parent = tmp_path / "q2.pt"
+    parent_hash = save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1)),
+        parent,
+        RUNTIME_NORMALIZATION,
+    )
+    parent_report = Path(f"{parent}.training.json")
+    parent_report.write_text(
+        json.dumps(
+            _training_report_payload(
+                root,
+                parent,
+                ["parent/a"],
+                source_limit=1,
+                checkpoint_hash=parent_hash,
+                model_config=load_checkpoint_config(parent),
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    samples = (_sample("active/a"),)
+
+    monkeypatch.setattr(
+        train_cli,
+        "iter_floorset_lite",
+        lambda *_args, **_kwargs: iter(samples),
+    )
+    monkeypatch.setattr(
+        train_cli,
+        "train_steps",
+        lambda _model, sample_factory, _optimizer, *, steps, **_kwargs: [
+            {"total": 1.0}
+            for _sample in [next(iter(sample_factory()))]
+            for _index in range(steps)
+        ],
+    )
+    monkeypatch.setattr(train_cli, "save_checkpoint", lambda *_args, **_kwargs: "q3-hash")
+    output = tmp_path / "q3.pt"
+
+    assert train_cli.main(
+        [
+            "--floorset-lite-root",
+            str(root),
+            "--sample-limit",
+            "1",
+            "--output",
+            str(output),
+            "--steps",
+            "1",
+            "--population",
+            "1",
+            "--init-checkpoint",
+            str(parent),
+            "--device",
+            "cpu",
+            "--amp",
+            "off",
+            "--ema-decay",
+            "0",
+        ]
+    ) == 0
+
+    report = json.loads(Path(f"{output}.training.json").read_text(encoding="utf-8"))
+    assert report["parent_training_report"] == {
+        "checkpoint_hash": parent_hash,
+        "path": str(parent_report.resolve()),
+        "sha256": audit.file_sha256(parent_report),
+    }
+
+
+def load_checkpoint_config(path: Path) -> dict[str, object]:
+    _model, metadata = train_cli.load_checkpoint(
+        path,
+        expected_normalization=RUNTIME_NORMALIZATION,
+    )
+    return metadata["config"]
 
 
 def test_training_report_reconstructs_exact_unique_exclusion(
@@ -323,6 +422,161 @@ def test_training_report_reconstructs_exact_unique_exclusion(
     )
     assert provenance["training_report"] == str(training_report.resolve())
     assert contract == payload["direct_floorset_lite_stream"]
+
+
+def test_training_report_exclusion_unions_parent_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    parent = tmp_path / "q2.pt"
+    parent_hash = save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1)),
+        parent,
+        RUNTIME_NORMALIZATION,
+    )
+    parent_model_config = load_checkpoint_config(parent)
+    parent_report = Path(f"{parent}.training.json")
+    parent_payload = _training_report_payload(
+        root,
+        parent,
+        ["parent/a", "parent/b", "parent/a"],
+        seed=10,
+                source_limit=2,
+                checkpoint_hash=parent_hash,
+                model_config=parent_model_config,
+                schema_version=2,
+            )
+    parent_report.write_text(
+        json.dumps(parent_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    active = tmp_path / "q3.pt"
+    active_payload = _training_report_payload(
+        root,
+        active,
+        ["active/a", "parent/b"],
+        seed=20,
+        source_limit=2,
+        checkpoint_hash="q3-hash",
+        model_config={"hidden_dim": 16, "collective_enabled": True},
+        checkpoint_metadata={
+            "capabilities": {"collective": True, "flow": False},
+            "parent_state_hash": parent_hash,
+            "trained_heads": ["collective"],
+            "training_objective_version": "collective_rollout_v1",
+        },
+        parent_training_report={
+            "path": str(parent_report.resolve()),
+            "sha256": audit.file_sha256(parent_report),
+            "checkpoint_hash": parent_hash,
+        },
+    )
+    active_report = Path(f"{active}.training.json")
+    active_report.write_text(
+        json.dumps(active_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    def sample_iterator(_root, **kwargs):
+        if kwargs["seed"] == 10:
+            return iter((_sample("parent/a"), _sample("parent/b")))
+        if kwargs["seed"] == 20:
+            return iter((_sample("active/a"), _sample("parent/b")))
+        raise AssertionError(kwargs)
+
+    monkeypatch.setattr(audit, "iter_floorset_lite", sample_iterator)
+
+    excluded, provenance, contract = audit._load_training_exclusion(
+        active_report,
+        root=root,
+        checkpoint=active,
+        checkpoint_hash="q3-hash",
+        checkpoint_config={"hidden_dim": 16, "collective_enabled": True},
+        asserted_seed=20,
+        asserted_limit=2,
+        asserted_sampling="score-aware",
+    )
+
+    assert contract == active_payload["direct_floorset_lite_stream"]
+    assert excluded == {"active/a", "parent/a", "parent/b"}
+    assert provenance["consumed_count"] == 2
+    assert provenance["count"] == 3
+    assert provenance["active_unique_sample_id_count"] == 2
+    assert provenance["ancestor_unique_sample_id_count"] == 2
+    assert provenance["lineage_report_count"] == 2
+    assert provenance["ancestor_reports"][0]["checkpoint_hash"] == parent_hash
+
+
+def test_training_report_parent_lineage_tamper_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    parent = tmp_path / "q2.pt"
+    parent_hash = save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1)),
+        parent,
+        RUNTIME_NORMALIZATION,
+    )
+    parent_report = Path(f"{parent}.training.json")
+    parent_report.write_text(
+        json.dumps(
+            _training_report_payload(
+                root,
+                parent,
+                ["parent/a"],
+                source_limit=1,
+                checkpoint_hash=parent_hash,
+                model_config=load_checkpoint_config(parent),
+                schema_version=2,
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    active = tmp_path / "q3.pt"
+    active_report = Path(f"{active}.training.json")
+    payload = _training_report_payload(
+        root,
+        active,
+        ["active/a"],
+        seed=20,
+        source_limit=1,
+        checkpoint_hash="q3-hash",
+        model_config={"hidden_dim": 16, "collective_enabled": True},
+        checkpoint_metadata={
+            "capabilities": {"collective": True, "flow": False},
+            "parent_state_hash": parent_hash,
+            "trained_heads": ["collective"],
+            "training_objective_version": "collective_rollout_v1",
+        },
+        parent_training_report={
+            "path": str(parent_report.resolve()),
+            "sha256": "tampered",
+            "checkpoint_hash": parent_hash,
+        },
+    )
+    active_report.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        audit,
+        "iter_floorset_lite",
+        lambda *_args, **_kwargs: iter((_sample("active/a"),)),
+    )
+
+    with pytest.raises(ValueError, match="parent training report sha256 mismatch"):
+        audit._load_training_exclusion(
+            active_report,
+            root=root,
+            checkpoint=active,
+            checkpoint_hash="q3-hash",
+            checkpoint_config={"hidden_dim": 16, "collective_enabled": True},
+        )
 
 
 @pytest.mark.parametrize(

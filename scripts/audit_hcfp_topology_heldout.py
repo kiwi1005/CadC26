@@ -296,7 +296,54 @@ def _load_training_exclusion(
     asserted_sampling: str | None = None,
 ) -> tuple[set[str], dict[str, Any], dict[str, Any]]:
     path = Path(training_report).resolve()
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    active_payload = json.loads(path.read_text(encoding="utf-8"))
+    active_parent_hash = _parent_state_hash(active_payload)
+    active_ids, provenance, contract = _load_single_training_exclusion(
+        path,
+        payload=active_payload,
+        root=root,
+        checkpoint=checkpoint,
+        checkpoint_hash=checkpoint_hash,
+        checkpoint_config=checkpoint_config,
+        asserted_seed=asserted_seed,
+        asserted_limit=asserted_limit,
+        asserted_sampling=asserted_sampling,
+    )
+    ancestor_ids, ancestors = _load_ancestor_training_exclusions(
+        active_payload,
+        root=root,
+        expected_parent_hash=active_parent_hash,
+        seen_reports={str(path)},
+    )
+    union_ids = set(active_ids) | ancestor_ids
+    provenance.update(
+        {
+            "count": len(union_ids),
+            "sample_id_sha256": _sample_id_hash(sorted(union_ids)),
+            "active_unique_sample_id_count": len(active_ids),
+            "active_unique_sample_id_sha256": _sample_id_hash(sorted(active_ids)),
+            "ancestor_reports": ancestors,
+            "ancestor_unique_sample_id_count": len(ancestor_ids),
+            "ancestor_unique_sample_id_sha256": _sample_id_hash(sorted(ancestor_ids)),
+            "lineage_report_count": 1 + len(ancestors),
+        }
+    )
+    return union_ids, provenance, contract
+
+
+def _load_single_training_exclusion(
+    path: Path,
+    *,
+    payload: dict[str, Any] | None = None,
+    root: str | Path,
+    checkpoint: str | Path,
+    checkpoint_hash: str,
+    checkpoint_config: dict[str, Any],
+    asserted_seed: int | None = None,
+    asserted_limit: int | None = None,
+    asserted_sampling: str | None = None,
+) -> tuple[set[str], dict[str, Any], dict[str, Any]]:
+    payload = payload or json.loads(path.read_text(encoding="utf-8"))
     if int(payload.get("schema_version", 0)) < 2:
         raise ValueError("training report schema does not record consumed stream IDs")
     if str(payload.get("checkpoint_hash")) != checkpoint_hash:
@@ -371,6 +418,82 @@ def _load_training_exclusion(
         "checkpoint_hash": checkpoint_hash,
     }
     return set(unique_ids), provenance, dict(contract)
+
+
+def _load_ancestor_training_exclusions(
+    payload: dict[str, Any],
+    *,
+    root: str | Path,
+    expected_parent_hash: str | None,
+    seen_reports: set[str],
+) -> tuple[set[str], list[dict[str, Any]]]:
+    parent_ref = payload.get("parent_training_report")
+    if expected_parent_hash is None:
+        if parent_ref is not None:
+            raise ValueError("training report records unexpected parent lineage")
+        return set(), []
+    if not isinstance(parent_ref, dict):
+        raise ValueError("training report parent lineage is missing")
+    if str(parent_ref.get("checkpoint_hash")) != expected_parent_hash:
+        raise ValueError("parent training report checkpoint hash mismatch")
+    parent_path = Path(str(parent_ref.get("path", ""))).resolve()
+    if not parent_path.is_file():
+        raise ValueError("parent training report path is missing")
+    if str(parent_ref.get("sha256")) != file_sha256(parent_path):
+        raise ValueError("parent training report sha256 mismatch")
+    parent_key = str(parent_path)
+    if parent_key in seen_reports:
+        raise ValueError("training report lineage cycle detected")
+    seen_reports.add(parent_key)
+    parent_payload = json.loads(parent_path.read_text(encoding="utf-8"))
+    parent_checkpoint = Path(str(parent_payload.get("checkpoint", ""))).resolve()
+    parent_model, parent_metadata = load_checkpoint(
+        parent_checkpoint,
+        expected_normalization=RUNTIME_NORMALIZATION,
+        map_location="cpu",
+    )
+    del parent_model
+    if str(parent_metadata["state_hash"]) != expected_parent_hash:
+        raise ValueError("parent checkpoint hash mismatch")
+    parent_config = parent_metadata["config"]
+    if parent_payload.get("model_config") != parent_config:
+        raise ValueError("parent training report model config mismatch")
+    parent_ids, parent_provenance, _parent_contract = _load_single_training_exclusion(
+        parent_path,
+        payload=parent_payload,
+        root=root,
+        checkpoint=parent_checkpoint,
+        checkpoint_hash=expected_parent_hash,
+        checkpoint_config=parent_config,
+    )
+    older_ids, older_reports = _load_ancestor_training_exclusions(
+        parent_payload,
+        root=root,
+        expected_parent_hash=_parent_state_hash(parent_payload),
+        seen_reports=seen_reports,
+    )
+    union_ids = set(parent_ids) | older_ids
+    report_summary = {
+        "training_report": str(parent_path),
+        "training_report_sha256": file_sha256(parent_path),
+        "checkpoint": str(parent_checkpoint),
+        "checkpoint_hash": expected_parent_hash,
+        "count": len(parent_ids),
+        "sample_id_sha256": _sample_id_hash(sorted(parent_ids)),
+        "lineage_union_count": len(union_ids),
+        "lineage_union_sample_id_sha256": _sample_id_hash(sorted(union_ids)),
+    }
+    return union_ids, [report_summary, *older_reports]
+
+
+def _parent_state_hash(payload: dict[str, Any]) -> str | None:
+    metadata = payload.get("checkpoint_metadata")
+    if not isinstance(metadata, dict):
+        return None
+    value = metadata.get("parent_state_hash")
+    if value is None:
+        return None
+    return str(value)
 
 
 def _reconstruct_consumed_sample_ids(
