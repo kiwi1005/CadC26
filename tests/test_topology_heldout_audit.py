@@ -486,7 +486,18 @@ def test_constraint_audit_fails_when_requested_count_is_missing() -> None:
 
 def test_constraint_seeds_require_positive_topology_count() -> None:
     with pytest.raises(ValueError, match="requires --topology-seeds"):
-        audit._validate_args(SimpleNamespace(constraint_seeds=1, topology_seeds=0))
+        audit._validate_args(
+            SimpleNamespace(
+                constraint_seeds=1,
+                topology_seeds=0,
+                collective_steps=0,
+            )
+        )
+
+
+def test_topology_audit_rejects_negative_collective_steps() -> None:
+    with pytest.raises(audit.argparse.ArgumentTypeError):
+        audit._non_negative_int("-1")
 
 
 def test_audit_sample_classifies_constraint_snapshot_sources(
@@ -629,7 +640,7 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
     training_root = tmp_path / "training"
     checkpoint = tmp_path / "checkpoint.pt"
     checkpoint.write_bytes(b"checkpoint")
-    checkpoint_config = {"hidden_dim": 16}
+    checkpoint_config = {"hidden_dim": 16, "collective_enabled": True}
     training_report = Path(f"{checkpoint.resolve()}.training.json")
     training_report.write_text(
         json.dumps(
@@ -665,6 +676,8 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
                 "state_hash": "state-hash",
                 "normalization": RUNTIME_NORMALIZATION,
                 "config": checkpoint_config,
+                "capabilities": {"collective": True, "flow": False},
+                "trained_heads": ["collective"],
             },
         ),
     )
@@ -672,6 +685,7 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
     def fake_analysis(case, _checkpoint, config):
         assert config.topology_seeds == 1
         assert config.constraint_seeds == 0
+        assert config.collective_steps == 2
         assert config.analytic.dynamics.population == 1
         fallback = safe_shelf(case)
         candidates = fallback.unsqueeze(0).repeat(7, 1, 1)
@@ -729,6 +743,8 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
         "cpu",
         "--projection-steps",
         "1",
+        "--collective-steps",
+        "2",
     ]
 
     assert audit.main(argv) == 0
@@ -754,7 +770,11 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
         "sha256": audit.file_sha256(training_report),
     }
     assert report["checkpoint"]["state_hash"] == "state-hash"
+    assert report["checkpoint"]["capabilities"]["collective"] is True
+    assert report["checkpoint"]["trained_heads"] == ["collective"]
     assert report["config"]["constraint_seeds"] == 0
+    assert report["config"]["requested_collective_steps"] == 2
+    assert report["config"]["collective_steps"] == 2
     assert report["evaluation"]["official_raw_replay"] is False
     assert report["cases"][0]["baseline"] == {"area": 2.0, "hpwl": 0.0}
     assert report["cases"][0]["candidate_layout"]["topology_count"] == 1

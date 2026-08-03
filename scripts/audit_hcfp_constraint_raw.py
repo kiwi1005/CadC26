@@ -45,6 +45,7 @@ from hcfp.learned import (  # noqa: E402
     LearnedAnalysis,
     LearnedConfig,
     analyze_case_with_checkpoint,
+    effective_collective_steps,
     select_official_from_analysis,
 )
 from hcfp.projection import ComponentBDPConfig  # noqa: E402
@@ -70,12 +71,17 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(args.heldout_seed)
     device = select_device(args.device)
     checkpoint = Path(args.checkpoint).resolve()
-    _, checkpoint_metadata = load_checkpoint(
+    model, checkpoint_metadata = load_checkpoint(
         checkpoint,
         expected_normalization=RUNTIME_NORMALIZATION,
         map_location="cpu",
     )
     checkpoint_hash = str(checkpoint_metadata["state_hash"])
+    collective_steps = effective_collective_steps(
+        args.collective_steps,
+        checkpoint_metadata,
+        getattr(model, "config", checkpoint_metadata.get("config", {})),
+    )
     training_report = Path(
         args.training_report or f"{checkpoint}.training.json"
     ).resolve()
@@ -105,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
         score_aware=training_sampling == "score-aware",
     )
     heldout = heldout[args.heldout_start :]
-    config = _learned_config(args)
+    config = _learned_config(args, collective_steps=collective_steps)
     data_path = Path(args.data_path).resolve()
     evaluator_module = _load_evaluator(data_path)
     cases = []
@@ -167,6 +173,8 @@ def main(argv: list[str] | None = None) -> int:
             "component_sweeps": args.component_sweeps,
             "component_reset_limit": args.component_reset_limit,
             "flow_steps": args.flow_steps,
+            "requested_collective_steps": args.collective_steps,
+            "collective_steps": collective_steps,
             "flow_seed": args.flow_seed,
             "tail_topk": args.tail_topk,
             "analytic_runtime_comparator": args.analytic_runtime_comparator,
@@ -176,6 +184,8 @@ def main(argv: list[str] | None = None) -> int:
             "file_sha256": file_sha256(checkpoint),
             "state_hash": checkpoint_hash,
             "normalization": checkpoint_metadata["normalization"],
+            "capabilities": checkpoint_metadata.get("capabilities", {}),
+            "trained_heads": checkpoint_metadata.get("trained_heads", []),
         },
         "evaluation": {
             "mode": "pinned official-v10 evaluator on exact raw coordinates",
@@ -268,6 +278,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--component-sweeps", type=int, default=4)
     parser.add_argument("--component-reset-limit", type=int, default=2)
     parser.add_argument("--flow-steps", type=int, default=0)
+    parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
     parser.add_argument(
@@ -318,13 +329,26 @@ def _validate_args(args: argparse.Namespace) -> None:
     _validate_heldout_args(args)
     if args.heldout_start < 0:
         raise ValueError("--heldout-start must be non-negative")
+    if args.collective_steps < 0:
+        raise ValueError("--collective-steps must be non-negative")
     if args.constraint_seeds <= 0:
         raise ValueError(
             "--constraint-seeds must be positive for a raw constraint audit"
         )
 
 
-def _learned_config(args: argparse.Namespace) -> LearnedConfig:
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
+def _learned_config(
+    args: argparse.Namespace,
+    *,
+    collective_steps: int | None = None,
+) -> LearnedConfig:
     return LearnedConfig(
         analytic=AnalyticConfig(
             dynamics=DynamicsConfig(
@@ -343,6 +367,9 @@ def _learned_config(args: argparse.Namespace) -> LearnedConfig:
             ),
         ),
         flow_steps=args.flow_steps,
+        collective_steps=(
+            args.collective_steps if collective_steps is None else collective_steps
+        ),
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
         topology_seeds=args.topology_seeds,

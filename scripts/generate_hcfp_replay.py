@@ -22,6 +22,7 @@ from hcfp.floorset_lite import iter_floorset_lite  # noqa: E402
 from hcfp.learned import (  # noqa: E402
     LearnedConfig,
     analyze_case_with_checkpoint,
+    effective_collective_steps,
     effective_flow_steps,
 )
 from hcfp.replay import OFFICIAL_TARGET_KIND, record_from_analysis, write_replay  # noqa: E402
@@ -37,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dynamics-steps", type=int, default=4)
     parser.add_argument("--projection-steps", type=int, default=8)
     parser.add_argument("--flow-steps", type=int, default=0)
+    parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--score-aware", action="store_true")
@@ -46,18 +48,28 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--score-aware requires an explicit --seed")
 
     device = select_device(args.device)
-    _, checkpoint_metadata = load_checkpoint(
+    model, checkpoint_metadata = load_checkpoint(
         args.checkpoint,
         expected_normalization=RUNTIME_NORMALIZATION,
         map_location="cpu",
     )
     flow_steps = effective_flow_steps(args.flow_steps, checkpoint_metadata)
+    collective_steps = effective_collective_steps(
+        args.collective_steps,
+        checkpoint_metadata,
+        getattr(model, "config", checkpoint_metadata.get("config", {})),
+    )
     analytic = AnalyticConfig(
         dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
         projection_iterations=args.projection_steps,
         direction_beam=2,
     )
-    config = LearnedConfig(analytic=analytic, flow_steps=flow_steps, seed=args.flow_seed)
+    config = LearnedConfig(
+        analytic=analytic,
+        flow_steps=flow_steps,
+        collective_steps=collective_steps,
+        seed=args.flow_seed,
+    )
 
     def records():
         for sample in iter_floorset_lite(
@@ -107,6 +119,8 @@ def main(argv: list[str] | None = None) -> int:
             "direction_beam": analytic.direction_beam,
             "requested_flow_steps": args.flow_steps,
             "flow_steps": flow_steps,
+            "requested_collective_steps": args.collective_steps,
+            "collective_steps": collective_steps,
             "flow_seed": args.flow_seed,
         },
         "target_distribution": {
@@ -131,6 +145,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
 
 
 if __name__ == "__main__":

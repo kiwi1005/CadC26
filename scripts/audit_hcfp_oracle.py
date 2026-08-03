@@ -32,6 +32,7 @@ from hcfp.dynamics import DynamicsConfig  # noqa: E402
 from hcfp.learned import (  # noqa: E402
     LearnedConfig,
     analyze_case_with_checkpoint,
+    effective_collective_steps,
     effective_flow_steps,
 )
 
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         default=AnalyticConfig().direction_beam,
     )
     parser.add_argument("--flow-steps", type=int, default=0)
+    parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--topology-seeds", type=int, default=0)
     parser.add_argument(
@@ -70,13 +72,18 @@ def main(argv: list[str] | None = None) -> int:
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(0)
     checkpoint = Path(args.checkpoint)
-    _, checkpoint_metadata = load_checkpoint(
+    model, checkpoint_metadata = load_checkpoint(
         checkpoint,
         expected_normalization=RUNTIME_NORMALIZATION,
         map_location="cpu",
     )
     checkpoint_hash = str(checkpoint_metadata["state_hash"])
     flow_steps = effective_flow_steps(args.flow_steps, checkpoint_metadata)
+    collective_steps = effective_collective_steps(
+        args.collective_steps,
+        checkpoint_metadata,
+        getattr(model, "config", checkpoint_metadata.get("config", {})),
+    )
     device = select_device(args.device)
     analytic = AnalyticConfig(
         dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
@@ -86,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     config = LearnedConfig(
         analytic=analytic,
         flow_steps=flow_steps,
+        collective_steps=collective_steps,
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
         topology_seeds=args.topology_seeds,
@@ -120,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
             "checkpoint_normalization": checkpoint_metadata["normalization"],
             "checkpoint_capabilities": checkpoint_metadata["capabilities"],
             "checkpoint_trained_heads": checkpoint_metadata["trained_heads"],
+            "requested_collective_steps": args.collective_steps,
+            "collective_steps": collective_steps,
         }
     )
     report = {
@@ -132,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
             "direction_beam": args.direction_beam,
             "requested_flow_steps": args.flow_steps,
             "flow_steps": flow_steps,
+            "requested_collective_steps": args.collective_steps,
+            "collective_steps": collective_steps,
             "flow_seed": args.flow_seed,
             "topology_seeds": args.topology_seeds,
             "allow_missing_topology": args.allow_missing_topology,
@@ -149,6 +161,13 @@ def main(argv: list[str] | None = None) -> int:
     print(output)
     print(json.dumps(report["summary"], indent=2, sort_keys=True))
     return 0
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
 
 
 def _audit_case(

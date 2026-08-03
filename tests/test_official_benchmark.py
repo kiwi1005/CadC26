@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +15,11 @@ from hcfp.model import HCFPModel, ModelConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "artifacts/floorset-v10"
+SCRIPT = ROOT / "scripts/benchmark_hcfp.py"
+SPEC = importlib.util.spec_from_file_location("benchmark_hcfp_test", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+benchmark = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(benchmark)
 
 
 @pytest.mark.skipif(not (DATA / "LiteTensorDataTest").is_dir(), reason="official validation cache is unavailable")
@@ -105,3 +112,93 @@ def test_official_benchmark_audits_valid_checkpoint_usage(tmp_path: Path) -> Non
     assert report["lane_metadata"]["learned"]["flow_steps"] == 2
     assert report["lane_metadata"]["learned"]["flow_seed"] == 17
     assert report["lane_metadata"]["learned"]["tail_topk"] == 1
+
+
+def test_benchmark_optimizer_sets_collective_steps_per_lane(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    false_checkpoint = tmp_path / "false.pt"
+    true_checkpoint = tmp_path / "true.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
+        false_checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"collective": False},
+            "trained_heads": ["collective"],
+            "training_objective_version": "collective_loss_v1",
+        },
+    )
+    true_hash = save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
+        true_checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"collective": True},
+            "trained_heads": ["collective"],
+            "training_objective_version": "collective_loss_v1",
+        },
+    )
+    calls: list[tuple[str, str | None, str | None]] = []
+
+    class FakeEvaluator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def evaluate(self, optimizer: str, *, test_ids=None):
+            del test_ids
+            calls.append(
+                (
+                    optimizer,
+                    benchmark.os.environ.get("HCFP_CHECKPOINT"),
+                    benchmark.os.environ.get("HCFP_COLLECTIVE_STEPS"),
+                )
+            )
+            return SimpleNamespace(test_results=[])
+
+    monkeypatch.setattr(
+        benchmark,
+        "_load_evaluator",
+        lambda _data_path: SimpleNamespace(ContestEvaluator=FakeEvaluator),
+    )
+
+    _, _, lane_metadata = benchmark._run_optimizers(
+        {
+            "disabled": Path("disabled.py"),
+            "enabled": Path("enabled.py"),
+            "plain": Path("plain.py"),
+        },
+        tmp_path,
+        [0],
+        "cpu",
+        {"disabled": false_checkpoint, "enabled": true_checkpoint},
+        flow_steps=0,
+        collective_steps=3,
+        flow_seed=0,
+        tail_topk=None,
+    )
+
+    assert calls == [
+        ("disabled.py", str(false_checkpoint), "0"),
+        ("enabled.py", str(true_checkpoint), "3"),
+        ("plain.py", None, "0"),
+    ]
+    assert lane_metadata["disabled"]["requested_collective_steps"] == 3
+    assert lane_metadata["disabled"]["collective_steps"] == 0
+    assert lane_metadata["enabled"]["checkpoint_hash"] == true_hash
+    assert lane_metadata["enabled"]["capabilities"]["collective"] is True
+    assert lane_metadata["enabled"]["trained_heads"] == ["collective"]
+    assert lane_metadata["enabled"]["collective_steps"] == 3
+    assert lane_metadata["plain"]["collective_steps"] == 0
+
+
+def test_benchmark_collective_steps_defaults_to_zero() -> None:
+    parser_value = benchmark._non_negative_int("0")
+
+    assert parser_value == 0
+
+
+def test_benchmark_rejects_negative_collective_steps() -> None:
+    with pytest.raises(benchmark.argparse.ArgumentTypeError):
+        benchmark._non_negative_int("-1")

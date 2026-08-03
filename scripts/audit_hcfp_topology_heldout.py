@@ -34,7 +34,11 @@ from hcfp.floorset_lite import (  # noqa: E402
     iter_floorset_lite,
     iter_floorset_lite_with_source,
 )
-from hcfp.learned import LearnedConfig, analyze_case_with_checkpoint  # noqa: E402
+from hcfp.learned import (  # noqa: E402
+    LearnedConfig,
+    analyze_case_with_checkpoint,
+    effective_collective_steps,
+)
 from hcfp.verify import (  # noqa: E402
     bbox_area,
     soft_violation_normalized,
@@ -89,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--projection-steps", type=int, default=4)
     parser.add_argument("--direction-beam", type=int, default=1)
     parser.add_argument("--flow-steps", type=int, default=0)
+    parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
     args = parser.parse_args(command_args)
@@ -99,12 +104,17 @@ def main(argv: list[str] | None = None) -> int:
     torch.manual_seed(args.heldout_seed)
     device = select_device(args.device)
     checkpoint = Path(args.checkpoint).resolve()
-    _, checkpoint_metadata = load_checkpoint(
+    model, checkpoint_metadata = load_checkpoint(
         checkpoint,
         expected_normalization=RUNTIME_NORMALIZATION,
         map_location="cpu",
     )
     checkpoint_hash = str(checkpoint_metadata["state_hash"])
+    collective_steps = effective_collective_steps(
+        args.collective_steps,
+        checkpoint_metadata,
+        getattr(model, "config", checkpoint_metadata.get("config", {})),
+    )
     training_report = Path(
         args.training_report or f"{checkpoint}.training.json"
     ).resolve()
@@ -132,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
             direction_beam=args.direction_beam,
         ),
         flow_steps=args.flow_steps,
+        collective_steps=collective_steps,
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
         topology_seeds=args.topology_seeds,
@@ -187,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
             "projection_steps": args.projection_steps,
             "direction_beam": args.direction_beam,
             "flow_steps": args.flow_steps,
+            "requested_collective_steps": args.collective_steps,
+            "collective_steps": collective_steps,
             "flow_seed": args.flow_seed,
             "tail_topk": args.tail_topk,
         },
@@ -195,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
             "file_sha256": file_sha256(checkpoint),
             "state_hash": checkpoint_hash,
             "normalization": checkpoint_metadata["normalization"],
+            "capabilities": checkpoint_metadata.get("capabilities", {}),
+            "trained_heads": checkpoint_metadata.get("trained_heads", []),
         },
         "evaluation": {
             "mode": "hcfp.verify exact-v10-parity primitives",
@@ -256,8 +271,17 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("candidate search step and beam counts are invalid")
     if args.flow_steps < 0:
         raise ValueError("--flow-steps must be non-negative")
+    if args.collective_steps < 0:
+        raise ValueError("--collective-steps must be non-negative")
     if args.tail_topk is not None and not 0 < args.tail_topk <= args.population:
         raise ValueError("--tail-topk must be in [1, population]")
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
 
 
 def _load_training_exclusion(

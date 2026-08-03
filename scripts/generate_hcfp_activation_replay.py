@@ -34,6 +34,7 @@ from hcfp.analytic import (  # noqa: E402
 )
 from hcfp.candidates import candidate_features  # noqa: E402
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
+from hcfp.collective_runtime import CollectiveForceController  # noqa: E402
 from hcfp.data import DataSample, file_sha256  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
 from hcfp.fallback import safe_shelf  # noqa: E402
@@ -44,6 +45,7 @@ from hcfp.learned import (  # noqa: E402
     LearnedResult,
     _learned_population,
     _merge_tail_analyses,
+    effective_collective_steps,
     effective_flow_steps,
     select_official_from_analysis,
 )
@@ -62,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--projection-steps", type=int, default=24)
     parser.add_argument("--direction-beam", type=int, default=4)
     parser.add_argument("--flow-steps", type=int, default=0)
+    parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--tail-topk", type=int, default=4)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int, required=True)
@@ -91,6 +94,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     model = model.to(device=device).eval()
     flow_steps = effective_flow_steps(args.flow_steps, metadata)
+    collective_steps = effective_collective_steps(
+        args.collective_steps,
+        metadata,
+        getattr(model, "config", metadata.get("config", {})),
+    )
     analytic_config = AnalyticConfig(
         dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
         projection_iterations=args.projection_steps,
@@ -99,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     config = LearnedConfig(
         analytic=analytic_config,
         flow_steps=flow_steps,
+        collective_steps=collective_steps,
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
     )
@@ -170,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
             "trained_heads": metadata["trained_heads"],
         },
         "requested_flow_steps": args.flow_steps,
+        "requested_collective_steps": args.collective_steps,
+        "collective_steps": collective_steps,
         "candidate_config": config_payload,
         "candidate_config_hash": config_hash,
         "device": str(device),
@@ -180,6 +191,13 @@ def main(argv: list[str] | None = None) -> int:
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
 
 
 def _record(
@@ -248,17 +266,37 @@ def _record(
     torch.cuda.synchronize() if case.area.is_cuda else None
     learned_branch_start = time.perf_counter()
     try:
+        force_controller = None
+        if config.collective_steps:
+            device_type = "cuda" if case.area.is_cuda else "cpu"
+            with torch.inference_mode(), torch.autocast(
+                device_type=device_type,
+                dtype=torch.bfloat16,
+                enabled=model.config.compute_dtype == "bfloat16",
+            ):
+                static_embedding = model.encoder(case).float()
+            force_controller = CollectiveForceController.from_guidance(
+                model,
+                static_embedding,
+                None,
+            )
         learned_config = replace(
             config.analytic,
             dynamics=replace(
                 config.analytic.dynamics,
                 population=int(learned_population.shape[0]),
+                steps=(
+                    config.collective_steps
+                    if config.collective_steps
+                    else config.analytic.dynamics.steps
+                ),
             ),
         )
         learned = solve_case_from_population_with_telemetry(
             case,
             learned_population,
             learned_config,
+            force_controller=force_controller,
         )
         merged = _merge_tail_analyses(case, analytic, learned)
         learned_wrapper = LearnedAnalysis(
@@ -269,6 +307,9 @@ def _record(
                 None,
                 config.flow_steps,
                 config.analytic.dynamics.population + int(learned_population.shape[0]),
+                collective_steps=config.collective_steps,
+                collective_used=bool(config.collective_steps),
+                collective_calls=config.collective_steps,
             ),
             merged,
         )

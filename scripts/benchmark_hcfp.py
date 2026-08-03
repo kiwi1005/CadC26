@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from hcfp.benchmark import build_report  # noqa: E402
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
-from hcfp.learned import effective_flow_steps  # noqa: E402
+from hcfp.learned import effective_collective_steps, effective_flow_steps  # noqa: E402
 from hcfp.reference import OFFICIAL_FLOORSET_V10  # noqa: E402
 from hcfp.visualize import render_html  # noqa: E402
 
@@ -38,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cases", default="all", help="all or comma-separated test ids")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--flow-steps", type=int, default=0)
+    parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--execution-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
             args.device,
             checkpoints,
             args.flow_steps,
+            args.collective_steps,
             args.flow_seed,
             args.tail_topk,
         )
@@ -118,6 +120,13 @@ def _case_ids(value: str) -> list[int] | None:
     return [int(item) for item in value.split(",")]
 
 
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be non-negative")
+    return parsed
+
+
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("test_results", payload.get("results"))
@@ -133,6 +142,7 @@ def _run_optimizers(
     device: str,
     checkpoints: dict[str, Path],
     flow_steps: int,
+    collective_steps: int,
     flow_seed: int,
     tail_topk: int | None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
@@ -148,11 +158,17 @@ def _run_optimizers(
     ):
         for name, path in specs.items():
             checkpoint = checkpoints.get(name)
+            lane_collective_steps = 0
             if checkpoint is not None:
-                _, checkpoint_metadata = load_checkpoint(
+                model, checkpoint_metadata = load_checkpoint(
                     checkpoint,
                     expected_normalization=RUNTIME_NORMALIZATION,
                     map_location="cpu",
+                )
+                lane_collective_steps = effective_collective_steps(
+                    collective_steps,
+                    checkpoint_metadata,
+                    getattr(model, "config", checkpoint_metadata.get("config", {})),
                 )
                 lane_metadata[name] = {
                     "checkpoint": str(checkpoint),
@@ -163,12 +179,22 @@ def _run_optimizers(
                     "required": True,
                     "requested_flow_steps": flow_steps,
                     "flow_steps": effective_flow_steps(flow_steps, checkpoint_metadata),
+                    "requested_collective_steps": collective_steps,
+                    "collective_steps": lane_collective_steps,
                     "flow_seed": flow_seed,
                     "tail_topk": tail_topk,
                 }
             else:
-                lane_metadata[name] = {"checkpoint": None, "required": False}
-            with _environment("HCFP_CHECKPOINT", str(checkpoint) if checkpoint is not None else None):
+                lane_metadata[name] = {
+                    "checkpoint": None,
+                    "required": False,
+                    "requested_collective_steps": collective_steps,
+                    "collective_steps": 0,
+                }
+            with (
+                _environment("HCFP_CHECKPOINT", str(checkpoint) if checkpoint is not None else None),
+                _environment("HCFP_COLLECTIVE_STEPS", str(lane_collective_steps)),
+            ):
                 evaluator = evaluator_module.ContestEvaluator(str(data_path), verbose=False)
                 result = evaluator.evaluate(str(path), test_ids=test_ids)
             lanes[name] = [asdict(row) for row in result.test_results]

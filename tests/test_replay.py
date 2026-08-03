@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 import json
 import subprocess
@@ -24,6 +25,22 @@ from hcfp.replay import (
     train_ranker_steps,
     write_replay,
 )
+
+
+ROOT = Path(__file__).resolve().parents[1]
+REPLAY_SCRIPT = ROOT / "scripts/generate_hcfp_replay.py"
+REPLAY_SPEC = importlib.util.spec_from_file_location("generate_hcfp_replay_test", REPLAY_SCRIPT)
+assert REPLAY_SPEC is not None and REPLAY_SPEC.loader is not None
+generate_replay = importlib.util.module_from_spec(REPLAY_SPEC)
+REPLAY_SPEC.loader.exec_module(generate_replay)
+ACTIVATION_REPLAY_SCRIPT = ROOT / "scripts/generate_hcfp_activation_replay.py"
+ACTIVATION_REPLAY_SPEC = importlib.util.spec_from_file_location(
+    "generate_hcfp_activation_replay_test",
+    ACTIVATION_REPLAY_SCRIPT,
+)
+assert ACTIVATION_REPLAY_SPEC is not None and ACTIVATION_REPLAY_SPEC.loader is not None
+generate_activation_replay = importlib.util.module_from_spec(ACTIVATION_REPLAY_SPEC)
+ACTIVATION_REPLAY_SPEC.loader.exec_module(generate_activation_replay)
 
 
 def test_replay_roundtrip_and_ranker_update(tmp_path: Path) -> None:
@@ -225,3 +242,9 @@ def test_ranker_clis_reject_checkpoint_mismatch_and_split_leakage(tmp_path: Path
     )
     assert evaluate.returncode != 0
     assert "replay sample overlap" in evaluate.stderr
+
+
+@pytest.mark.parametrize("module", (generate_replay, generate_activation_replay))
+def test_replay_generators_reject_negative_collective_steps(module) -> None:
+    with pytest.raises(module.argparse.ArgumentTypeError):
+        module._non_negative_int("-1")

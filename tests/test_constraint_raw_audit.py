@@ -302,6 +302,36 @@ def test_analysis_and_constraint_provenance_fail_closed() -> None:
         audit._constraint_records("heldout/a", snapshot, indices)
 
 
+def test_constraint_raw_audit_rejects_negative_collective_steps() -> None:
+    with pytest.raises(audit.argparse.ArgumentTypeError):
+        audit._non_negative_int("-1")
+
+
+def test_constraint_raw_learned_config_accepts_effective_collective_steps() -> None:
+    args = SimpleNamespace(
+        population=1,
+        dynamics_steps=0,
+        projection_steps=1,
+        direction_beam=1,
+        component_bdp=False,
+        component_beam=1,
+        component_limit=2,
+        component_uncertain_pairs=1,
+        component_sweeps=1,
+        component_reset_limit=1,
+        flow_steps=0,
+        collective_steps=7,
+        tail_topk=None,
+        flow_seed=0,
+        topology_seeds=1,
+        constraint_seeds=1,
+    )
+
+    config = audit._learned_config(args, collective_steps=3)
+
+    assert config.collective_steps == 3
+
+
 def _candidate(
     index: int,
     candidate_type: str,
