@@ -141,20 +141,36 @@ substitute for the pending promotion rerun.
 - [x] Recompute candidate features from stored geometry on write and read.
 - [x] Record feasibility tiers, uncapped `J`, cap margin, soft violations,
   center repair displacement, source kind, row ID, and geometry hashes.
+- [x] Derive a versioned 26-D pre-tail feature contract with no post-repair
+  target leakage and exact CPU/CUDA grouping-proxy parity.
+- [x] Store training-only feature normalization and reject incompatible
+  checkpoint continuation/runtime ingestion.
 - [~] Add mid-flow snapshots and decision-level teacher actions after pilot proof.
 - [ ] Build 5,000-record training-only replay with required composition.
 - [x] Add post-repair ListMLE with bounded cap-cross weight and legacy fallback.
 - [~] Add post-repair multi-task heads after listwise signal is held-out verified.
 - [x] Implement top-1, top-4 recall, false-promotion, stage, and weighted-regret reporting.
-- [~] Run disjoint 16-case train/dev pilot and evaluate the promotion gates.
+- [x] Build two sample-ID-disjoint 128-list training replays and one disjoint
+  paired 16-sample dev replay.
+- [x] Run the 256-list, three-seed initial-stage pilot and evaluate exact gates.
+- [x] Add an output-neutral runtime shadow aligned to the replay initial slice.
+- [x] Add row-identity-checked selected/oracle visualization across raw,
+  post-BDP, and post-repair geometry.
 - [ ] Run full validation through the preserved dominance safety invariant.
 
-Current gate: **ACTIVE — contracts and training/evaluation loop verified; QoR
-gate pending**. A two-case CUDA smoke trained 20 deterministic steps and reduced
-the training-set weighted score regret from `1.99388` to `0.467588`, while false
-promotions fell from two to zero. This is pipeline evidence only: it uses four
-records from two samples and is not a promotion result. Runtime pruning remains
-shadow-only until the runtime candidate stage matches the complete replay list.
+Current gate: **INITIAL CHECKPOINT PASS ON 2/3 SEEDS; SYSTEM PROMOTION HOLD**.
+Seeds 5104 and 5105 each reach 12/16 exact top-1, 15/16 top-4 oracle recall,
+zero false promotion, weighted rank regret 0.4375, and weighted score regret
+0.004542. Seed 5102 records 11/16, 14/16, and one false promotion. All three
+post-relax evaluations miss the top-1/top-4 gates.
+
+The previous initial-stage listwise baseline was 5/16 top-1, 13/16 top-4, two
+false promotions, weighted rank regret 7.0625, and weighted score regret
+0.045904. The new feature/replay contract therefore has real pilot signal, but
+the 5,000-record target, broader validation-like split, active-selection Pareto
+proof, and A100 profile are still missing. Runtime ranking remains output-neutral
+shadow telemetry. Full evidence is in
+[`hcfp5090_q5_ranker_results_2026-08-04.md`](hcfp5090_q5_ranker_results_2026-08-04.md).
 
 ## Q6 — release verification
 

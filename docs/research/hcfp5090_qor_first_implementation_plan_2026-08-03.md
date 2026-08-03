@@ -3,7 +3,7 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5 active
+Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5 checkpoint PASS/system HOLD
 
 ## Execution checkpoint
 
@@ -40,9 +40,14 @@ Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5 active
   default-off and supplies paired hard negatives to Q5 rather than runtime QoR.
 - Q5 replay schema v3 now binds initial/post-relax geometry, post-BDP geometry,
   exact-repair outcomes, candidate features, row identity, source lineage, and
-  checkpoint/config hashes. A post-repair ListMLE ranker objective and
-  fail-closed held-out evaluator are implemented; the 16-case disjoint gate and
-  5,000-record replay remain pending.
+  checkpoint/config hashes. Repair-aware feature v4, fail-closed checkpoint
+  upgrades, listwise training, exact stage gates, output-neutral runtime shadow,
+  and selected-versus-oracle visualization are implemented.
+- The 256-list initial-stage pilot passes all checkpoint gates on seeds 5104 and
+  5105: 12/16 exact top-1, 15/16 top-4 oracle recall, and zero false promotion.
+  Seed 5102 records 11/16, 14/16, and one false promotion. All three post-relax
+  gates fail. Q5 therefore remains shadow-only; 5,000-record replay, broad
+  three-seed validation, and A100 profiling remain pending.
 
 ## Decision
 
@@ -353,21 +358,23 @@ First replay target: 5,000 training-source records.
 15% diverse successful positives
 ```
 
-The first ranker increment preserves the existing scalar-cost head for checkpoint
-compatibility but replaces capped-score regression with post-repair list order.
-ListMLE is the primary loss, lower predicted cost is better, cap-crossing
-hard-feasible rows receive bounded extra weight, and standardized uncapped `J`
-is a small pointwise regularizer. Legacy schema-v2 replay remains readable and
-uses the old pointwise objective. Multi-task output heads for hard feasibility,
-soft contributions, repair displacement, and runtime follow only after the
-held-out listwise pilot proves candidate signal.
+The first ranker increment preserves the existing scalar-cost output for
+checkpoint compatibility but replaces capped-score regression with post-repair
+list order. Its 26-D feature v4 is derived only from raw/post-BDP geometry,
+source kind, stage, and pre-tail boundary/group/MIB proxies; post-repair targets
+cannot leak into the input. ListMLE is the primary loss, feasibility ordering
+is an auxiliary term, and standardized uncapped `J` is a small pointwise
+regularizer. Training-only z-score statistics are stored in the checkpoint.
+Legacy schema-v2 replay remains readable and uses the old pointwise objective.
+Multi-task output heads for hard feasibility, soft contributions, repair
+displacement, and runtime remain deferred.
 
 The evaluator reports initial and post-relax stages separately, rejects sample
 overlap and checkpoint-lineage mismatch, uses stable row IDs only for prediction
 tie-breaking, and measures top-1, top-4 recall, false promotion, weighted rank
-regret, and nonnegative score regret. The learned runtime ranker remains
-shadow-only because its current pruning point does not yet see the same complete
-candidate list represented by replay v3.
+regret, and nonnegative score regret. The runtime shadow now reproduces the
+exact merged learned initial slice used by replay and records top-4 provenance,
+but deliberately cannot change selection or the exact source.
 
 Promotion targets:
 
@@ -376,6 +383,21 @@ Promotion targets:
 - false promotion zero;
 - weighted rank regret at least 50% below the current ranker;
 - full validation Pareto regressions zero.
+
+### Q5 measured checkpoint
+
+The initial-stage pilot trains on 256 sample-ID-disjoint lists and evaluates on
+a separate 16-sample replay. Seeds 5104 and 5105 each achieve 12/16 top-1,
+15/16 top-4, zero false promotion, and weighted rank regret 0.4375. Seed 5102
+misses at 11/16, 14/16, and one false promotion. Post-relax results are 6/10,
+3/6, and 6/9 for top-1/top-4 across the three seeds, so that stage remains
+ineligible.
+
+The checkpoint gate is therefore a 2/3-seed pass for the initial list only.
+System promotion remains on hold until a larger replay and validation-like
+split prove the signal, active-selection experiments preserve the Pareto
+invariant, and A100 runtime gates pass. The authoritative record is
+[`hcfp5090_q5_ranker_results_2026-08-04.md`](hcfp5090_q5_ranker_results_2026-08-04.md).
 
 ## Activation policy
 
