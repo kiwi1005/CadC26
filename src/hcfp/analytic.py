@@ -9,7 +9,7 @@ from typing import Any
 import torch
 
 from hcfp.case import FloorplanCase, from_official
-from hcfp.dynamics import DynamicsConfig, relax
+from hcfp.dynamics import DynamicsConfig, ForceController, relax
 from hcfp.fallback import safe_shelf
 from hcfp.geometry import bbox_area_tensor, centers_from_xywh, denormalize_xywh, hpwl_tensor
 from hcfp.incumbent import IncumbentManager
@@ -96,6 +96,7 @@ def solve_case_from_population(
     config: AnalyticConfig | None = None,
     *,
     projection_guidance: ProjectionGuidance | None = None,
+    force_controller: ForceController | None = None,
 ) -> Tensor:
     """Run the verified analytic tail from an explicit ``[K,N,4]`` population."""
 
@@ -104,6 +105,7 @@ def solve_case_from_population(
         config,
         initial_population=initial_xywh,
         projection_guidance=projection_guidance,
+        force_controller=force_controller,
     )[0]
 
 
@@ -113,6 +115,7 @@ def solve_case_from_population_with_telemetry(
     config: AnalyticConfig | None = None,
     *,
     projection_guidance: ProjectionGuidance | None = None,
+    force_controller: ForceController | None = None,
 ) -> AnalyticResult:
     """Run the verified tail from explicit candidates and retain exact telemetry."""
 
@@ -121,6 +124,7 @@ def solve_case_from_population_with_telemetry(
         config,
         initial_population=initial_xywh,
         projection_guidance=projection_guidance,
+        force_controller=force_controller,
     )
     return _analytic_result(result)
 
@@ -152,6 +156,7 @@ def _solve_candidates(
     *,
     initial_population: Tensor | None = None,
     projection_guidance: ProjectionGuidance | None = None,
+    force_controller: ForceController | None = None,
 ) -> tuple[Tensor, FloorplanCase, Tensor, ProjectionResult, Tensor, dict[str, object]]:
     cfg = config or AnalyticConfig()
     cpu_case = case.to(device="cpu", dtype=torch.float32)
@@ -159,7 +164,12 @@ def _solve_candidates(
     manager = IncumbentManager(cpu_case, fallback)
 
     initial = fallback.to(case.area.device) if initial_population is None else initial_population
-    result = relax(case, cfg.dynamics, initial_xywh=initial)
+    result = relax(
+        case,
+        cfg.dynamics,
+        initial_xywh=initial,
+        force_controller=force_controller,
+    )
     candidates = torch.cat(
         (fallback.to(case.area.device).unsqueeze(0), result.initial_boxes, result.boxes),
         dim=0,

@@ -3,7 +3,13 @@ from __future__ import annotations
 import torch
 
 from hcfp import analytic
-from hcfp.analytic import AnalyticConfig, solve, solve_case, solve_case_with_telemetry
+from hcfp.analytic import (
+    AnalyticConfig,
+    solve,
+    solve_case,
+    solve_case_from_population_with_telemetry,
+    solve_case_with_telemetry,
+)
 from hcfp.case import from_official
 from hcfp.dynamics import DynamicsConfig
 from hcfp.geometry import denormalize_xywh, normalize_xywh
@@ -125,4 +131,48 @@ def test_solve_case_with_telemetry_reports_every_candidate_after_projection(monk
     assert torch.all(telemetry.projected_overlap <= telemetry.raw_overlap + 1.0e-5)
     assert torch.all(telemetry.overlap_components >= 0)
     assert torch.all(telemetry.projection_displacement >= 0.0)
+    assert verify_feasible(normalized_case, result.selected)
+
+
+def test_population_analytic_path_threads_force_controller() -> None:
+    normalized_case = from_official(
+        3,
+        [4.0, 4.0, 4.0],
+        [[0, 1, 2.0], [1, 2, 1.0]],
+        [],
+        [],
+        [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+        [[-1.0] * 4, [-1.0] * 4, [-1.0] * 4],
+    )
+    candidate = normalize_xywh(
+        normalized_case,
+        torch.tensor(
+            [[0.0, 0.0, 2.0, 2.0], [0.5, 0.0, 2.0, 2.0], [1.0, 0.0, 2.0, 2.0]]
+        ),
+    )
+    population = torch.stack(
+        (candidate, candidate + torch.tensor([0.0, 0.2, 0.0, 0.0]))
+    )
+    config = AnalyticConfig(
+        DynamicsConfig(population=2, steps=2),
+        projection_iterations=4,
+        direction_beam=1,
+    )
+    fractions: list[float] = []
+
+    def controller(case, state, step_fraction):
+        assert case is normalized_case
+        fractions.append(step_fraction)
+        return torch.ones((*state.center.shape[:2], 7), device=state.center.device)
+
+    result = solve_case_from_population_with_telemetry(
+        normalized_case,
+        population,
+        config,
+        force_controller=controller,
+    )
+
+    assert fractions == [0.0, 0.5]
+    assert result.energy_history.shape == (2, 2, 3)
+    assert result.raw_candidates.shape == (5, 3, 4)
     assert verify_feasible(normalized_case, result.selected)

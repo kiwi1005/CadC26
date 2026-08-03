@@ -75,3 +75,100 @@ def test_full_supplied_population_is_retained_as_initial_candidates() -> None:
 
     assert torch.equal(result.initial_boxes, population)
     assert torch.equal(result.boxes, population)
+
+
+def test_force_controller_none_and_ones_match_default_dynamics() -> None:
+    case = _case("cpu")
+    cfg = DynamicsConfig(population=3, steps=3)
+    initial = _overlapped_initial(case)
+
+    baseline = relax(case, cfg, initial_xywh=initial)
+    explicit_none = relax(case, cfg, initial_xywh=initial, force_controller=None)
+
+    def ones_controller(_case, state, _step_fraction):
+        return torch.ones((*state.center.shape[:2], 7), device=state.center.device)
+
+    ones = relax(case, cfg, initial_xywh=initial, force_controller=ones_controller)
+
+    assert torch.equal(explicit_none.boxes, baseline.boxes)
+    assert torch.equal(explicit_none.state.energy_history, baseline.state.energy_history)
+    assert torch.equal(ones.boxes, baseline.boxes)
+    assert torch.equal(ones.state.energy_history, baseline.state.energy_history)
+
+
+def test_zero_force_gate_changes_motion_and_preserves_hard_invariants() -> None:
+    case = _case("cpu")
+    cfg = DynamicsConfig(population=3, steps=2)
+    initial = _overlapped_initial(case)
+    baseline = relax(case, cfg, initial_xywh=initial)
+
+    def zero_controller(_case, state, _step_fraction):
+        return torch.zeros((*state.center.shape[:2], 7), device=state.center.device)
+
+    gated = relax(case, cfg, initial_xywh=initial, force_controller=zero_controller)
+
+    assert not torch.equal(gated.boxes, baseline.boxes)
+    assert torch.equal(gated.boxes[:, 0], case.target[0].expand(3, -1))
+    assert torch.equal(gated.boxes[:, 2, 2:4], case.target[2, 2:4].expand(3, -1))
+    assert torch.isfinite(gated.boxes).all()
+
+
+def test_controller_call_count_step_fraction_and_gate_diagnostics() -> None:
+    case = _case("cpu")
+    cfg = DynamicsConfig(population=2, steps=3)
+    fractions: list[float] = []
+
+    def controller(_case, state, step_fraction):
+        fractions.append(step_fraction)
+        return torch.ones((*state.center.shape[:2], 7), device=state.center.device)
+
+    result = relax(case, cfg, initial_xywh=_overlapped_initial(case), force_controller=controller)
+
+    assert fractions == pytest.approx([0.0, 1.0 / 3.0, 2.0 / 3.0])
+    assert torch.equal(result.diagnostics["force_gate"], torch.ones((2, 3, 7)))
+
+
+def test_steps_zero_does_not_call_controller_and_keeps_population_byte_identical() -> None:
+    case = _case("cpu")
+    candidate = _overlapped_initial(case)
+    population = torch.stack((candidate, candidate + torch.tensor([0.0, 0.1, 0.0, 0.0])))
+    population[:, case.preplaced_mask] = case.target[case.preplaced_mask]
+
+    def controller(*_args):
+        raise AssertionError("controller must not be called for steps=0")
+
+    result = relax(
+        case,
+        DynamicsConfig(population=2, steps=0),
+        initial_xywh=population,
+        force_controller=controller,
+    )
+
+    assert torch.equal(result.initial_boxes, population)
+    assert torch.equal(result.boxes, population)
+
+
+def test_force_gate_validation_rejects_shape_nonfinite_and_negative() -> None:
+    case = _case("cpu")
+    cfg = DynamicsConfig(population=2, steps=1)
+    state = initialize_population(case, cfg, _overlapped_initial(case))
+
+    with pytest.raises(ValueError, match="shape"):
+        typed_forces(case, state, cfg, force_gates=torch.ones((2, 3, 6)))
+    bad = torch.ones((2, 3, 7))
+    bad[0, 0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        typed_forces(case, state, cfg, force_gates=bad)
+    bad = torch.ones((2, 3, 7))
+    bad[0, 0, 0] = -1.0
+    with pytest.raises(ValueError, match="nonnegative"):
+        typed_forces(case, state, cfg, force_gates=bad)
+
+
+def _overlapped_initial(case):
+    return normalize_xywh(
+        case,
+        torch.tensor(
+            [[0.0, 0.0, 2.0, 2.0], [0.5, 0.0, 2.0, 2.0], [1.0, 0.0, 2.0, 2.0]]
+        ),
+    )

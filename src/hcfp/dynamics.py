@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -21,6 +22,16 @@ from hcfp.geometry import (
 
 
 Tensor = torch.Tensor
+FORCE_CHANNELS = (
+    "net",
+    "pin",
+    "overlap",
+    "boundary",
+    "grouping",
+    "compaction",
+    "mib",
+)
+ForceController = Callable[[FloorplanCase, "PopulationState", float], Tensor]
 
 
 @dataclass(frozen=True)
@@ -211,6 +222,7 @@ def typed_forces(
     case: FloorplanCase,
     state: PopulationState,
     config: DynamicsConfig,
+    force_gates: Tensor | None = None,
 ) -> tuple[dict[str, Tensor], Tensor]:
     dimensions = exact_shape_projection(case, state.log_aspect)
     channels = {
@@ -222,16 +234,45 @@ def typed_forces(
         "compaction": _compaction_force(state.center, dimensions),
     }
     normalized = {name: _rms_normalize(force) for name, force in channels.items()}
-    position_force = (
-        config.net_weight * normalized["net"]
-        + config.pin_weight * normalized["pin"]
-        + config.overlap_weight * normalized["overlap"]
-        + config.boundary_weight * normalized["boundary"]
-        + config.grouping_weight * normalized["grouping"]
-        + config.compaction_weight * normalized["compaction"]
-    )
     shape_force = _rms_normalize(_mib_shape_force(case, state.log_aspect))
-    return channels, torch.cat((position_force, config.mib_weight * shape_force.unsqueeze(-1)), dim=-1)
+    gates = _validate_force_gates(force_gates, state) if force_gates is not None else None
+    if gates is None:
+        position_force = (
+            config.net_weight * normalized["net"]
+            + config.pin_weight * normalized["pin"]
+            + config.overlap_weight * normalized["overlap"]
+            + config.boundary_weight * normalized["boundary"]
+            + config.grouping_weight * normalized["grouping"]
+            + config.compaction_weight * normalized["compaction"]
+        )
+        gated_shape = config.mib_weight * shape_force.unsqueeze(-1)
+    else:
+        position_force = (
+            config.net_weight * normalized["net"] * gates[..., 0:1]
+            + config.pin_weight * normalized["pin"] * gates[..., 1:2]
+            + config.overlap_weight * normalized["overlap"] * gates[..., 2:3]
+            + config.boundary_weight * normalized["boundary"] * gates[..., 3:4]
+            + config.grouping_weight * normalized["grouping"] * gates[..., 4:5]
+            + config.compaction_weight * normalized["compaction"] * gates[..., 5:6]
+        )
+        gated_shape = config.mib_weight * shape_force.unsqueeze(-1) * gates[..., 6:7]
+    return channels, torch.cat((position_force, gated_shape), dim=-1)
+
+
+def _validate_force_gates(force_gates: Tensor, state: PopulationState) -> Tensor:
+    gates = torch.as_tensor(
+        force_gates,
+        dtype=torch.float32,
+        device=state.center.device,
+    )
+    expected = (*state.center.shape[:2], len(FORCE_CHANNELS))
+    if gates.shape != expected:
+        raise ValueError("force_gates must have shape [K,N,7]")
+    if not bool(torch.isfinite(gates).all()):
+        raise ValueError("force_gates must be finite")
+    if bool((gates < 0.0).any()):
+        raise ValueError("force_gates must be nonnegative")
+    return gates
 
 
 def _diagnostics(case: FloorplanCase, state: PopulationState) -> dict[str, Tensor]:
@@ -242,8 +283,15 @@ def _diagnostics(case: FloorplanCase, state: PopulationState) -> dict[str, Tenso
     return {"overlap": overlap, "hpwl": hpwl, "bbox_area": area}
 
 
-def step(case: FloorplanCase, state: PopulationState, config: DynamicsConfig) -> tuple[PopulationState, dict[str, Tensor]]:
-    channels, force = typed_forces(case, state, config)
+def step(
+    case: FloorplanCase,
+    state: PopulationState,
+    config: DynamicsConfig,
+    *,
+    force_gates: Tensor | None = None,
+) -> tuple[PopulationState, dict[str, Tensor]]:
+    gates = _validate_force_gates(force_gates, state) if force_gates is not None else None
+    channels, force = typed_forces(case, state, config, force_gates=gates)
     velocity = config.momentum * state.velocity
     velocity[..., :2] += config.step_size * force[..., :2]
     velocity[..., 2] += config.shape_step * force[..., 2]
@@ -268,6 +316,8 @@ def step(case: FloorplanCase, state: PopulationState, config: DynamicsConfig) ->
     snapshot = torch.stack((diagnostics["overlap"], diagnostics["hpwl"], diagnostics["bbox_area"]), dim=-1)
     next_state.energy_history = torch.cat((state.energy_history, snapshot.unsqueeze(1)), dim=1)
     diagnostics.update({f"force_{name}": value for name, value in channels.items()})
+    if gates is not None:
+        diagnostics["force_gate"] = gates
     return next_state, diagnostics
 
 
@@ -276,6 +326,7 @@ def relax(
     config: DynamicsConfig | None = None,
     *,
     initial_xywh: Tensor | None = None,
+    force_controller: ForceController | None = None,
 ) -> DynamicsResult:
     cfg = config or DynamicsConfig()
     if initial_xywh is None:
@@ -292,8 +343,13 @@ def relax(
         else xywh_from_state(case, state.center, state.log_aspect)
     )
     diagnostics = _diagnostics(case, state)
-    for _ in range(cfg.steps):
-        state, diagnostics = step(case, state, cfg)
+    for step_index in range(cfg.steps):
+        force_gates = (
+            None
+            if force_controller is None
+            else force_controller(case, state, step_index / max(cfg.steps, 1))
+        )
+        state, diagnostics = step(case, state, cfg, force_gates=force_gates)
         if not bool(torch.isfinite(state.center).all() and torch.isfinite(state.log_aspect).all()):
             raise FloatingPointError("collective dynamics produced non-finite geometry")
     boxes = (
