@@ -372,16 +372,19 @@ def build_report(
         for name, rows in normalized.items()
         if name != baseline
     }
-    decisions = {
-        name: promotion_decision(
+    decisions = {}
+    for name, summary in lane_summary.items():
+        if name == baseline:
+            continue
+        decision = promotion_decision(
             lane_summary[baseline],
             summary,
             baseline_large=large_case_summary[baseline]["106-120"],
             candidate_large=large_case_summary[name]["106-120"],
         )
-        for name, summary in lane_summary.items()
-        if name != baseline
-    }
+        if decision == "PROMOTE" and comparisons[name]["regressed_cases"]:
+            decision = "HOLD"
+        decisions[name] = decision
     return {
         "schema_version": 1,
         "provenance": provenance or {},

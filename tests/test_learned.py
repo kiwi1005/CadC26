@@ -399,6 +399,45 @@ def _solve_pareto(
     return result, conversions
 
 
+def _select_with_ranker_counterfactual(
+    monkeypatch: pytest.MonkeyPatch,
+    analysis: SimpleNamespace,
+    *,
+    feasible_x: set[float],
+    quality: dict[float, tuple[float, float, float]],
+    experiment: bool,
+) -> list[tuple[float, float, float, float]]:
+    import hcfp.learned as learned
+
+    source = _source()
+    case = from_official(
+        source.block_count,
+        source.area_targets,
+        source.b2b_connectivity,
+        source.p2b_connectivity,
+        source.pins_pos,
+        source.constraints,
+        source.target_positions,
+    )
+
+    def to_official(_source, _case, candidate):
+        x = float(candidate[0, 0])
+        return [(x, 0.0, 2.0, 2.0), (x + 3.0, 0.0, 2.0, 2.0)]
+
+    monkeypatch.setattr(learned, "to_official_placements", to_official)
+    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] in feasible_x)
+    monkeypatch.setattr(learned, "_raw_quality", lambda _source, _case, rows: quality[rows[0][0]])
+    return learned.select_official_from_analysis(
+        source,
+        case,
+        analysis,
+        config=LearnedConfig(
+            analytic=_pareto_config(),
+            ranker_selection_experiment=experiment,
+        ),
+    )
+
+
 def test_checkpoint_lane_runs_through_exact_safe_tail(tmp_path: Path) -> None:
     torch.manual_seed(5)
     checkpoint = tmp_path / "model.pt"
@@ -768,6 +807,114 @@ def test_ranker_shadow_failure_is_recorded_without_changing_selection() -> None:
         == "ValueError: ranker shadow scores must be finite"
     )
     assert "ranker_shadow_top4" not in shadowed.incumbent_snapshot
+
+
+def test_ranker_selection_experiment_default_off_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = _pareto_analysis()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = (
+        {"source": "candidate_4", "score": -1.0, "kind": "learned"},
+    )
+
+    result = _select_with_ranker_counterfactual(
+        monkeypatch,
+        analysis,
+        feasible_x={20.0, 40.0},
+        quality={20.0: (2.0, 20.0, 20.0), 40.0: (0.0, 1.0, 1.0)},
+        experiment=False,
+    )
+
+    assert result[0][0] == 20.0
+    assert "ranker_selection_counterfactual" not in analysis.analytic.incumbent_snapshot
+
+
+def test_ranker_selection_experiment_records_passing_counterfactual_without_selecting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = _pareto_analysis()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = (
+        {"source": "candidate_4", "score": -1.0, "kind": "learned"},
+    )
+
+    result = _select_with_ranker_counterfactual(
+        monkeypatch,
+        analysis,
+        feasible_x={20.0, 40.0},
+        quality={20.0: (2.0, 20.0, 20.0), 40.0: (0.0, 1.0, 1.0)},
+        experiment=True,
+    )
+
+    snapshot = analysis.analytic.incumbent_snapshot
+    assert result[0][0] == 20.0
+    assert snapshot["exact_source"] == "candidate_2"
+    assert snapshot["ranker_selection_experiment_mode"] == "counterfactual_only"
+    assert snapshot["ranker_selection_counterfactual"] == {
+        "would_accept": True,
+        "source": "candidate_4",
+        "shadow_rank": 0,
+        "metrics": (0.0, 1.0, 1.0),
+        "current_metrics": (2.0, 20.0, 20.0),
+        "rejection_reason": None,
+    }
+
+
+def test_ranker_selection_experiment_rejects_hard_infeasible_shadow_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = _pareto_analysis()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = (
+        {"source": "candidate_4", "score": -1.0, "kind": "learned"},
+    )
+
+    result = _select_with_ranker_counterfactual(
+        monkeypatch,
+        analysis,
+        feasible_x={20.0},
+        quality={20.0: (2.0, 20.0, 20.0)},
+        experiment=True,
+    )
+
+    snapshot = analysis.analytic.incumbent_snapshot
+    assert result[0][0] == 20.0
+    assert snapshot["ranker_selection_counterfactual"]["would_accept"] is False
+    assert (
+        snapshot["ranker_selection_counterfactual"]["rejection_reason"]
+        == "hard_infeasible"
+    )
+    assert (
+        snapshot["ranker_selection_evaluated_top4"][0]["rejection_reason"]
+        == "hard_infeasible"
+    )
+
+
+def test_ranker_selection_experiment_rejects_non_dominating_shadow_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = _pareto_analysis()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = (
+        {"source": "candidate_4", "score": -1.0, "kind": "learned"},
+    )
+
+    result = _select_with_ranker_counterfactual(
+        monkeypatch,
+        analysis,
+        feasible_x={20.0, 40.0},
+        quality={20.0: (2.0, 20.0, 20.0), 40.0: (3.0, 1.0, 1.0)},
+        experiment=True,
+    )
+
+    snapshot = analysis.analytic.incumbent_snapshot
+    assert result[0][0] == 20.0
+    assert snapshot["ranker_selection_counterfactual"]["would_accept"] is False
+    assert (
+        snapshot["ranker_selection_counterfactual"]["rejection_reason"]
+        == "not_pareto_dominating"
+    )
+    assert (
+        snapshot["ranker_selection_evaluated_top4"][0]["rejection_reason"]
+        == "not_pareto_dominating"
+    )
 
 
 def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path: Path) -> None:

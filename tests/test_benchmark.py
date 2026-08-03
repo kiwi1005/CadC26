@@ -78,6 +78,21 @@ def test_promotion_holds_on_runtime_or_large_case_regression() -> None:
     assert large_report["promotion_decisions"]["analytic"] == "HOLD"
 
 
+def test_promotion_holds_on_any_per_case_cost_regression() -> None:
+    candidate = _rows((2.1, 0.1))
+    candidate[0]["runtime_seconds"] = 0.05
+    candidate[1]["runtime_seconds"] = 1.0
+
+    report = build_report(
+        {"fallback": _rows(), "analytic": candidate},
+        baseline="fallback",
+    )
+
+    assert report["comparisons"]["analytic"]["weighted_cost_delta"] < 0.0
+    assert report["comparisons"]["analytic"]["regressed_cases"] == 1
+    assert report["promotion_decisions"]["analytic"] == "HOLD"
+
+
 def test_result_cli_writes_report_and_html(tmp_path: Path) -> None:
     fallback = tmp_path / "fallback.json"
     analytic = tmp_path / "analytic.json"

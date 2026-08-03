@@ -193,6 +193,78 @@ def test_benchmark_optimizer_sets_collective_steps_per_lane(
     assert lane_metadata["plain"]["collective_steps"] == 0
 
 
+def test_benchmark_optimizer_propagates_structural_search_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str | None, str | None, str | None]] = []
+
+    class FakeEvaluator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def evaluate(self, _optimizer: str, *, test_ids=None):
+            del test_ids
+            calls.append(
+                (
+                    benchmark.os.environ.get("HCFP_TOPOLOGY_SEEDS"),
+                    benchmark.os.environ.get("HCFP_CONSTRAINT_SEEDS"),
+                    benchmark.os.environ.get("HCFP_RANKER_SELECTION_EXPERIMENT"),
+                )
+            )
+            return SimpleNamespace(test_results=[])
+
+    monkeypatch.setattr(
+        benchmark,
+        "_load_evaluator",
+        lambda _data_path: SimpleNamespace(ContestEvaluator=FakeEvaluator),
+    )
+
+    _, _, lane_metadata = benchmark._run_optimizers(
+        {"plain": Path("plain.py")},
+        tmp_path,
+        [0],
+        "cpu",
+        {},
+        flow_steps=0,
+        collective_steps=0,
+        flow_seed=7,
+        tail_topk=None,
+        topology_seeds=16,
+        constraint_seeds=8,
+        ranker_selection_experiment=True,
+    )
+
+    assert calls == [("16", "8", "1")]
+    assert lane_metadata["plain"]["topology_seeds"] == 16
+    assert lane_metadata["plain"]["constraint_seeds"] == 8
+    assert lane_metadata["plain"]["ranker_selection_experiment"] is False
+
+
+def test_benchmark_provenance_binds_search_and_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    completed = iter(
+        (
+            SimpleNamespace(stdout="abc123\n"),
+            SimpleNamespace(stdout=" M changed.py\n"),
+        )
+    )
+    monkeypatch.setattr(benchmark.subprocess, "run", lambda *_args, **_kwargs: next(completed))
+
+    provenance = benchmark._provenance(
+        Path("dataset"),
+        "cpu",
+        "optimizer",
+        search_config={"topology_seeds": 16},
+    )
+
+    assert provenance["git_commit"] == "abc123"
+    assert provenance["git_clean"] is False
+    assert provenance["git_status_sha256"]
+    assert provenance["search_config"] == {"topology_seeds": 16}
+
+
 def test_benchmark_collective_steps_defaults_to_zero() -> None:
     parser_value = benchmark._non_negative_int("0")
 

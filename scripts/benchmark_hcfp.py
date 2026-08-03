@@ -41,6 +41,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--execution-seed", type=int, default=0)
+    parser.add_argument("--topology-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--constraint-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--ranker-selection-experiment", action="store_true")
     parser.add_argument("--tail-topk", type=int)
     parser.add_argument(
         "--checkpoint",
@@ -52,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--visualize-dir")
     parser.add_argument("--visualize-cases", default="")
     args = parser.parse_args(argv)
+    if args.constraint_seeds and not args.topology_seeds:
+        parser.error("--constraint-seeds requires --topology-seeds")
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(args.execution_seed)
@@ -74,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
             args.collective_steps,
             args.flow_seed,
             args.tail_topk,
+            args.topology_seeds,
+            args.constraint_seeds,
+            args.ranker_selection_experiment,
         )
         mode = "optimizer"
     else:
@@ -85,7 +93,21 @@ def main(argv: list[str] | None = None) -> int:
     report = build_report(
         lanes,
         baseline=args.baseline,
-        provenance=_provenance(Path(args.data_path), args.device, mode),
+        provenance=_provenance(
+            Path(args.data_path),
+            args.device,
+            mode,
+            search_config={
+                "execution_seed": args.execution_seed,
+                "flow_seed": args.flow_seed,
+                "flow_steps": args.flow_steps,
+                "collective_steps": args.collective_steps,
+                "topology_seeds": args.topology_seeds,
+                "constraint_seeds": args.constraint_seeds,
+                "tail_topk": args.tail_topk,
+                "ranker_selection_experiment": args.ranker_selection_experiment,
+            },
+        ),
         case_metadata=case_metadata,
         lane_metadata=lane_metadata,
     )
@@ -145,6 +167,9 @@ def _run_optimizers(
     collective_steps: int,
     flow_seed: int,
     tail_topk: int | None,
+    topology_seeds: int = 0,
+    constraint_seeds: int = 0,
+    ranker_selection_experiment: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
     evaluator_module = _load_evaluator(data_path)
     lanes = {}
@@ -155,6 +180,12 @@ def _run_optimizers(
         _environment("HCFP_FLOW_STEPS", str(flow_steps)),
         _environment("HCFP_FLOW_SEED", str(flow_seed)),
         _environment("HCFP_TAIL_TOPK", str(tail_topk) if tail_topk is not None else None),
+        _environment("HCFP_TOPOLOGY_SEEDS", str(topology_seeds)),
+        _environment("HCFP_CONSTRAINT_SEEDS", str(constraint_seeds)),
+        _environment(
+            "HCFP_RANKER_SELECTION_EXPERIMENT",
+            "1" if ranker_selection_experiment else None,
+        ),
     ):
         for name, path in specs.items():
             checkpoint = checkpoints.get(name)
@@ -183,6 +214,9 @@ def _run_optimizers(
                     "collective_steps": lane_collective_steps,
                     "flow_seed": flow_seed,
                     "tail_topk": tail_topk,
+                    "topology_seeds": topology_seeds,
+                    "constraint_seeds": constraint_seeds,
+                    "ranker_selection_experiment": ranker_selection_experiment,
                 }
             else:
                 lane_metadata[name] = {
@@ -190,6 +224,9 @@ def _run_optimizers(
                     "required": False,
                     "requested_collective_steps": collective_steps,
                     "collective_steps": 0,
+                    "topology_seeds": topology_seeds,
+                    "constraint_seeds": constraint_seeds,
+                    "ranker_selection_experiment": False,
                 }
             with (
                 _environment("HCFP_CHECKPOINT", str(checkpoint) if checkpoint is not None else None),
@@ -236,7 +273,13 @@ def _load_evaluator(data_path: Path):
     return module
 
 
-def _provenance(data_path: Path, device: str, mode: str) -> dict[str, Any]:
+def _provenance(
+    data_path: Path,
+    device: str,
+    mode: str,
+    *,
+    search_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -247,8 +290,20 @@ def _provenance(data_path: Path, device: str, mode: str) -> dict[str, Any]:
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         commit = "unknown"
+    try:
+        status = subprocess.run(
+            ["git", "status", "--short"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        status = "unknown\n"
     return {
         "git_commit": commit,
+        "git_clean": not status.strip(),
+        "git_status_sha256": hashlib.sha256(status.encode()).hexdigest(),
         "mode": mode,
         "device": device,
         "data_path": str(data_path),
@@ -257,6 +312,10 @@ def _provenance(data_path: Path, device: str, mode: str) -> dict[str, Any]:
         "torch_version": torch.__version__,
         "cuda_version": torch.version.cuda,
         "cuda_available": torch.cuda.is_available(),
+        "cuda_device_name": (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+        ),
+        "search_config": dict(search_config or {}),
         "command": " ".join(sys.argv),
     }
 

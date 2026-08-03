@@ -95,6 +95,7 @@ class LearnedConfig:
     topology_seeds: int = 0
     constraint_seeds: int = 0
     collective_steps: int = 0
+    ranker_selection_experiment: bool = False
 
     def __post_init__(self) -> None:
         if self.flow_steps < 0:
@@ -115,6 +116,8 @@ class LearnedConfig:
             raise ValueError("collective_steps must be non-negative")
         if self.constraint_seeds and not self.topology_seeds:
             raise ValueError("constraint_seeds require topology_seeds")
+        if type(self.ranker_selection_experiment) is not bool:
+            raise ValueError("ranker_selection_experiment must be boolean")
 
 
 def effective_flow_steps(requested: int, checkpoint_metadata: dict[str, Any]) -> int:
@@ -415,12 +418,20 @@ def select_official_from_analysis(
             analysis,
             placements,
         )
-        return _raw_analytic_pareto_guard(
+        placements = _raw_analytic_pareto_guard(
             source,
             case,
             analysis,
             placements,
         )
+        _record_ranker_selection_counterfactual(
+            source,
+            case,
+            analysis,
+            placements,
+            enabled=_learned_config(config).ranker_selection_experiment,
+        )
+        return placements
     telemetry = analysis.analytic.telemetry
     candidates = analysis.analytic.projected_candidates.detach().to(
         device="cpu", dtype=torch.float32
@@ -449,6 +460,13 @@ def select_official_from_analysis(
         if verify_feasible(source, candidate):
             if index == 0:
                 break
+            _record_ranker_selection_counterfactual(
+                source,
+                case,
+                analysis,
+                candidate,
+                enabled=_learned_config(config).ranker_selection_experiment,
+            )
             return candidate
     analytic = solve_analytic(source, _learned_config(config).analytic, device=device)
     if verify_feasible(source, analytic):
@@ -474,10 +492,17 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
             constraint_seeds=int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "0")),
             collective_steps=int(os.environ.get("HCFP_COLLECTIVE_STEPS", "0")),
+            ranker_selection_experiment=_truthy_env(
+                os.environ.get("HCFP_RANKER_SELECTION_EXPERIMENT")
+            ),
         )
     if isinstance(config, AnalyticConfig):
         return LearnedConfig(analytic=config)
     return config
+
+
+def _truthy_env(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _merge_tail_analyses(
@@ -857,6 +882,115 @@ def _merge_energy_history(first: Tensor, second: Tensor) -> Tensor:
         return out
 
     return torch.cat((padded(first), padded(second)), dim=0)
+
+
+def _record_ranker_selection_counterfactual(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    current: list[tuple[float, float, float, float]],
+    *,
+    enabled: bool,
+) -> None:
+    """Evaluate shadow top-k as an offline counterfactual without selecting it."""
+
+    if not enabled:
+        return
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    if not isinstance(snapshot, dict):
+        return
+    snapshot["ranker_selection_experiment_mode"] = "counterfactual_only"
+    top4 = snapshot.get("ranker_shadow_top4", ())
+    if not isinstance(top4, tuple) or not top4:
+        snapshot["ranker_selection_counterfactual"] = {
+            "would_accept": False,
+            "rejection_reason": "missing_shadow_top4",
+        }
+        return
+    try:
+        current_metrics = _raw_quality(source, case, current)
+    except (TypeError, ValueError) as exc:
+        snapshot["ranker_selection_counterfactual"] = {
+            "would_accept": False,
+            "rejection_reason": f"current_quality_unavailable:{type(exc).__name__}",
+        }
+        return
+
+    projected = analysis.analytic.projected_candidates
+    evaluated: list[dict[str, object]] = []
+    for rank, row in enumerate(top4):
+        record = _ranker_counterfactual_record(row, rank)
+        if record.get("rejection_reason") is not None:
+            evaluated.append(record)
+            continue
+        source_name = str(record["source"])
+        index = _candidate_index(source_name)
+        if index is None or not 0 <= index < projected.shape[0]:
+            record["rejection_reason"] = "invalid_source"
+            evaluated.append(record)
+            continue
+        try:
+            placement = to_official_placements(
+                source,
+                case,
+                projected[index].detach().to(device="cpu", dtype=torch.float32),
+            )
+            placement = _repair_constraint_candidate(
+                source,
+                placement,
+                snapshot,
+                source_name,
+            )
+            if not verify_feasible(source, placement):
+                record["rejection_reason"] = "hard_infeasible"
+                evaluated.append(record)
+                continue
+            metrics = _raw_quality(source, case, placement)
+        except (TypeError, ValueError) as exc:
+            record["rejection_reason"] = f"evaluation_failed:{type(exc).__name__}"
+            evaluated.append(record)
+            continue
+        record["metrics"] = metrics
+        if not _dominates(metrics, current_metrics):
+            record["rejection_reason"] = "not_pareto_dominating"
+            evaluated.append(record)
+            continue
+        record["rejection_reason"] = None
+        evaluated.append(record)
+        snapshot["ranker_selection_counterfactual"] = {
+            "would_accept": True,
+            "source": source_name,
+            "shadow_rank": rank,
+            "metrics": metrics,
+            "current_metrics": current_metrics,
+            "rejection_reason": None,
+        }
+        snapshot["ranker_selection_evaluated_top4"] = tuple(evaluated)
+        return
+
+    snapshot["ranker_selection_counterfactual"] = {
+        "would_accept": False,
+        "rejection_reason": str(evaluated[0]["rejection_reason"])
+        if evaluated
+        else "empty_shadow_top4",
+        "current_metrics": current_metrics,
+    }
+    snapshot["ranker_selection_evaluated_top4"] = tuple(evaluated)
+
+
+def _ranker_counterfactual_record(row: object, rank: int) -> dict[str, object]:
+    if not isinstance(row, dict):
+        return {"shadow_rank": rank, "source": "", "rejection_reason": "malformed_row"}
+    try:
+        score = float(row.get("score", 0.0))
+    except (TypeError, ValueError):
+        score = 0.0
+    return {
+        "shadow_rank": rank,
+        "source": str(row.get("source", "")),
+        "shadow_score": score,
+        "kind": str(row.get("kind", "")),
+    }
 
 
 def _raw_analytic_pareto_guard(
