@@ -184,6 +184,96 @@ def _guided_candidate_mask(guidance: ProjectionGuidance) -> Tensor:
     )
 
 
+def _split_projection_kwargs(
+    *,
+    problem: Any | None,
+    mask: Tensor,
+    iterations: int,
+    beam: int,
+    outer_iterations: int,
+    tolerance: float,
+) -> dict[str, Any]:
+    return {
+        "problem": problem,
+        "preplaced_mask": mask,
+        "iterations": iterations,
+        "beam": beam,
+        "outer_iterations": outer_iterations,
+        "tolerance": tolerance,
+    }
+
+
+def _original_ok_mask(
+    work: Tensor,
+    mask: Tensor,
+    tolerance: float,
+    ignore_preplaced_pairs: bool,
+) -> Tensor:
+    active = _active_overlap_matrix_exact(work, tolerance)
+    if ignore_preplaced_pairs:
+        exempt = mask[:, None] & mask[None, :]
+        active = torch.where(
+            exempt.unsqueeze(0),
+            torch.zeros_like(active),
+            active,
+        )
+    dimensions_ok = (work[..., 2:4] > 0).all(dim=(1, 2))
+    return dimensions_ok & ~active.any(dim=(1, 2))
+
+
+def _already_feasible_result(
+    work: Tensor,
+    *,
+    single: bool,
+    iterations: int,
+) -> ProjectionResult:
+    count, n = work.shape[:2]
+    pair_i, pair_j = _pair_index(n, work.device)
+    pairs = torch.stack((pair_i, pair_j), dim=1)
+    directions = torch.full(
+        (count, pairs.shape[0]),
+        -1,
+        dtype=torch.long,
+        device=work.device,
+    )
+    zeros_long = torch.zeros(count, dtype=torch.long, device=work.device)
+    zeros_float = torch.zeros(count, dtype=work.dtype, device=work.device)
+    zeros_bool = torch.zeros(count, dtype=torch.bool, device=work.device)
+    ones_bool = torch.ones(count, dtype=torch.bool, device=work.device)
+    max_overlap = overlap_matrix(work).amax(dim=(1, 2))
+
+    def maybe_single(value: Tensor) -> Tensor:
+        return value[0] if single else value
+
+    return ProjectionResult(
+        xywh=work[0] if single else work,
+        ok=True,
+        status="ok",
+        max_overlap=maybe_single(max_overlap),
+        ok_mask=maybe_single(ones_bool),
+        displacement=maybe_single(zeros_float),
+        active_pair_count=maybe_single(zeros_long),
+        failure_reasons=("ok",) if single else ("ok",) * count,
+        iterations=iterations,
+        directions=directions[0] if single else directions,
+        active_pairs=pairs,
+        initial_pair_count=maybe_single(zeros_long),
+        final_pair_count=maybe_single(zeros_long),
+        component_rebuilds=maybe_single(zeros_long),
+        new_pairs_detected=maybe_single(zeros_long),
+        reset_count=maybe_single(zeros_long),
+        beam_states_evaluated=maybe_single(zeros_long),
+        max_component_size=maybe_single(zeros_long),
+        component_proposal_available=maybe_single(zeros_bool),
+        component_proposal_xywh=work[0] if single else work.clone(),
+        component_proposal_hard_ok=maybe_single(ones_bool),
+        component_proposal_structure_ok=maybe_single(ones_bool),
+        component_proposal_final_pair_count=maybe_single(zeros_long),
+        component_proposal_displacement=maybe_single(zeros_float),
+        component_proposal_rollback_reason=("already_feasible",) * count,
+    )
+
+
 def _contact_membership(guidance: ProjectionGuidance) -> Tensor:
     candidates, n = guidance.contact_confidence.shape[:2]
     rows: list[Tensor] = []
@@ -1489,14 +1579,14 @@ def project_disjunctive(
             guidance = None
             clearance = legacy_clearance
         elif not bool(guided_candidates.all().item()):
-            common = {
-                "problem": problem,
-                "preplaced_mask": mask,
-                "iterations": iterations,
-                "beam": beam,
-                "outer_iterations": outer_iterations,
-                "tolerance": tolerance,
-            }
+            common = _split_projection_kwargs(
+                problem=problem,
+                mask=mask,
+                iterations=iterations,
+                beam=beam,
+                outer_iterations=outer_iterations,
+                tolerance=tolerance,
+            )
             component = project_disjunctive(
                 work[guided_candidates],
                 **common,
@@ -1515,6 +1605,46 @@ def project_disjunctive(
                 component,
                 neutral,
             )
+        else:
+            original_ok_subset = _original_ok_mask(
+                work,
+                mask,
+                tolerance,
+                ignore_preplaced_pairs,
+            )
+            feasible_count = int(original_ok_subset.sum().item())
+            if feasible_count == work.shape[0]:
+                return _already_feasible_result(
+                    work,
+                    single=single,
+                    iterations=iterations,
+                )
+            elif feasible_count:
+                common = _split_projection_kwargs(
+                    problem=problem,
+                    mask=mask,
+                    iterations=iterations,
+                    beam=beam,
+                    outer_iterations=outer_iterations,
+                    tolerance=tolerance,
+                )
+                component = project_disjunctive(
+                    work[~original_ok_subset],
+                    **common,
+                    clearance=clearance,
+                    component_config=component_config,
+                    guidance=_guidance_subset(guidance, ~original_ok_subset),
+                )
+                neutral = _already_feasible_result(
+                    work[original_ok_subset],
+                    single=False,
+                    iterations=iterations,
+                )
+                return _merge_projection_results(
+                    ~original_ok_subset,
+                    component,
+                    neutral,
+                )
     pairs, directions = assign_directions(
         work,
         beam_variant=0,

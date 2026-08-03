@@ -439,7 +439,7 @@ def test_component_hard_proposal_rejected_by_structure_is_inspectable(monkeypatc
     assert result.displacement.item() == 0.0
 
 
-def test_component_proposal_excludes_unchanged_feasible_geometry() -> None:
+def test_component_proposal_excludes_unchanged_feasible_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     boxes = torch.tensor(
         [[0.0, 0.0, 1.0, 1.0], [2.0, 0.0, 1.0, 1.0]]
     )
@@ -450,17 +450,124 @@ def test_component_proposal_excludes_unchanged_feasible_geometry() -> None:
         torch.zeros((1, 2, 2)),
         torch.tensor([[[True, False], [False, False]]]),
     )
+    calls = 0
 
-    result = projection.project_disjunctive(
-        boxes,
-        guidance=guidance,
-        component_config=projection.ComponentBDPConfig(enabled=True),
-    )
+    def count_component_core(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("feasible guided rows must bypass component core")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(projection, "_project_component_mode", count_component_core)
+        result = projection.project_disjunctive(
+            boxes,
+            guidance=guidance,
+            component_config=projection.ComponentBDPConfig(enabled=True),
+        )
 
     assert result.ok
     assert torch.equal(result.xywh, boxes)
+    assert calls == 0
     assert not bool(result.component_proposal_available)
+    assert bool(result.component_proposal_hard_ok)
+    assert bool(result.component_proposal_structure_ok)
     assert result.component_proposal_rollback_reason == ("already_feasible",)
+
+
+@pytest.mark.parametrize("device", devices())
+@pytest.mark.parametrize("batched", (False, True))
+def test_component_feasible_fast_path_matches_forced_slow_telemetry(
+    device: str,
+    batched: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boxes = torch.tensor(
+        [[0.0, 0.0, 1.0, 1.0], [1.0 - 5.0e-7, 0.0, 1.0, 1.0]],
+        device=device,
+    )
+    guidance = projection.ProjectionGuidance(
+        torch.full((1, 2, 2), -1, dtype=torch.long, device=device),
+        torch.zeros((1, 2, 2), device=device),
+        torch.full((1, 2, 2), -1, dtype=torch.long, device=device),
+        torch.zeros((1, 2, 2), device=device),
+        torch.tensor([[[True, False], [False, False]]], device=device),
+    )
+    kwargs = {
+        "tolerance": 1.0e-6,
+        "guidance": guidance,
+        "component_config": projection.ComponentBDPConfig(enabled=True),
+    }
+    inputs = boxes.unsqueeze(0) if batched else boxes
+
+    fast = projection.project_disjunctive(inputs, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            projection,
+            "_original_ok_mask",
+            lambda work, *_args: torch.zeros(
+                work.shape[0],
+                dtype=torch.bool,
+                device=work.device,
+            ),
+        )
+        slow = projection.project_disjunctive(inputs, **kwargs)
+
+    assert float(fast.max_overlap.max()) > 0.0
+    for field in projection.ProjectionResult.__dataclass_fields__:
+        fast_value = getattr(fast, field)
+        slow_value = getattr(slow, field)
+        if isinstance(fast_value, torch.Tensor):
+            assert torch.equal(fast_value, slow_value), field
+        else:
+            assert fast_value == slow_value, field
+
+
+def test_component_mode_sends_only_infeasible_guided_subset_to_core(monkeypatch: pytest.MonkeyPatch) -> None:
+    feasible = torch.tensor([[0.0, 0.0, 1.0, 1.0], [2.0, 0.0, 1.0, 1.0]])
+    infeasible = torch.tensor([[0.0, 0.0, 1.0, 1.0], [0.5, 0.0, 1.0, 1.0]])
+    boxes = torch.stack((feasible, infeasible))
+    direction = torch.full((2, 2, 2), -1, dtype=torch.long)
+    confidence = torch.zeros((2, 2, 2))
+    direction[:, 0, 1] = projection.BDP_LEFT
+    direction[:, 1, 0] = projection.BDP_RIGHT
+    confidence[:, 0, 1] = confidence[:, 1, 0] = 1.0
+    guidance = projection.ProjectionGuidance(
+        direction,
+        confidence,
+        torch.full_like(direction, -1),
+        torch.zeros_like(confidence),
+        torch.zeros((2, 2, 2), dtype=torch.bool),
+    )
+    seen_shapes = []
+    real_core = projection._project_component_mode
+
+    def count_component_core(work, *args, **kwargs):
+        seen_shapes.append(tuple(work.shape))
+        return real_core(work, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(projection, "_project_component_mode", count_component_core)
+        result = projection.project_disjunctive(
+            boxes,
+            iterations=4,
+            guidance=guidance,
+            component_config=projection.ComponentBDPConfig(
+                enabled=True,
+                beam_width=1,
+                outer_sweeps=2,
+            ),
+        )
+
+    assert seen_shapes == [(1, 2, 4)]
+    assert torch.equal(result.xywh[0], boxes[0])
+    assert result.component_proposal_rollback_reason[0] == "already_feasible"
+    assert not bool(result.component_proposal_available[0])
+    assert result.ok_mask.tolist() == [True, True]
+    assert result.component_proposal_rollback_reason[1] in {
+        "committed",
+        "projector_incomplete",
+        "construction_regression",
+    }
 
 
 @pytest.mark.parametrize(

@@ -40,6 +40,7 @@ from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.constraints.raw_repair import repair_raw_constraints  # noqa: E402
 from hcfp.data import DataSample, file_sha256  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
+from hcfp.fallback import safe_fallback  # noqa: E402
 from hcfp.learned import (  # noqa: E402
     LearnedAnalysis,
     LearnedConfig,
@@ -410,6 +411,13 @@ def _time_analytic_solver(
         case,
         normalized_solution,
     )
+    raw_hard_feasible = verify_feasible(source, placements)
+    used_fallback = not raw_hard_feasible
+    if used_fallback:
+        placements = [
+            tuple(float(value) for value in row)
+            for row in safe_fallback(source).tolist()
+        ]
     hard_feasible = verify_feasible(source, placements)
     _synchronize(device)
     solver_seconds = time.perf_counter() - started
@@ -418,6 +426,8 @@ def _time_analytic_solver(
     return {
         "solver_seconds": solver_seconds,
         "total_seconds": solver_seconds,
+        "raw_hard_feasible": raw_hard_feasible,
+        "used_fallback": used_fallback,
         "hard_feasible": hard_feasible,
         "placement_sha256": _placement_sha256(placements),
     }
@@ -1227,6 +1237,14 @@ def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
         summary["analytic_runtime"] = analytic_runtime
         summary["analytic_comparator"] = {
             "case_count": len(cases),
+            "raw_hard_feasible_count": sum(
+                bool(case["analytic_comparator"]["raw_hard_feasible"])
+                for case in cases
+            ),
+            "fallback_count": sum(
+                bool(case["analytic_comparator"]["used_fallback"])
+                for case in cases
+            ),
             "hard_feasible_count": sum(
                 bool(case["analytic_comparator"]["hard_feasible"])
                 for case in cases

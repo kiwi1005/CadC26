@@ -448,7 +448,11 @@ def test_summary_separates_solver_audit_and_paired_analytic_runtime() -> None:
                 if index % 2 == 0
                 else "analytic_then_learned"
             ),
-            "analytic_comparator": {"hard_feasible": True},
+            "analytic_comparator": {
+                "raw_hard_feasible": index == 0,
+                "used_fallback": index == 1,
+                "hard_feasible": True,
+            },
         }
         for index, (solver, analytic, audit_seconds) in enumerate(
             ((2.0, 1.0, 5.0), (4.0, 2.0, 7.0))
@@ -466,6 +470,8 @@ def test_summary_separates_solver_audit_and_paired_analytic_runtime() -> None:
     ]["p50"] == pytest.approx(2.5)
     assert summary["analytic_comparator"] == {
         "case_count": 2,
+        "raw_hard_feasible_count": 1,
+        "fallback_count": 1,
         "hard_feasible_count": 2,
         "execution_order_count": {
             "learned_then_analytic": 1,
