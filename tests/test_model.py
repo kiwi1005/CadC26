@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from hcfp.case import from_official
+from hcfp.collective import dynamic_pair_features
 from hcfp.model import HCFPModel, ModelConfig
 
 
@@ -15,6 +16,17 @@ def _case():
         [[1.0, 2.0], [8.0, 1.0]],
         [[0, 1, 0, 1, 1], [1, 0, 0, 1, 0], [0, 0, 7, 0, 2], [0, 0, 7, 0, 4]],
         [[0.0, 0.0, 2.0, 2.0], [4.0, 0.0, 3.0, 3.0], [-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]],
+    )
+
+
+def _free_case():
+    return from_official(
+        3,
+        [4.0, 9.0, 16.0],
+        [[0, 1, 2.0], [1, 2, 3.0]],
+        [],
+        [],
+        [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
     )
 
 
@@ -118,3 +130,103 @@ def test_legacy_state_loads_into_constraint_model_with_only_missing_head_keys() 
     assert incompatible.unexpected_keys == []
     assert incompatible.missing_keys
     assert all(name.startswith("constraints.") for name in incompatible.missing_keys)
+
+
+def test_collective_head_is_optional_neutral_and_honors_hard_masks() -> None:
+    torch.manual_seed(23)
+    case = _case()
+    disabled = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+    assert not hasattr(disabled, "collective")
+    assert not any(name.startswith("collective.") for name in disabled.state_dict())
+
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=16,
+            encoder_layers=1,
+            collective_enabled=True,
+            collective_message_dim=12,
+            collective_passes=2,
+        )
+    )
+    center = torch.tensor(
+        [
+            [[1.0, 1.0], [5.0, 1.0], [2.0, 5.0], [7.0, 6.0]],
+            [[2.0, 2.0], [5.0, 2.0], [3.0, 5.0], [8.0, 6.0]],
+        ]
+    )
+    dimensions = torch.tensor(
+        [
+            [[2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0]],
+            [[2.0, 2.0], [3.0, 3.0], [4.0, 4.0], [5.0, 5.0]],
+        ]
+    )
+    pairs = dynamic_pair_features(case, center, dimensions)
+    geometry = torch.cat(
+        (torch.log(dimensions[..., :1] / dimensions[..., 1:]), dimensions),
+        dim=-1,
+    )
+    output = model.collective(
+        case,
+        model.encoder(case),
+        geometry,
+        pairs.features,
+        pairs.pair_mask,
+        0.25,
+    )
+
+    assert output.velocity.shape == (2, case.n, 3)
+    assert output.force_gates.shape == (2, case.n, 7)
+    assert torch.equal(output.velocity, torch.zeros_like(output.velocity))
+    assert torch.equal(output.force_gates, torch.ones_like(output.force_gates))
+    assert torch.equal(output.velocity[:, case.preplaced_mask, :2], torch.zeros(2, 1, 2))
+    assert torch.equal(
+        output.velocity[:, case.fixed_mask | case.preplaced_mask, 2],
+        torch.zeros(2, 2),
+    )
+
+
+def test_collective_message_and_gate_parameters_receive_gradients() -> None:
+    torch.manual_seed(29)
+    case = _free_case()
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=12,
+            encoder_layers=1,
+            collective_enabled=True,
+            collective_message_dim=10,
+            collective_passes=2,
+        )
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-2)
+    center = torch.tensor([[[1.0, 1.0], [4.0, 1.0], [2.0, 5.0]]])
+    dimensions = torch.tensor([[[2.0, 2.0], [3.0, 3.0], [4.0, 4.0]]])
+    pairs = dynamic_pair_features(case, center, dimensions)
+    geometry = torch.cat(
+        (torch.log(dimensions[..., :1] / dimensions[..., 1:]), dimensions),
+        dim=-1,
+    )
+
+    for _ in range(2):
+        optimizer.zero_grad(set_to_none=True)
+        output = model.collective(
+            case,
+            model.encoder(case),
+            geometry,
+            pairs.features,
+            pairs.pair_mask,
+            0.5,
+        )
+        loss = (output.velocity - 0.01).square().mean()
+        loss = loss + (output.force_gates - 1.20).square().mean()
+        loss.backward()
+        optimizer.step()
+
+    gradients = {
+        name: parameter.grad
+        for name, parameter in model.named_parameters()
+        if name.startswith("collective.")
+    }
+    assert gradients
+    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients.values())
+    assert gradients["collective.pair.weight"].abs().sum() > 0.0
+    assert gradients["collective.force_gates.3.weight"].abs().sum() > 0.0

@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from hcfp.case import FloorplanCase
+from hcfp.collective import PAIR_FEATURES
 from hcfp.topology import DualPermutationHead
 
 
@@ -31,6 +32,12 @@ class ModelConfig:
     compute_dtype: str = "float32"
     topology_enabled: bool = False
     constraint_enabled: bool = False
+    collective_enabled: bool = False
+    collective_message_dim: int = 128
+    collective_passes: int = 3
+    collective_position_bound: float = 0.05
+    collective_aspect_bound: float = 0.05
+    collective_gate_delta: float = 0.50
 
     def __post_init__(self) -> None:
         if self.hidden_dim <= 0 or self.encoder_layers <= 0:
@@ -41,6 +48,14 @@ class ModelConfig:
             raise ValueError("residual bounds must be positive")
         if self.compute_dtype not in {"float32", "bfloat16"}:
             raise ValueError("compute_dtype must be float32 or bfloat16")
+        if self.collective_message_dim <= 0 or self.collective_passes <= 0:
+            raise ValueError("collective dimensions and passes must be positive")
+        if self.collective_position_bound <= 0.0 or self.collective_aspect_bound <= 0.0:
+            raise ValueError("collective update bounds must be positive")
+        if not 0.0 < self.collective_gate_delta < 1.0:
+            raise ValueError("collective_gate_delta must be in (0, 1)")
+        if self.collective_enabled and self.force_channels != 7:
+            raise ValueError("collective dynamics require the canonical seven force channels")
 
 
 @dataclass(frozen=True)
@@ -58,6 +73,12 @@ class ModelOutput:
     contact_logits: Tensor | None = None
     boundary_order_scores: Tensor | None = None
     mib_log_aspect: Tensor | None = None
+
+
+@dataclass(frozen=True)
+class CollectiveStepOutput:
+    velocity: Tensor
+    force_gates: Tensor
 
 
 def soft_sequence_pair_relation_logits(positive: Tensor, negative: Tensor) -> Tensor:
@@ -288,6 +309,107 @@ class TypedForceGateController(nn.Module):
         return torch.nn.functional.softplus(self.net(torch.cat((emb, step), dim=-1))).float() + 1.0e-6
 
 
+class GeometryAwareCollectiveHead(nn.Module):
+    """Permutation-equivariant update from the current rectangle geometry."""
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+        width = config.collective_message_dim
+        self.static_node = nn.Linear(config.hidden_dim, width)
+        self.geometry_node = nn.Linear(3, width, bias=False)
+        self.step_node = nn.Linear(1, width, bias=False)
+        self.pair = nn.Linear(len(PAIR_FEATURES), width, bias=False)
+        self.sender = nn.Linear(width, width, bias=False)
+        self.receiver = nn.Linear(width, width, bias=False)
+        self.update_norm = nn.LayerNorm(width)
+        self.update = nn.Sequential(
+            nn.Linear(width, width),
+            nn.SiLU(),
+            nn.Linear(width, width),
+        )
+        self.velocity = nn.Sequential(
+            nn.LayerNorm(width),
+            nn.Linear(width, width),
+            nn.SiLU(),
+            nn.Linear(width, 3),
+        )
+        self.force_gates = nn.Sequential(
+            nn.LayerNorm(width),
+            nn.Linear(width, width),
+            nn.SiLU(),
+            nn.Linear(width, config.force_channels),
+        )
+        nn.init.zeros_(self.velocity[-1].weight)
+        nn.init.zeros_(self.velocity[-1].bias)
+        nn.init.zeros_(self.force_gates[-1].weight)
+        nn.init.zeros_(self.force_gates[-1].bias)
+
+    def forward(
+        self,
+        case: FloorplanCase,
+        embedding: Tensor,
+        node_geometry: Tensor,
+        pair_features: Tensor,
+        pair_mask: Tensor,
+        step_fraction: float | Tensor,
+    ) -> CollectiveStepOutput:
+        if embedding.ndim != 2 or embedding.shape != (case.n, self.config.hidden_dim):
+            raise ValueError("embedding must have shape [N, hidden_dim]")
+        geometry = torch.as_tensor(node_geometry, device=embedding.device, dtype=embedding.dtype)
+        if geometry.ndim != 3 or geometry.shape[1:] != (case.n, 3):
+            raise ValueError("node_geometry must have shape [K,N,3]")
+        population = geometry.shape[0]
+        pairs = torch.as_tensor(pair_features, device=embedding.device, dtype=embedding.dtype)
+        if pairs.shape != (population, case.n, case.n, len(PAIR_FEATURES)):
+            raise ValueError("pair_features must have shape [K,N,N,19]")
+        mask = torch.as_tensor(pair_mask, device=embedding.device)
+        if mask.dtype != torch.bool or mask.shape != (case.n, case.n):
+            raise ValueError("pair_mask must be boolean with shape [N,N]")
+        if not bool(torch.isfinite(geometry).all() and torch.isfinite(pairs).all()):
+            raise ValueError("collective inputs must be finite")
+
+        fraction = torch.as_tensor(step_fraction, device=embedding.device, dtype=embedding.dtype)
+        if fraction.numel() == 1:
+            fraction = fraction.reshape(1, 1, 1).expand(population, case.n, 1)
+        elif fraction.shape == (population,):
+            fraction = fraction.reshape(population, 1, 1).expand(population, case.n, 1)
+        else:
+            raise ValueError("step_fraction must be scalar or shape [K]")
+
+        hidden = self.static_node(embedding).unsqueeze(0)
+        hidden = hidden + self.geometry_node(geometry) + self.step_node(fraction)
+        pair_hidden = self.pair(pairs)
+        active = mask.reshape(1, case.n, case.n, 1)
+        denominator = mask.sum(dim=1).clamp_min(1).reshape(1, case.n, 1)
+        for _ in range(self.config.collective_passes):
+            messages = torch.nn.functional.silu(
+                pair_hidden
+                + self.receiver(hidden).unsqueeze(2)
+                + self.sender(hidden).unsqueeze(1)
+            )
+            aggregate = (messages * active).sum(dim=2) / denominator
+            hidden = hidden + self.update(self.update_norm(hidden + aggregate))
+
+        raw_velocity = torch.tanh(self.velocity(hidden)).float()
+        scale = raw_velocity.new_tensor(
+            (
+                self.config.collective_position_bound,
+                self.config.collective_position_bound,
+                self.config.collective_aspect_bound,
+            )
+        )
+        velocity = raw_velocity * scale
+        velocity[:, case.preplaced_mask.to(device=velocity.device), :2] = 0.0
+        velocity[:, (case.fixed_mask | case.preplaced_mask).to(device=velocity.device), 2] = 0.0
+        force_gates = (
+            1.0
+            + self.config.collective_gate_delta
+            * torch.tanh(self.force_gates(hidden)).float()
+        )
+        return CollectiveStepOutput(velocity=velocity, force_gates=force_gates)
+
+
 class RepairAwareRanker(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -355,6 +477,8 @@ class HCFPModel(nn.Module):
             self.topology = DualPermutationHead(self.config.hidden_dim)
         if self.config.constraint_enabled:
             self.constraints = ConstraintHeads(self.config)
+        if self.config.collective_enabled:
+            self.collective = GeometryAwareCollectiveHead(self.config)
 
     def forward(
         self,
