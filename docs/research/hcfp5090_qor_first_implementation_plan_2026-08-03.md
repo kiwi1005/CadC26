@@ -3,7 +3,7 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: Q0--Q2 verified; Q4 passes clean exact-safe QoR but fails runtime promotion
+Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5 active
 
 ## Execution checkpoint
 
@@ -33,6 +33,16 @@ Status: Q0--Q2 verified; Q4 passes clean exact-safe QoR but fails runtime promot
   collision checks reduce solver p50/p95 from 22.913/27.623 seconds to
   10.070/14.387 seconds. Analytic p95 is still only 0.0441 seconds, so Q4 fails
   runtime promotion by a wide margin. Q3 may proceed only as a default-off lane.
+- Q3 geometry-aware collective dynamics is implemented, checkpointed, and
+  audited on the same disjoint large16 split. Its two-step rollout destroys the
+  exact-feasible structure of every transformed topology/constraint row; only
+  the retained initial copy preserves the oracle. Q3 therefore remains
+  default-off and supplies paired hard negatives to Q5 rather than runtime QoR.
+- Q5 replay schema v3 now binds initial/post-relax geometry, post-BDP geometry,
+  exact-repair outcomes, candidate features, row identity, source lineage, and
+  checkpoint/config hashes. A post-repair ListMLE ranker objective and
+  fail-closed held-out evaluator are implemented; the 16-case disjoint gate and
+  5,000-record replay remain pending.
 
 ## Decision
 
@@ -271,6 +281,20 @@ population: 16 structured + 16 perturbed
 This stage proceeds only after structured topology raises the positive-candidate
 density. Model size and rollout depth are not first-line remedies.
 
+### Q3 measured result
+
+The implementation satisfies the wiring and training requirements but fails the
+promotion gate. On the clean large16 audit, the merged population retains one
+initial and one collective-transformed copy of each learned row. Exact-feasible
+topology rows fall from 512 in the no-collective control to 256, and exact
+constraint rows fall from 364 to 182: the initial copies survive and all
+transformed copies fail. The selected weighted `J` remains protected only by
+the unchanged alternatives. Measured p95 is 11.253 seconds versus 0.0456
+seconds for the same-run analytic comparator, and repeated CUDA replay changes
+the post-relax geometry hashes. The controller remains a training-only source
+of post-repair hard negatives. Full evidence is in
+[`hcfp5090_q3_collective_results_2026-08-03.md`](hcfp5090_q3_collective_results_2026-08-03.md).
+
 ## Q4: topology-aware component BDP
 
 Direction cost combines movement, topology confidence, active-contact latch
@@ -312,9 +336,13 @@ pre-projection HPWL perturbation remains deferred.
 
 ## Q5: post-repair DAgger and listwise ranker
 
-Replay v2 stores raw, mid-flow, pre-BDP, post-BDP, and post-repair states plus
-topology/contact/boundary/MIB decisions, exact feasibility, cap attribution,
-repair displacement, source, case/checkpoint hashes, and population seed.
+Replay schema v3 stores paired `initial` and `post_relax` candidate lists,
+post-BDP geometry, and post-repair outcomes plus topology/constraint lineage,
+exact feasibility, cap attribution, repair displacement, source, case,
+checkpoint/config hashes, and population seed. Geometry-derived features are
+recomputed and checked when writing and reading; mismatched lineage fails
+closed. Mid-flow snapshots and decision-level teacher actions remain deferred
+until the paired-state pilot demonstrates useful signal.
 
 First replay target: 5,000 training-source records.
 
@@ -325,9 +353,21 @@ First replay target: 5,000 training-source records.
 15% diverse successful positives
 ```
 
-Ranker v2 predicts hard feasibility, post-repair `J`, each soft contribution,
-repair displacement, and runtime. A listwise term orders candidates inside each
-case; feasibility and regression targets remain explicit auxiliary losses.
+The first ranker increment preserves the existing scalar-cost head for checkpoint
+compatibility but replaces capped-score regression with post-repair list order.
+ListMLE is the primary loss, lower predicted cost is better, cap-crossing
+hard-feasible rows receive bounded extra weight, and standardized uncapped `J`
+is a small pointwise regularizer. Legacy schema-v2 replay remains readable and
+uses the old pointwise objective. Multi-task output heads for hard feasibility,
+soft contributions, repair displacement, and runtime follow only after the
+held-out listwise pilot proves candidate signal.
+
+The evaluator reports initial and post-relax stages separately, rejects sample
+overlap and checkpoint-lineage mismatch, uses stable row IDs only for prediction
+tie-breaking, and measures top-1, top-4 recall, false promotion, weighted rank
+regret, and nonnegative score regret. The learned runtime ranker remains
+shadow-only because its current pruning point does not yet see the same complete
+candidate list represented by replay v3.
 
 Promotion targets:
 
@@ -356,7 +396,7 @@ not ordinary binary accuracy.
 | Q2b | latch/boundary/MIB construction | Q2a | opt-in | soft QoR gain |
 | Q3 | dynamic messages and live force gates | promoted Q4 gate | deferred | oracle gain |
 | Q4 | component beam, reset, superiorization | Q1/Q2 | opt-in checkpoint | displacement/runtime |
-| Q5 | replay v2 and listwise ranker | Q0--Q4 | training/selection | rank gates |
+| Q5 | replay v3 and listwise ranker | Q0--Q4 | training/shadow selection | rank gates |
 | Q6 | A100 profile and submission freeze | all promoted gates | packaging | final smoke |
 
 Every opt-in stage retains the analytic incumbent and exact Pareto guard. If a

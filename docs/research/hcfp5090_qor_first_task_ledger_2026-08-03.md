@@ -75,16 +75,24 @@ Q2 QoR gain under exact replay, so Q3 is unblocked as a default-off lane.
 
 ## Q3 — collective dynamics
 
-- [ ] Build current-geometry pair features each rollout step.
-- [ ] Add three message-passing updates with explicit x/y semantics.
-- [ ] Feed RMS-normalized typed forces into coordinate updates.
-- [ ] Connect learned force gates to active typed-force channels.
-- [ ] Run rollout stability and CPU/CUDA differential tests.
+- [x] Build current-geometry pair features each rollout step.
+- [x] Add three message-passing updates with explicit x/y semantics.
+- [x] Feed RMS-normalized typed forces into coordinate updates.
+- [x] Connect learned force gates to active typed-force channels.
+- [x] Train the collective-only checkpoint and preserve its parent lineage.
+- [x] Run a clean disjoint large16 audit against the Q2/Q4 control.
+- [blocked] Preserve initial feasibility through two collective rollout steps.
+- [blocked] Reproduce same-seed CUDA post-relax geometry bitwise.
+- [blocked] Meet the learned/analytic p95 runtime gate.
 
-Q3 implementation is now in progress behind an opt-in flag. Clean Q4 preserves
-projection success and every candidate hash, but learned p95 is still 326.1x
-analytic p95; Q3 cannot become the default until later ranking/runtime gates
-close that gap.
+Current gate: **HOLD — implementation/training complete, runtime promotion
+blocked**. The clean large16 population contains initial and post-relax copies.
+The control has 512 exact-feasible topology and 364 constraint rows; collective
+two-step has exactly 256 and 182. The initial half survives and every transformed
+copy fails. Same-run p95 remains about 247x analytic, and repeated CUDA replay
+changes post-relax geometry hashes. Q3 stays default-off and its failed
+post-relax rows become Q5 hard negatives. Full evidence is in
+[`hcfp5090_q3_collective_results_2026-08-03.md`](hcfp5090_q3_collective_results_2026-08-03.md).
 
 ## Q4 — component-aware BDP
 
@@ -128,12 +136,25 @@ substitute for the pending promotion rerun.
 
 ## Q5 — DAgger replay and ranker v2
 
-- [ ] Define replay-v2 schema and provenance hashes.
-- [ ] Record raw/mid-flow/pre-BDP/post-BDP/post-repair states.
+- [x] Define replay schema v3 with fail-closed candidate and checkpoint lineage.
+- [x] Record paired initial/post-relax, post-BDP, and exact post-repair states.
+- [x] Recompute candidate features from stored geometry on write and read.
+- [x] Record feasibility tiers, uncapped `J`, cap margin, soft violations,
+  center repair displacement, source kind, row ID, and geometry hashes.
+- [~] Add mid-flow snapshots and decision-level teacher actions after pilot proof.
 - [ ] Build 5,000-record training-only replay with required composition.
-- [ ] Add post-repair multi-task targets and listwise loss.
-- [ ] Validate top-1, top-4 recall, false promotions, and weighted regret.
+- [x] Add post-repair ListMLE with bounded cap-cross weight and legacy fallback.
+- [~] Add post-repair multi-task heads after listwise signal is held-out verified.
+- [x] Implement top-1, top-4 recall, false-promotion, stage, and weighted-regret reporting.
+- [~] Run disjoint 16-case train/dev pilot and evaluate the promotion gates.
 - [ ] Run full validation through the preserved dominance safety invariant.
+
+Current gate: **ACTIVE — contracts and training/evaluation loop verified; QoR
+gate pending**. A two-case CUDA smoke trained 20 deterministic steps and reduced
+the training-set weighted score regret from `1.99388` to `0.467588`, while false
+promotions fell from two to zero. This is pipeline evidence only: it uses four
+records from two samples and is not a promotion result. Runtime pruning remains
+shadow-only until the runtime candidate stage matches the complete replay list.
 
 ## Q6 — release verification
 
