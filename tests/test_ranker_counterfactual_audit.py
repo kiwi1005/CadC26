@@ -300,6 +300,8 @@ def test_audit_runner_writes_atomic_report_and_preserves_returned_placement(
     assert len(row["selected_sha256"]) == 64
     assert report["summary"]["all_hard_feasible"] is True
     assert report["summary"]["rows"] == 1
+    assert report["summary"]["expected_rows"] == 1
+    assert report["summary"]["coverage_complete"] is True
     assert report["summary"]["would_accept"] == 1
     assert report["summary"]["counterfactual_audit_gate_passed"] is True
     assert report["summary"]["ranker_shadow_missing"] == 0
@@ -404,6 +406,22 @@ def test_audit_records_missing_ranker_shadow_as_a_failed_gate(
     assert report["cases"][0]["ranker_shadow_available"] is False
     assert report["summary"]["ranker_shadow_missing"] == 1
     assert report["summary"]["counterfactual_audit_gate_passed"] is False
+
+
+def test_partial_counterfactual_summary_never_passes_gate() -> None:
+    row = {
+        "case_id": "case/a",
+        "seed": 7,
+        "hard_feasible": True,
+        "ranker_shadow_available": True,
+        "selected_sha256": "a" * 64,
+        "ranker_selection_counterfactual": {"would_accept": False},
+    }
+
+    summary = audit._summary([row], expected_rows=2)
+
+    assert summary["coverage_complete"] is False
+    assert summary["counterfactual_audit_gate_passed"] is False
 
 
 def test_audit_fails_closed_on_duplicate_cases_or_seeds(

@@ -72,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     previous = _load_previous(output, config_hash) if args.resume else {}
     rows: list[dict[str, Any]] = list(previous.values())
     provenance = _provenance(command, checkpoint, checkpoint_metadata, evaluator_path)
+    expected_rows = len(cases) * len(seeds)
 
     def persist(status: str) -> None:
         report = {
@@ -83,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             "config": config_payload,
             "provenance": provenance,
             "cases": sorted(rows, key=lambda row: (row["case_id"], row["seed"])),
-            "summary": _summary(rows),
+            "summary": _summary(rows, expected_rows=expected_rows),
         }
         _atomic_write_json(output, report)
 
@@ -107,6 +108,10 @@ def main(argv: list[str] | None = None) -> int:
             row["runtime_seconds"] = time.perf_counter() - started
             rows.append(row)
             persist("in_progress")
+    if len(rows) != expected_rows:
+        raise RuntimeError(
+            f"counterfactual audit produced {len(rows)} of {expected_rows} expected rows"
+        )
     persist("complete")
     print(output)
     return 0
@@ -601,7 +606,11 @@ def _env_provenance() -> dict[str, str]:
     }
 
 
-def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _summary(
+    rows: list[dict[str, Any]],
+    *,
+    expected_rows: int,
+) -> dict[str, Any]:
     accept = [
         row
         for row in rows
@@ -610,14 +619,19 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     ]
     missing_shadow = [row for row in rows if not _row_has_ranker_shadow(row)]
     all_hard_feasible = all(bool(row["hard_feasible"]) for row in rows)
+    coverage_complete = len(rows) == expected_rows
     return {
         "rows": len(rows),
+        "expected_rows": expected_rows,
+        "coverage_complete": coverage_complete,
         "would_accept": len(accept),
         "all_hard_feasible": all_hard_feasible,
         "ranker_shadow_available": len(rows) - len(missing_shadow),
         "ranker_shadow_missing": len(missing_shadow),
         "all_ranker_shadows_available": not missing_shadow,
-        "counterfactual_audit_gate_passed": all_hard_feasible and not missing_shadow,
+        "counterfactual_audit_gate_passed": (
+            coverage_complete and all_hard_feasible and not missing_shadow
+        ),
         "missing_ranker_shadow_rows": [
             {"case_id": row["case_id"], "seed": row["seed"]}
             for row in missing_shadow
