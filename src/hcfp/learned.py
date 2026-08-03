@@ -32,6 +32,11 @@ from hcfp.geometry import xywh_from_state
 from hcfp.model import soft_sequence_pair_relation_logits
 from hcfp.projection import ComponentBDPConfig
 from hcfp.projection_guidance import build_population_guidance
+from hcfp.ranker_features import (
+    RANKER_FEATURE_DIM,
+    RANKER_FEATURE_VERSION,
+    repair_aware_ranker_features,
+)
 from hcfp.topology import (
     adapt_preplaced_topology,
     anchor_safe_order_variants,
@@ -285,6 +290,17 @@ def analyze_case_with_checkpoint(
             analytic_analysis,
             learned_analysis,
             topology_provenance=topology_provenance,
+        )
+        analysis = _attach_ranker_shadow_snapshot(
+            case,
+            analysis,
+            model=model,
+            metadata=metadata,
+            analytic_count=cfg.dynamics.population,
+            learned_count=int(learned_population.shape[0]),
+            residual_count=residual_count,
+            constraint_count=constraint_count,
+            topology_count=topology_count,
         )
         candidate_count = cfg.dynamics.population + int(learned_population.shape[0])
         return LearnedAnalysis(
@@ -687,6 +703,141 @@ def _seed_stage_records(
             }
         )
     return tuple(candidates), tuple(stale_sources)
+
+
+def _attach_ranker_shadow_snapshot(
+    case: FloorplanCase,
+    analysis: AnalyticResult,
+    *,
+    model: Any,
+    metadata: dict[str, Any],
+    analytic_count: int,
+    learned_count: int,
+    residual_count: int,
+    constraint_count: int,
+    topology_count: int,
+) -> AnalyticResult:
+    """Record a trained ranker's learned-initial ordering without selecting it."""
+
+    snapshot = dict(analysis.incumbent_snapshot)
+    skip_reason = _ranker_shadow_contract(model, metadata)
+    if skip_reason is not None:
+        snapshot["ranker_shadow_skipped_reason"] = skip_reason
+        return replace(analysis, incumbent_snapshot=snapshot)
+    if learned_count <= 0:
+        snapshot["ranker_shadow_skipped_reason"] = "empty_learned_population"
+        return replace(analysis, incumbent_snapshot=snapshot)
+    if residual_count + constraint_count + topology_count != learned_count:
+        snapshot["ranker_shadow_skipped_reason"] = "candidate_kind_count_mismatch"
+        return replace(analysis, incumbent_snapshot=snapshot)
+
+    initial_start = 1 + analytic_count
+    initial_stop = initial_start + learned_count
+    try:
+        raw = analysis.raw_candidates[initial_start:initial_stop]
+        post_bdp = analysis.projected_candidates[initial_start:initial_stop]
+        if raw.shape[0] != learned_count or post_bdp.shape[0] != learned_count:
+            raise ValueError("learned initial slice does not align with merged tail")
+        kinds = _learned_candidate_kinds(
+            residual_count=residual_count,
+            constraint_count=constraint_count,
+            topology_count=topology_count,
+        )
+        features = repair_aware_ranker_features(
+            case,
+            raw,
+            post_bdp,
+            safe_shelf(case).to(device=raw.device, dtype=raw.dtype),
+            kinds,
+            "initial",
+        )
+        eligible = (
+            analysis.telemetry.hard_feasible[initial_start:initial_stop]
+            & analysis.telemetry.projection_ok[initial_start:initial_stop]
+        ).detach().to(device="cpu", dtype=torch.bool)
+        embedding = features.new_empty((0, 0))
+        with torch.inference_mode():
+            scores = (
+                model.ranker(embedding, learned_count, features)
+                .detach()
+                .to(device="cpu", dtype=torch.float32)
+            )
+        if scores.shape != (learned_count,):
+            raise ValueError("ranker score shape does not align with learned slice")
+        if not bool(torch.isfinite(scores).all()):
+            raise ValueError("ranker shadow scores must be finite")
+        ranked = sorted(
+            (
+                (float(scores[index]), initial_start + index, kinds[index])
+                for index in range(learned_count)
+                if bool(eligible[index])
+            ),
+            key=lambda item: (item[0], item[1]),
+        )
+        snapshot.update(
+            {
+                "ranker_shadow_stage": "initial",
+                "ranker_shadow_source": "merged_learned_initial",
+                "ranker_shadow_feature_version": RANKER_FEATURE_VERSION,
+                "ranker_shadow_feature_dim": RANKER_FEATURE_DIM,
+                "ranker_shadow_candidate_count": learned_count,
+                "ranker_shadow_eligible_count": len(ranked),
+                "ranker_shadow_candidate_kinds": kinds,
+                "ranker_shadow_top4": tuple(
+                    {
+                        "source": f"candidate_{source_index}",
+                        "score": score,
+                        "kind": kind,
+                    }
+                    for score, source_index, kind in ranked[:4]
+                ),
+            }
+        )
+    except Exception as exc:
+        snapshot["ranker_shadow_failure_reason"] = f"{type(exc).__name__}: {exc}"
+    return replace(analysis, incumbent_snapshot=snapshot)
+
+
+def _ranker_shadow_contract(model: Any, metadata: dict[str, Any]) -> str | None:
+    trained_heads = metadata.get("trained_heads", ())
+    if not (
+        isinstance(trained_heads, (list, tuple))
+        and "ranker" in trained_heads
+    ):
+        return "ranker_not_trained"
+    config = getattr(model, "config", {})
+    try:
+        if int(_config_value(config, "candidate_metric_dim")) != RANKER_FEATURE_DIM:
+            return "ranker_feature_dim_mismatch"
+        if (
+            str(_config_value(config, "ranker_feature_version"))
+            != RANKER_FEATURE_VERSION
+        ):
+            return "ranker_feature_version_mismatch"
+        if bool(_config_value(config, "ranker_use_scene_embedding")):
+            return "ranker_uses_scene_embedding"
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return "ranker_config_incompatible"
+    return None
+
+
+def _config_value(config: Any, name: str) -> Any:
+    if isinstance(config, dict):
+        return config[name]
+    return getattr(config, name)
+
+
+def _learned_candidate_kinds(
+    *,
+    residual_count: int,
+    constraint_count: int,
+    topology_count: int,
+) -> tuple[str, ...]:
+    return (
+        ("learned",) * residual_count
+        + ("constraint",) * constraint_count
+        + ("topology",) * topology_count
+    )
 
 
 def _merge_energy_history(first: Tensor, second: Tensor) -> Tensor:

@@ -18,6 +18,12 @@ from hcfp.fallback import safe_shelf
 from hcfp.geometry import centers_from_xywh, normalize_xywh
 from hcfp.listwise import listmle_loss
 from hcfp.model import HCFPModel
+from hcfp.ranker_features import (
+    RANKER_FEATURE_DIM,
+    RANKER_FEATURE_VERSION,
+    STORED_RANKER_FEATURE_VERSION,
+    repair_aware_ranker_features,
+)
 from hcfp.score_attribution import CAP_LOG, attribute_score
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.verify import ALPHA, BETA, exact_metrics
@@ -90,6 +96,8 @@ class ReplayRecord:
 class RankerLossReport:
     combined: Tensor
     listwise: Tensor
+    top_one: Tensor
+    feasibility_order: Tensor
     pointwise: Tensor
     listwise_weight_mean: Tensor
     listwise_weight_max: Tensor
@@ -98,6 +106,8 @@ class RankerLossReport:
         return {
             "combined": float(self.combined.detach()),
             "listwise": float(self.listwise.detach()),
+            "top_one": float(self.top_one.detach()),
+            "feasibility_order": float(self.feasibility_order.detach()),
             "pointwise": float(self.pointwise.detach()),
             "listwise_weight_mean": float(self.listwise_weight_mean.detach()),
             "listwise_weight_max": float(self.listwise_weight_max.detach()),
@@ -205,13 +215,21 @@ def records_from_learned_analysis(
     analysis,
     analytic_population: int,
     population_seed: int,
-) -> tuple[ReplayRecord, ReplayRecord]:
+    stages: Sequence[str] = ("initial", "post_relax"),
+) -> tuple[ReplayRecord, ...]:
     """Build paired v3 records for learned initial and post-relax candidates."""
 
     if not isinstance(analytic_population, int) or analytic_population <= 0:
         raise ValueError("analytic_population must be a positive integer")
     if type(population_seed) is not int:
         raise ValueError("population_seed must be an integer")
+    requested_stages = tuple(stages)
+    if (
+        not requested_stages
+        or len(set(requested_stages)) != len(requested_stages)
+        or not set(requested_stages) <= {"initial", "post_relax"}
+    ):
+        raise ValueError("stages must be a non-empty unique subset of initial/post_relax")
     result = analysis.result
     analytic = analysis.analytic
     learned_count = int(result.candidate_count) - int(analytic_population)
@@ -226,35 +244,26 @@ def records_from_learned_analysis(
         raise ValueError("learned analysis candidate count does not match merged layout")
     initial_start = 1 + int(analytic_population)
     final_start = 1 + int(analytic_population) + learned_count + int(analytic_population)
-    return (
+    stage_starts = {
+        "initial": initial_start,
+        "post_relax": final_start,
+    }
+    return tuple(
         _record_from_stage(
             sample,
             source,
             checkpoint_hash,
             analytic,
-            start=initial_start,
-            stop=initial_start + learned_count,
-            stage="initial",
+            start=stage_starts[stage],
+            stop=stage_starts[stage] + learned_count,
+            stage=stage,
             population_seed=population_seed,
             analytic_population=analytic_population,
             learned_count=learned_count,
             topology_count=topology_count,
             constraint_count=constraint_count,
-        ),
-        _record_from_stage(
-            sample,
-            source,
-            checkpoint_hash,
-            analytic,
-            start=final_start,
-            stop=final_start + learned_count,
-            stage="post_relax",
-            population_seed=population_seed,
-            analytic_population=analytic_population,
-            learned_count=learned_count,
-            topology_count=topology_count,
-            constraint_count=constraint_count,
-        ),
+        )
+        for stage in requested_stages
     )
 
 
@@ -316,10 +325,20 @@ def ranker_loss(model: HCFPModel, record: ReplayRecord) -> Tensor:
 
 def ranker_loss_report(model: HCFPModel, record: ReplayRecord) -> RankerLossReport:
     device = next(model.parameters()).device
-    case = record.sample.case.to(device=device, dtype=torch.float32)
-    features = record.candidate_features.to(device=device)
-    with torch.no_grad():
-        embedding = model.encoder(case)
+    if record.candidate_features.shape[1] == model.config.candidate_metric_dim:
+        features = record.candidate_features.detach().to(device=device, dtype=torch.float32)
+    else:
+        features = ranker_features_for_record(
+            record,
+            expected_dim=model.config.candidate_metric_dim,
+            expected_version=model.config.ranker_feature_version,
+        ).to(device=device)
+    if model.ranker.use_scene_embedding:
+        case = record.sample.case.to(device=device, dtype=torch.float32)
+        with torch.no_grad():
+            embedding = model.encoder(case)
+    else:
+        embedding = features.new_empty((0, 0))
     prediction = model.ranker(embedding, len(features), features)
     return _ranker_loss_from_prediction(prediction, record)
 
@@ -332,26 +351,52 @@ def _ranker_loss_from_prediction(prediction: Tensor, record: ReplayRecord) -> Ra
     if record.target_rank is None:
         zero = pointwise * 0.0
         one = pointwise.detach().new_tensor(1.0)
-        return RankerLossReport(pointwise, zero, pointwise, one, one)
+        return RankerLossReport(pointwise, zero, zero, zero, pointwise, one, one)
 
     weight = _listwise_weight(record, device=device)
+    target_rank = record.target_rank.to(device=device)
     listwise = listmle_loss(
         prediction,
-        record.target_rank.to(device=device),
+        target_rank,
         weight=weight,
     )
-    combined = listwise + 0.05 * pointwise
+    oracle = torch.argmin(target_rank).reshape(1)
+    top_one = F.cross_entropy(-prediction.unsqueeze(0), oracle)
+    feasibility_order = _feasibility_order_loss(prediction, record, device=device)
+    combined = listwise + 0.25 * feasibility_order + 0.05 * pointwise
     return RankerLossReport(
         combined,
         listwise,
+        top_one,
+        feasibility_order,
         pointwise,
         weight.mean(),
         weight.max(),
     )
 
 
+def _feasibility_order_loss(
+    prediction: Tensor,
+    record: ReplayRecord,
+    *,
+    device: torch.device,
+) -> Tensor:
+    if record.feasibility_tier is None:
+        return prediction.sum() * 0.0
+    tiers = record.feasibility_tier.to(device=device, dtype=torch.long)
+    preferred = tiers[:, None] < tiers[None, :]
+    if not bool(preferred.any()):
+        return prediction.sum() * 0.0
+    margin = 0.25 + prediction[:, None] - prediction[None, :]
+    return F.softplus(margin[preferred]).mean()
+
+
 def _listwise_weight(record: ReplayRecord, *, device: torch.device) -> Tensor:
-    weight = torch.ones_like(record.target_score, dtype=torch.float32, device=device)
+    if record.target_rank is None:
+        return torch.ones_like(record.target_score, dtype=torch.float32, device=device)
+    rank = record.target_rank.to(device=device, dtype=torch.float32)
+    weight = torch.reciprocal(torch.log2(rank + 2.0))
+    weight = weight / weight.mean().clamp_min(1.0e-6)
     if record.post_repair_cap_margin is None:
         return weight
     cap_margin = record.post_repair_cap_margin.to(device=device, dtype=torch.float32)
@@ -359,8 +404,44 @@ def _listwise_weight(record: ReplayRecord, *, device: torch.device) -> Tensor:
     if record.post_repair_hard_feasible is not None:
         uncapped &= record.post_repair_hard_feasible.to(device=device, dtype=torch.bool)
     if bool(uncapped.any()) and bool((~uncapped).any()):
-        weight = weight + 0.25 * uncapped.to(dtype=torch.float32)
+        weight = weight * (1.0 + 0.25 * uncapped.to(dtype=torch.float32))
     return weight
+
+
+def ranker_features_for_record(
+    record: ReplayRecord,
+    *,
+    expected_dim: int,
+    expected_version: str,
+) -> Tensor:
+    """Return the feature view required by a ranker checkpoint."""
+
+    stored = record.candidate_features.detach().to(device="cpu", dtype=torch.float32)
+    if expected_version == STORED_RANKER_FEATURE_VERSION:
+        if expected_dim != int(stored.shape[1]):
+            raise ValueError("stored ranker feature width does not match checkpoint")
+        return stored
+    if expected_version != RANKER_FEATURE_VERSION:
+        raise ValueError(f"unsupported ranker feature version {expected_version!r}")
+    if expected_dim != RANKER_FEATURE_DIM:
+        raise ValueError(
+            f"ranker expects unsupported candidate feature dimension {expected_dim}"
+        )
+    if (
+        record.candidate_geometry is None
+        or record.post_bdp_geometry is None
+        or record.candidate_kinds is None
+    ):
+        raise ValueError("repair-aware ranker features require schema v3 geometry and provenance")
+    case = record.sample.case.to(device="cpu", dtype=torch.float32)
+    return repair_aware_ranker_features(
+        case,
+        record.candidate_geometry.to(device="cpu", dtype=torch.float32),
+        record.post_bdp_geometry.to(device="cpu", dtype=torch.float32),
+        safe_shelf(case).to(device="cpu", dtype=torch.float32),
+        record.candidate_kinds,
+        str(record.candidate_stage),
+    ).detach()
 
 
 def train_ranker_steps(

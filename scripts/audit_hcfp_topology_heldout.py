@@ -350,7 +350,7 @@ def _load_single_training_exclusion(
         raise ValueError("training report checkpoint hash mismatch")
     if Path(str(payload.get("checkpoint", ""))).resolve() != Path(checkpoint).resolve():
         raise ValueError("training report checkpoint path mismatch")
-    if payload.get("model_config") != checkpoint_config:
+    if not _json_equivalent(payload.get("model_config"), checkpoint_config):
         raise ValueError("training report model config mismatch")
     if not isinstance(payload.get("command"), list):
         raise ValueError("training report command is missing")
@@ -456,7 +456,7 @@ def _load_ancestor_training_exclusions(
     if str(parent_metadata["state_hash"]) != expected_parent_hash:
         raise ValueError("parent checkpoint hash mismatch")
     parent_config = parent_metadata["config"]
-    if parent_payload.get("model_config") != parent_config:
+    if not _json_equivalent(parent_payload.get("model_config"), parent_config):
         raise ValueError("parent training report model config mismatch")
     parent_ids, parent_provenance, _parent_contract = _load_single_training_exclusion(
         parent_path,
@@ -494,6 +494,20 @@ def _parent_state_hash(payload: dict[str, Any]) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _json_equivalent(left: object, right: object) -> bool:
+    """Compare report/checkpoint values after their JSON wire conversion."""
+
+    return json.dumps(
+        left,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == json.dumps(
+        right,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _reconstruct_consumed_sample_ids(

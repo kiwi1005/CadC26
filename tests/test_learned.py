@@ -11,8 +11,10 @@ from hcfp.analytic import AnalyticConfig, AnalyticResult, CandidateTelemetry, so
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, _payload_hash, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
+from hcfp.fallback import safe_shelf
 from hcfp.learned import (
     LearnedConfig,
+    _attach_ranker_shadow_snapshot,
     _merge_energy_history,
     _tensor_sha256,
     analyze_case_with_checkpoint,
@@ -22,6 +24,7 @@ from hcfp.learned import (
     solve_case_with_checkpoint,
 )
 from hcfp.model import HCFPModel, ModelConfig
+from hcfp.ranker_features import RANKER_FEATURE_DIM, RANKER_FEATURE_VERSION
 from hcfp.verify import verify_feasible
 
 
@@ -158,6 +161,24 @@ def _constant_candidates(values: tuple[float, ...]) -> torch.Tensor:
     )
 
 
+def _box_candidates(count: int) -> torch.Tensor:
+    rows = []
+    for index in range(count):
+        offset = float(index * 10)
+        rows.append(
+            torch.tensor(
+                [
+                    [offset, 0.0, 2.0, 2.0],
+                    [offset + 3.0, 0.0, 3.0, 3.0],
+                    [offset, 4.0, 4.0, 4.0],
+                    [offset + 5.0, 4.0, 5.0, 5.0],
+                ],
+                dtype=torch.float32,
+            )
+        )
+    return torch.stack(rows)
+
+
 def _telemetry(count: int) -> CandidateTelemetry:
     zeros = torch.zeros(count, dtype=torch.float32)
     bools = torch.ones(count, dtype=torch.bool)
@@ -188,6 +209,75 @@ def _telemetry(count: int) -> CandidateTelemetry:
         component_proposal_final_pair_count=zeros,
         component_proposal_displacement=zeros,
         component_proposal_rollback_reason=tuple("" for _ in range(count)),
+    )
+
+
+def _shadow_metadata() -> dict[str, object]:
+    return {
+        "capabilities": {"ranker": False},
+        "trained_heads": ["ranker"],
+        "training_objective_version": "ranker_post_repair_listwise_v3",
+    }
+
+
+class _ScoreRanker:
+    def __init__(self, scores: tuple[float, ...]):
+        self.scores = torch.tensor(scores, dtype=torch.float32)
+        self.calls = 0
+
+    def __call__(
+        self,
+        _embedding: torch.Tensor,
+        population: int,
+        features: torch.Tensor,
+    ) -> torch.Tensor:
+        self.calls += 1
+        assert population == len(self.scores)
+        assert features.shape == (population, RANKER_FEATURE_DIM)
+        return self.scores.to(device=features.device)
+
+
+def _shadow_model(scores: tuple[float, ...]) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=ModelConfig(
+            hidden_dim=16,
+            candidate_metric_dim=RANKER_FEATURE_DIM,
+            ranker_feature_version=RANKER_FEATURE_VERSION,
+            ranker_use_scene_embedding=False,
+        ),
+        ranker=_ScoreRanker(scores),
+    )
+
+
+def _shadow_analysis(*, eligible: tuple[bool, ...] = (True, True, True, True)) -> AnalyticResult:
+    analytic_count = 2
+    learned_count = 4
+    count = 1 + analytic_count + learned_count + analytic_count + learned_count
+    raw = _box_candidates(count)
+    projected = raw.clone()
+    projected[3:7] = projected[3:7] + torch.tensor([0.25, 0.0, 0.0, 0.0])
+    telemetry = _telemetry(count)
+    hard = telemetry.hard_feasible.clone()
+    projection_ok = telemetry.projection_ok.clone()
+    initial_start = 1 + analytic_count
+    for offset, ok in enumerate(eligible):
+        hard[initial_start + offset] = bool(ok)
+        projection_ok[initial_start + offset] = bool(ok)
+    return replace(
+        AnalyticResult(
+            selected=projected[5].clone(),
+            raw_candidates=raw,
+            projected_candidates=projected,
+            telemetry=telemetry,
+            energy_history=torch.zeros((1, 0, 3), dtype=torch.float32),
+            projection_status="ok",
+            incumbent_snapshot={"exact_source": "candidate_5"},
+        ),
+        telemetry=replace(
+            telemetry,
+            hard_feasible=hard,
+            projection_ok=projection_ok,
+        ),
     )
 
 
@@ -507,6 +597,177 @@ def test_post_relax_seed_provenance_keeps_identity_hash_semantics() -> None:
         record["candidate_sha256"] == record["parent_candidate_sha256"]
         for record in post_records
     )
+
+
+def test_ranker_shadow_uses_exact_replay_initial_slice_and_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hcfp.learned as learned
+
+    captured: dict[str, object] = {}
+
+    def features(case, raw, post_bdp, anchor, kinds, stage):
+        captured["raw"] = raw.detach().clone()
+        captured["post_bdp"] = post_bdp.detach().clone()
+        captured["anchor"] = anchor.detach().clone()
+        captured["kinds"] = tuple(kinds)
+        captured["stage"] = stage
+        return torch.zeros((raw.shape[0], RANKER_FEATURE_DIM), dtype=torch.float32)
+
+    monkeypatch.setattr(learned, "repair_aware_ranker_features", features)
+    analysis = _shadow_analysis()
+
+    shadowed = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=_shadow_model((0.4, 0.3, 0.2, 0.1)),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=1,
+        constraint_count=1,
+        topology_count=2,
+    )
+
+    snapshot = shadowed.incumbent_snapshot
+    assert torch.equal(captured["raw"], analysis.raw_candidates[3:7])
+    assert torch.equal(captured["post_bdp"], analysis.projected_candidates[3:7])
+    assert torch.equal(captured["anchor"], safe_shelf(_case()))
+    assert captured["kinds"] == ("learned", "constraint", "topology", "topology")
+    assert captured["stage"] == "initial"
+    assert snapshot["ranker_shadow_candidate_kinds"] == captured["kinds"]
+    assert tuple(row["source"] for row in snapshot["ranker_shadow_top4"]) == (
+        "candidate_6",
+        "candidate_5",
+        "candidate_4",
+        "candidate_3",
+    )
+
+
+def test_ranker_shadow_does_not_change_selection_or_exact_source() -> None:
+    analysis = _shadow_analysis()
+
+    shadowed = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=_shadow_model((0.1, 0.2, 0.3, 0.4)),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+
+    assert torch.equal(shadowed.selected, analysis.selected)
+    assert shadowed.incumbent_snapshot["exact_source"] == "candidate_5"
+    assert shadowed.incumbent_snapshot["ranker_shadow_source"] == "merged_learned_initial"
+
+
+def test_ranker_shadow_ignores_ineligible_best_score() -> None:
+    analysis = _shadow_analysis(eligible=(True, False, True, True))
+
+    shadowed = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=_shadow_model((0.9, -9.0, 0.2, 0.3)),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+
+    snapshot = shadowed.incumbent_snapshot
+    assert snapshot["ranker_shadow_eligible_count"] == 3
+    assert "candidate_4" not in {
+        row["source"] for row in snapshot["ranker_shadow_top4"]
+    }
+    assert snapshot["ranker_shadow_top4"][0]["source"] == "candidate_5"
+
+
+def test_ranker_shadow_untrained_or_incompatible_checkpoint_is_neutral() -> None:
+    analysis = _shadow_analysis()
+    untrained = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=_shadow_model((0.1, 0.2, 0.3, 0.4)),
+        metadata={"capabilities": {"ranker": False}, "trained_heads": []},
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+    incompatible = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=SimpleNamespace(
+            config=ModelConfig(hidden_dim=16),
+            ranker=_ScoreRanker((0.1, 0.2, 0.3, 0.4)),
+        ),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+
+    assert torch.equal(untrained.selected, analysis.selected)
+    assert untrained.incumbent_snapshot["ranker_shadow_skipped_reason"] == "ranker_not_trained"
+    assert "ranker_shadow_top4" not in untrained.incumbent_snapshot
+    assert torch.equal(incompatible.selected, analysis.selected)
+    assert (
+        incompatible.incumbent_snapshot["ranker_shadow_skipped_reason"]
+        == "ranker_feature_dim_mismatch"
+    )
+
+
+def test_ranker_shadow_uses_source_index_for_deterministic_ties() -> None:
+    shadowed = _attach_ranker_shadow_snapshot(
+        _case(),
+        _shadow_analysis(),
+        model=_shadow_model((0.5, 0.5, 0.5, 0.5)),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+
+    assert tuple(row["source"] for row in shadowed.incumbent_snapshot["ranker_shadow_top4"]) == (
+        "candidate_3",
+        "candidate_4",
+        "candidate_5",
+        "candidate_6",
+    )
+
+
+def test_ranker_shadow_failure_is_recorded_without_changing_selection() -> None:
+    analysis = _shadow_analysis()
+
+    shadowed = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=_shadow_model((float("nan"), 0.2, 0.3, 0.4)),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+
+    assert torch.equal(shadowed.selected, analysis.selected)
+    assert shadowed.incumbent_snapshot["exact_source"] == "candidate_5"
+    assert (
+        shadowed.incumbent_snapshot["ranker_shadow_failure_reason"]
+        == "ValueError: ranker shadow scores must be finite"
+    )
+    assert "ranker_shadow_top4" not in shadowed.incumbent_snapshot
 
 
 def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path: Path) -> None:

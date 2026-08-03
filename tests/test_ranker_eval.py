@@ -4,6 +4,7 @@ from dataclasses import replace
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -37,6 +38,18 @@ class _FeatureCostModel:
     @staticmethod
     def ranker(_embedding, _population, features):
         return features[:, 0]
+
+
+class _CandidateOnlyFeatureCostModel(_FeatureCostModel):
+    config = SimpleNamespace(
+        candidate_metric_dim=8,
+        ranker_feature_version="stored_candidate_features_v1",
+        ranker_use_scene_embedding=False,
+    )
+
+    @staticmethod
+    def encoder(_case):
+        raise AssertionError("candidate-only ranker evaluation must skip the encoder")
 
 
 def _sample(sample_id: str, block_count: int = 32) -> DataSample:
@@ -97,6 +110,16 @@ def test_percentile_uses_nearest_rank_for_small_heldout_sets() -> None:
     assert ranker_eval._percentile([1.0, 2.0], 0.95) == 2.0
 
 
+def test_promotion_gate_requires_zero_false_promotions() -> None:
+    blocked = ranker_eval._promotion_gates(16, 12, 15, 1)
+    promoted = ranker_eval._promotion_gates(16, 12, 15, 0)
+
+    assert blocked["false_promotion_0_met"] is False
+    assert blocked["all_met"] is False
+    assert promoted["false_promotion_0_met"] is True
+    assert promoted["all_met"] is True
+
+
 def test_v3_case_metrics_report_listwise_regret_and_false_promotion() -> None:
     record = _v3_record("case/a")
     metrics = ranker_eval._v3_case_metrics(
@@ -112,6 +135,17 @@ def test_v3_case_metrics_report_listwise_regret_and_false_promotion() -> None:
     assert metrics["rank_regret"] == 2
     assert metrics["score_regret"] == pytest.approx(0.2)
     assert metrics["false_promotion"] is True
+
+
+def test_candidate_only_evaluation_skips_scene_encoder() -> None:
+    cases = ranker_eval._evaluate_records(
+        _CandidateOnlyFeatureCostModel(),
+        [_v3_record("case/a")],
+        torch.device("cpu"),
+    )
+
+    assert len(cases) == 1
+    assert cases[0]["selected_index"] == 1
 
 
 def test_cli_writes_split_and_overall_v3_metrics(
@@ -163,7 +197,11 @@ def test_cli_writes_split_and_overall_v3_metrics(
     assert split["top4_oracle_recall"] == 2
     assert split["false_promotion"] == 1
     assert split["promotion_gates"] == {
+        "all_met": None,
         "evaluable": False,
+        "false_promotion": 1,
+        "false_promotion_0_met": None,
+        "false_promotion_required": 0,
         "records": 2,
         "records_required": 16,
         "top1_12_of_16_met": None,

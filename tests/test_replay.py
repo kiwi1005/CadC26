@@ -14,7 +14,7 @@ import torch
 
 from hcfp.analytic import AnalyticConfig, solve_case_with_telemetry
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint, save_checkpoint
-from hcfp.data import DataSample, extract_labels, sample_to_payload
+from hcfp.data import DataSample, extract_labels, file_sha256, sample_to_payload
 from hcfp.dynamics import DynamicsConfig
 from hcfp.fallback import safe_shelf
 from hcfp.geometry import centers_from_xywh
@@ -25,6 +25,7 @@ from hcfp.replay import (
     ReplayRecord,
     iter_replay,
     official_replay_scores,
+    ranker_features_for_record,
     ranker_loss_report,
     record_from_analysis,
     records_from_learned_analysis,
@@ -124,7 +125,7 @@ def test_v3_ranker_loss_is_row_permutation_invariant() -> None:
 
     assert original.combined == pytest.approx(float(changed.combined))
     assert original.listwise == pytest.approx(float(changed.listwise))
-    assert original.listwise_weight_max == pytest.approx(1.25)
+    assert original.listwise_weight_max > original.listwise_weight_mean > 0.0
 
 
 def test_v2_ranker_loss_keeps_pointwise_fallback() -> None:
@@ -181,6 +182,103 @@ def test_v3_replay_roundtrip_adds_stable_candidate_provenance(tmp_path: Path) ->
     assert loaded.population_seed == 0
     assert torch.equal(loaded.feasibility_tier, v3_record.feasibility_tier)
     assert torch.equal(loaded.target_rank, v3_record.target_rank)
+
+
+def test_v3_replay_derives_repair_aware_ranker_feature_view() -> None:
+    record = _v3_record()
+
+    stored = ranker_features_for_record(
+        record,
+        expected_dim=8,
+        expected_version="stored_candidate_features_v1",
+    )
+    repair_aware = ranker_features_for_record(
+        record,
+        expected_dim=26,
+        expected_version="repair_aware_ranker_features_v4_device_parity",
+    )
+
+    assert torch.equal(stored, record.candidate_features)
+    assert repair_aware.shape == (len(record.target_score), 26)
+    assert torch.isfinite(repair_aware).all()
+    torch.testing.assert_close(repair_aware[:, 18:21], torch.eye(3))
+
+
+def test_repair_aware_features_do_not_read_post_repair_targets() -> None:
+    record = _v3_record()
+    changed_targets = replace(
+        record,
+        feasibility_tier=torch.flip(record.feasibility_tier, dims=(0,)),
+        post_repair_hard_feasible=~record.post_repair_hard_feasible,
+        post_repair_cap_margin=record.post_repair_cap_margin + 10.0,
+    )
+
+    original = ranker_features_for_record(
+        record,
+        expected_dim=26,
+        expected_version="repair_aware_ranker_features_v4_device_parity",
+    )
+    changed = ranker_features_for_record(
+        changed_targets,
+        expected_dim=26,
+        expected_version="repair_aware_ranker_features_v4_device_parity",
+    )
+
+    torch.testing.assert_close(changed, original, rtol=0.0, atol=0.0)
+
+
+def test_ranker_loss_reuses_prepared_repair_aware_features() -> None:
+    record = _v3_record()
+    prepared = ranker_features_for_record(
+        record,
+        expected_dim=26,
+        expected_version="repair_aware_ranker_features_v4_device_parity",
+    )
+    prepared_record = replace(
+        record,
+        candidate_features=prepared,
+        candidate_geometry=None,
+        post_bdp_geometry=None,
+    )
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=16,
+            encoder_layers=1,
+            candidate_metric_dim=26,
+            ranker_feature_version="repair_aware_ranker_features_v4_device_parity",
+        )
+    )
+
+    report = ranker_loss_report(model, prepared_record)
+
+    assert torch.isfinite(report.combined)
+
+
+def test_candidate_only_ranker_loss_skips_scene_encoder() -> None:
+    record = _v3_record()
+    prepared = ranker_features_for_record(
+        record,
+        expected_dim=26,
+        expected_version="repair_aware_ranker_features_v4_device_parity",
+    )
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=16,
+            encoder_layers=1,
+            candidate_metric_dim=26,
+            ranker_feature_version="repair_aware_ranker_features_v4_device_parity",
+            ranker_use_scene_embedding=False,
+        )
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("candidate-only ranker must not call the scene encoder")
+
+    model.encoder.forward = fail_if_called
+
+    report = ranker_loss_report(model, replace(record, candidate_features=prepared))
+
+    assert torch.isfinite(report.combined)
 
 
 def test_v3_row_id_tracks_geometry_not_slot_metadata(tmp_path: Path) -> None:
@@ -329,6 +427,88 @@ def test_cli_generate_replay_emits_two_v3_stage_records(tmp_path: Path, monkeypa
     assert report["stages"] == {"initial": 1, "post_relax": 1}
     assert report["dataset"]["samples"] == 1
     assert report["mid_flow_state_recorded"] is False
+
+
+def test_cli_generate_replay_skips_excluded_sample_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample, source, analysis = _merged_replay_fixture()
+    excluded_sample = replace(sample, sample_id="excluded")
+    fresh_sample = replace(sample, sample_id="fresh")
+    checkpoint = tmp_path / "model.pt"
+    checkpoint_hash = save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+    )
+    merged = SimpleNamespace(
+        result=SimpleNamespace(
+            used_checkpoint=True,
+            checkpoint_hash=checkpoint_hash,
+            failure_reason=None,
+            candidate_count=5,
+            topology_seed_count=1,
+            constraint_seed_count=1,
+        ),
+        analytic=analysis.analytic,
+    )
+    monkeypatch.setattr(
+        generate_replay,
+        "iter_floorset_lite_with_source",
+        lambda *_args, **_kwargs: iter(((excluded_sample, source), (fresh_sample, source))),
+    )
+    monkeypatch.setattr(
+        generate_replay,
+        "iter_replay",
+        lambda _path: iter((SimpleNamespace(sample=excluded_sample),)),
+    )
+    monkeypatch.setattr(
+        generate_replay,
+        "analyze_case_with_checkpoint",
+        lambda *_args, **_kwargs: merged,
+    )
+    exclusion = tmp_path / "exclude.jsonl"
+    exclusion.write_text("excluded\n", encoding="utf-8")
+    output = tmp_path / "replay.jsonl"
+
+    assert generate_replay.main(
+        [
+            "--floorset-lite-root",
+            str(tmp_path),
+            "--checkpoint",
+            str(checkpoint),
+            "--output",
+            str(output),
+            "--exclude-replay",
+            str(exclusion),
+            "--record-stage",
+            "initial",
+            "--limit",
+            "1",
+            "--population",
+            "2",
+            "--dynamics-steps",
+            "1",
+            "--projection-steps",
+            "2",
+            "--topology-seeds",
+            "1",
+            "--constraint-seeds",
+            "1",
+            "--device",
+            "cpu",
+        ]
+    ) == 0
+
+    loaded = list(iter_replay(output))
+    report = json.loads(Path(f"{output}.report.json").read_text(encoding="utf-8"))
+    assert [(record.sample.sample_id, record.candidate_stage) for record in loaded] == [
+        ("fresh", "initial")
+    ]
+    assert report["dataset"]["exclusions"]["sample_count"] == 1
+    assert report["dataset"]["exclusions"]["skipped"] == 1
+    assert report["dataset"]["exclusions"]["replays"][0]["sha256"] == file_sha256(exclusion)
 
 
 def test_v3_target_order_is_tie_stable_and_row_permutation_safe(tmp_path: Path) -> None:
@@ -771,7 +951,7 @@ def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> Non
     assert float(scores[2]) > float(scores[:2].max())
 
 
-def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Path) -> None:
+def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: Path) -> None:
     checkpoint = tmp_path / "source.pt"
     source_hash = save_checkpoint(
         HCFPModel(ModelConfig(hidden_dim=16)),
@@ -809,6 +989,8 @@ def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Pa
             "1",
             "--device",
             "cpu",
+            "--stage",
+            "initial",
         ],
         cwd=Path(__file__).resolve().parents[1],
         check=True,
@@ -816,20 +998,94 @@ def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Pa
         capture_output=True,
     )
 
-    _, metadata = load_checkpoint(ranked, expected_normalization=RUNTIME_NORMALIZATION)
+    loaded, metadata = load_checkpoint(ranked, expected_normalization=RUNTIME_NORMALIZATION)
     report = json.loads(Path(f"{ranked}.training.json").read_text(encoding="utf-8"))
-    assert metadata["capabilities"] == {"flow": True, "ranker": True}
+    assert metadata["capabilities"] == {"flow": True, "ranker": False}
     assert metadata["trained_heads"] == ["encoder", "flow", "ranker"]
-    assert metadata["training_objective_version"] == "ranker_post_repair_listwise_v1"
+    assert metadata["training_objective_version"] == "ranker_post_repair_listwise_v3_feasibility_shadow"
     assert metadata["parent_state_hash"] == source_hash
+    assert loaded.config.candidate_metric_dim == 26
     assert report["listwise_records"] == 1
+    assert report["candidate_stage_filter"] == "initial"
+    assert report["replays"] == [
+        {
+            "path": str(replay),
+            "sha256": file_sha256(replay),
+            "records": 1,
+            "selected_records": 1,
+            "samples": 1,
+        }
+    ]
+    assert report["candidate_feature_dim"] == 26
+    assert report["ranker_use_scene_embedding"] is False
+    assert report["ranker_initialization"] == "reset_from_non_ranker_source"
+    assert report["candidate_feature_version"] == "repair_aware_ranker_features_v4_device_parity"
+    assert (
+        report["candidate_feature_normalization"]["kind"]
+        == "global_zscore_constant_identity_v2"
+    )
+    assert report["candidate_feature_normalization"]["source"] == "training_replay"
+    assert len(report["candidate_feature_normalization"]["mean"]) == 26
+    assert len(report["candidate_feature_normalization"]["scale"]) == 26
+    assert min(report["candidate_feature_normalization"]["scale"]) > 1.0e-6
+    assert report["loss_window_records"] == 1
+    assert report["first_window_mean_loss"] == report["first_loss"]
+    assert report["last_window_mean_loss"] == report["last_loss"]
     assert set(report["last_loss_components"]) == {
         "combined",
+        "feasibility_order",
         "listwise",
         "listwise_weight_max",
         "listwise_weight_mean",
         "pointwise",
+        "top_one",
     }
+
+    continuation_replay = tmp_path / "ranker-continuation.jsonl"
+    write_replay_v3(
+        [replace(training_record, checkpoint_hash=metadata["state_hash"])],
+        continuation_replay,
+    )
+    continued = tmp_path / "ranked-continued.pt"
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp_ranker.py",
+            str(continuation_replay),
+            "--checkpoint",
+            str(ranked),
+            "--output",
+            str(continued),
+            "--steps",
+            "1",
+            "--device",
+            "cpu",
+            "--stage",
+            "initial",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    _, continued_metadata = load_checkpoint(
+        continued,
+        expected_normalization=RUNTIME_NORMALIZATION,
+    )
+    continued_report = json.loads(
+        Path(f"{continued}.training.json").read_text(encoding="utf-8")
+    )
+    assert continued_metadata["parent_state_hash"] == metadata["state_hash"]
+    assert continued_report["ranker_initialization"] == "continued_from_source_checkpoint"
+    assert continued_report["candidate_feature_normalization"]["source"] == "source_checkpoint"
+    assert (
+        continued_report["candidate_feature_normalization"]["mean"]
+        == report["candidate_feature_normalization"]["mean"]
+    )
+    assert (
+        continued_report["candidate_feature_normalization"]["scale"]
+        == report["candidate_feature_normalization"]["scale"]
+    )
 
 
 def test_ranker_clis_reject_checkpoint_mismatch_and_split_leakage(tmp_path: Path) -> None:

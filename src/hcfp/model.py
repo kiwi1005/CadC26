@@ -7,6 +7,7 @@ building blocks, not a claim of learned quality until a checkpoint is supplied.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -29,6 +30,10 @@ class ModelConfig:
     aspect_residual_bound: float = 0.25
     force_channels: int = 7
     candidate_metric_dim: int = 8
+    ranker_feature_mean: tuple[float, ...] = ()
+    ranker_feature_scale: tuple[float, ...] = ()
+    ranker_feature_version: str = "stored_candidate_features_v1"
+    ranker_use_scene_embedding: bool = True
     compute_dtype: str = "float32"
     topology_enabled: bool = False
     constraint_enabled: bool = False
@@ -48,6 +53,10 @@ class ModelConfig:
             raise ValueError("residual bounds must be positive")
         if self.compute_dtype not in {"float32", "bfloat16"}:
             raise ValueError("compute_dtype must be float32 or bfloat16")
+        if type(self.ranker_use_scene_embedding) is not bool:
+            raise ValueError("ranker_use_scene_embedding must be boolean")
+        if not isinstance(self.ranker_feature_version, str) or not self.ranker_feature_version:
+            raise ValueError("ranker_feature_version must be a non-empty string")
         if self.collective_message_dim <= 0 or self.collective_passes <= 0:
             raise ValueError("collective dimensions and passes must be positive")
         if self.collective_position_bound <= 0.0 or self.collective_aspect_bound <= 0.0:
@@ -56,6 +65,18 @@ class ModelConfig:
             raise ValueError("collective_gate_delta must be in (0, 1)")
         if self.collective_enabled and self.force_channels != 7:
             raise ValueError("collective dynamics require the canonical seven force channels")
+        mean = tuple(float(value) for value in self.ranker_feature_mean)
+        scale = tuple(float(value) for value in self.ranker_feature_scale)
+        object.__setattr__(self, "ranker_feature_mean", mean)
+        object.__setattr__(self, "ranker_feature_scale", scale)
+        if bool(mean) != bool(scale):
+            raise ValueError("ranker feature mean and scale must be configured together")
+        if mean and (len(mean) != self.candidate_metric_dim or len(scale) != self.candidate_metric_dim):
+            raise ValueError("ranker feature normalization must match candidate_metric_dim")
+        if any(not math.isfinite(value) for value in (*mean, *scale)) or any(
+            value <= 0.0 for value in scale
+        ):
+            raise ValueError("ranker feature normalization must be finite with positive scales")
 
 
 @dataclass(frozen=True)
@@ -413,21 +434,46 @@ class GeometryAwareCollectiveHead(nn.Module):
 class RepairAwareRanker(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
+        self.metric_dim = config.candidate_metric_dim
+        self.use_scene_embedding = config.ranker_use_scene_embedding
+        mean = config.ranker_feature_mean or (0.0,) * config.candidate_metric_dim
+        scale = config.ranker_feature_scale or (1.0,) * config.candidate_metric_dim
+        self.register_buffer(
+            "feature_mean",
+            torch.tensor(mean, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "feature_scale",
+            torch.tensor(scale, dtype=torch.float32),
+            persistent=False,
+        )
         self.net = nn.Sequential(
-            nn.Linear(config.hidden_dim + config.candidate_metric_dim, config.hidden_dim),
+            nn.Linear(
+                config.candidate_metric_dim
+                + (config.hidden_dim if config.ranker_use_scene_embedding else 0),
+                config.hidden_dim,
+            ),
             nn.SiLU(),
             nn.Linear(config.hidden_dim, 1),
         )
 
     def forward(self, embedding: Tensor, population: int, candidate_metrics: Tensor | None = None) -> Tensor:
-        pooled = embedding.mean(dim=0, keepdim=True).expand(population, -1)
+        context = (
+            embedding.mean(dim=0, keepdim=True).expand(population, -1)
+            if self.use_scene_embedding
+            else embedding.new_empty((population, 0))
+        )
         if candidate_metrics is None:
-            metrics = torch.zeros(population, self.net[0].in_features - embedding.shape[1], device=embedding.device)
+            metrics = torch.zeros(population, self.metric_dim, device=embedding.device)
         else:
             metrics = torch.as_tensor(candidate_metrics, dtype=embedding.dtype, device=embedding.device)
-            if metrics.shape != (population, self.net[0].in_features - embedding.shape[1]):
+            if metrics.shape != (population, self.metric_dim):
                 raise ValueError("candidate_metrics shape does not match [population, candidate_metric_dim]")
-        return self.net(torch.cat((pooled, metrics), dim=1)).squeeze(1).float()
+        metrics = (metrics - self.feature_mean.to(dtype=metrics.dtype)) / self.feature_scale.to(
+            dtype=metrics.dtype
+        )
+        return self.net(torch.cat((context, metrics), dim=1)).squeeze(1).float()
 
 
 class ConstraintHeads(nn.Module):

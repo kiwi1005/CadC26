@@ -20,7 +20,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.data import file_sha256  # noqa: E402
-from hcfp.replay import OFFICIAL_TARGET_KIND, ReplayRecord, iter_replay  # noqa: E402
+from hcfp.ranker_features import (  # noqa: E402
+    STORED_RANKER_FEATURE_VERSION,
+)
+from hcfp.replay import (  # noqa: E402
+    OFFICIAL_TARGET_KIND,
+    ReplayRecord,
+    iter_replay,
+    ranker_features_for_record,
+)
 
 
 def _named_path(value: str) -> tuple[str, Path]:
@@ -84,6 +92,14 @@ def main(argv: list[str] | None = None) -> int:
             map_location="cpu",
         )
         model = model.to(device=device).eval()
+        candidate_feature_dim = _candidate_feature_dim(
+            model,
+            fallback=replay_records[next(iter(replay_records))][0].candidate_features.shape[1],
+        )
+        candidate_feature_version = _candidate_feature_version(
+            model,
+            fallback=STORED_RANKER_FEATURE_VERSION,
+        )
         compatible_hashes = {
             str(value)
             for value in (metadata.get("state_hash"), metadata.get("parent_state_hash"))
@@ -95,6 +111,9 @@ def main(argv: list[str] | None = None) -> int:
             "state_hash": metadata["state_hash"],
             "parent_state_hash": metadata.get("parent_state_hash"),
             "compatible_replay_hashes": sorted(compatible_hashes),
+            "candidate_feature_dim": candidate_feature_dim,
+            "candidate_feature_version": candidate_feature_version,
+            "ranker_use_scene_embedding": _ranker_uses_scene_embedding(model),
         }
         for replay_name, records in replay_records.items():
             _validate_checkpoint_compatibility(
@@ -128,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             "records_required": 16,
             "top1_exact_best_required": 12,
             "top4_oracle_recall_required": 15,
+            "false_promotion_required": 0,
         },
         "replays": {
             name: {
@@ -172,10 +192,25 @@ def _evaluate_records(model: Any, records: list[ReplayRecord], device: torch.dev
     cases = []
     with torch.inference_mode():
         for record in records:
-            case = record.sample.case.to(device=device, dtype=torch.float32)
-            features = record.candidate_features.to(device=device)
+            expected_dim = _candidate_feature_dim(
+                model,
+                fallback=record.candidate_features.shape[1],
+            )
+            expected_version = _candidate_feature_version(
+                model,
+                fallback=STORED_RANKER_FEATURE_VERSION,
+            )
+            features = ranker_features_for_record(
+                record,
+                expected_dim=expected_dim,
+                expected_version=expected_version,
+            ).to(device=device)
             target = record.target_score.to(device="cpu", dtype=torch.float32)
-            embedding = model.encoder(case)
+            if _ranker_uses_scene_embedding(model):
+                case = record.sample.case.to(device=device, dtype=torch.float32)
+                embedding = model.encoder(case)
+            else:
+                embedding = features.new_empty((0, 0))
             prediction = (
                 model.ranker(embedding, len(features), features)
                 .detach()
@@ -186,6 +221,21 @@ def _evaluate_records(model: Any, records: list[ReplayRecord], device: torch.dev
             else:
                 cases.append(_legacy_case_metrics(record, prediction, target, mode))
     return cases
+
+
+def _candidate_feature_dim(model: Any, *, fallback: int) -> int:
+    config = getattr(model, "config", None)
+    return int(getattr(config, "candidate_metric_dim", fallback))
+
+
+def _candidate_feature_version(model: Any, *, fallback: str) -> str:
+    config = getattr(model, "config", None)
+    return str(getattr(config, "ranker_feature_version", fallback))
+
+
+def _ranker_uses_scene_embedding(model: Any) -> bool:
+    config = getattr(model, "config", None)
+    return bool(getattr(config, "ranker_use_scene_embedding", True))
 
 
 def _metric_mode(records: list[ReplayRecord]) -> str:
@@ -335,7 +385,12 @@ def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "median_score_regret": median(score_regrets),
         "p95_score_regret": _percentile(score_regrets, 0.95),
         "weighted_score_regret": _weighted_mean(score_regrets, weights),
-        "promotion_gates": _promotion_gates(records, top1, top4),
+        "promotion_gates": _promotion_gates(
+            records,
+            top1,
+            top4,
+            false_promotions,
+        ),
     }
 
 
@@ -356,18 +411,34 @@ def _stage_summaries(cases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     }
 
 
-def _promotion_gates(records: int, top1: int, top4: int) -> dict[str, Any]:
+def _promotion_gates(
+    records: int,
+    top1: int,
+    top4: int,
+    false_promotions: int,
+) -> dict[str, Any]:
     evaluable = records == 16
+    top1_met = (top1 >= 12) if evaluable else None
+    top4_met = (top4 >= 15) if evaluable else None
+    false_promotion_met = (false_promotions == 0) if evaluable else None
     return {
         "records_required": 16,
         "records": records,
         "evaluable": evaluable,
         "top1_exact_best_required": 12,
         "top1_exact_best": top1,
-        "top1_12_of_16_met": (top1 >= 12) if evaluable else None,
+        "top1_12_of_16_met": top1_met,
         "top4_oracle_recall_required": 15,
         "top4_oracle_recall": top4,
-        "top4_15_of_16_met": (top4 >= 15) if evaluable else None,
+        "top4_15_of_16_met": top4_met,
+        "false_promotion_required": 0,
+        "false_promotion": false_promotions,
+        "false_promotion_0_met": false_promotion_met,
+        "all_met": (
+            bool(top1_met and top4_met and false_promotion_met)
+            if evaluable
+            else None
+        ),
     }
 
 
