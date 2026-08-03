@@ -291,6 +291,9 @@ def _strict_gates(
     if not isinstance(comparisons, dict):
         comparisons = {}
     baseline_large = [row for row in lanes[baseline] if 106 <= int(row["block_count"]) <= 120]
+    baseline_runtimes = sorted(float(row["runtime_seconds"]) for row in lanes[baseline])
+    baseline_p50 = percentile(baseline_runtimes, 0.50)
+    baseline_p95 = percentile(baseline_runtimes, 0.95)
     out = {}
     for lane, rows in sorted(lanes.items()):
         if lane == baseline:
@@ -313,7 +316,18 @@ def _strict_gates(
         else:
             large_delta = weighted_score(candidate_large) - weighted_score(baseline_large)
             large_met = large_delta <= 1.0e-9
-        passed = hard_met and regression_met and large_met is True
+        candidate_runtimes = sorted(float(row["runtime_seconds"]) for row in rows)
+        candidate_p50 = percentile(candidate_runtimes, 0.50)
+        candidate_p95 = percentile(candidate_runtimes, 0.95)
+        runtime_p50_met = candidate_p50 <= baseline_p50 + 1.0e-9
+        runtime_p95_met = candidate_p95 <= 1.10 * baseline_p95 + 1.0e-9
+        passed = (
+            hard_met
+            and regression_met
+            and large_met is True
+            and runtime_p50_met
+            and runtime_p95_met
+        )
         out[lane] = {
             "passed": passed,
             "hard_feasibility_100_met": hard_met,
@@ -323,8 +337,21 @@ def _strict_gates(
             "large_subset_weighted_cost_delta": large_delta,
             "large_subset_cases": len(candidate_large),
             "baseline_large_subset_cases": len(baseline_large),
+            "runtime_p50_met": runtime_p50_met,
+            "runtime_p95_met": runtime_p95_met,
+            "runtime_p50": candidate_p50,
+            "baseline_runtime_p50": baseline_p50,
+            "runtime_p95": candidate_p95,
+            "baseline_runtime_p95": baseline_p95,
+            "runtime_p95_limit": 1.10 * baseline_p95,
             "source": "benchmark_comparisons_plus_recomputed_large_subset",
-            "reason": _strict_gate_reason(hard_met, regression_met, large_met),
+            "reason": _strict_gate_reason(
+                hard_met,
+                regression_met,
+                large_met,
+                runtime_p50_met,
+                runtime_p95_met,
+            ),
         }
     return out
 
@@ -342,8 +369,10 @@ def _strict_gate_reason(
     hard_met: bool,
     regression_met: bool,
     large_met: bool | None,
+    runtime_p50_met: bool,
+    runtime_p95_met: bool,
 ) -> str:
-    if hard_met and regression_met and large_met is True:
+    if hard_met and regression_met and large_met is True and runtime_p50_met and runtime_p95_met:
         return "pass"
     if large_met is None:
         return "no_106_120_subset_to_prove_large_nonregression"
@@ -354,6 +383,10 @@ def _strict_gate_reason(
         failed.append("per_case_regression")
     if large_met is False:
         failed.append("large_subset_regression")
+    if not runtime_p50_met:
+        failed.append("runtime_p50_regression")
+    if not runtime_p95_met:
+        failed.append("runtime_p95_regression")
     return ",".join(failed)
 
 
@@ -565,6 +598,7 @@ def _overall_summary(
         freeze_blockers.append("ranker_quality_gate_failed")
     if not a100_profiles:
         freeze_blockers.append("a100_profile_missing")
+    freeze_blockers.append("active_ranker_selection_unproven")
 
     summary = {
         "benchmark_reports": len(benchmarks),

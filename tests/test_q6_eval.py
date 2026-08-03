@@ -67,6 +67,8 @@ def test_q6_aggregates_benchmark_ranker_and_checkpoint_probe(
     assert gate["regressed_cases_zero_met"] is False
     assert gate["large_subset_nonregression_met"] is False
     assert gate["regressed_cases"] == 2
+    assert gate["runtime_p50_met"] is True
+    assert gate["runtime_p95_met"] is True
     assert report["ranker_eval"]["oracle_at_1"] == 1
     assert report["ranker_eval"]["oracle_at_4"] == 2
     assert report["ranker_eval"]["by_stage"]["initial"]["cases"] == 1
@@ -84,6 +86,7 @@ def test_q6_aggregates_benchmark_ranker_and_checkpoint_probe(
     assert report["summary"]["q6_shadow_validation_gate"]["passed"] is False
     assert report["summary"]["submission_freeze_gate"]["passed"] is False
     assert report["summary"]["submission_freeze_gate"]["active_ranker_selection_proven"] is False
+    assert "active_ranker_selection_unproven" in report["summary"]["submission_freeze_gate"]["blockers"]
 
 
 def test_q6_resume_reuses_matching_benchmark_entry(
@@ -254,6 +257,19 @@ def test_q6_ranker_gate_uses_initial_stage_only() -> None:
 
     assert summary["ranker_quality_gate"]["passed"] is True
     assert summary["ranker_quality_gate"]["observed"] == ranker["by_stage"]["initial"]
+
+
+def test_q6_strict_gate_rejects_runtime_regression() -> None:
+    payload = _passing_benchmark_report(7001)
+    payload["lanes"]["learned"][0]["runtime_seconds"] = 2.0  # type: ignore[index]
+    lanes = q6._extract_lanes(payload)
+
+    gate = q6._strict_gates(lanes, payload["comparisons"], payload["baseline"])["learned"]
+
+    assert gate["passed"] is False
+    assert gate["runtime_p50_met"] is False
+    assert gate["runtime_p95_met"] is False
+    assert gate["reason"] == "runtime_p50_regression,runtime_p95_regression"
 
 
 def _benchmark_report() -> dict[str, object]:
