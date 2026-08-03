@@ -753,8 +753,6 @@ def _sampling_metadata(
 
 
 def _is_hard_negative(record: ReplayRecord) -> bool:
-    if record.candidate_stage == "post_relax":
-        return True
     if record.feasibility_tier is not None and bool((record.feasibility_tier > 0).any()):
         return True
     return bool(

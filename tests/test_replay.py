@@ -1061,6 +1061,32 @@ def test_q5_dagger_sampling_reports_deterministic_fallback_shortfall() -> None:
     assert len(first.indices) == 10
 
 
+def test_q5_dagger_sampling_does_not_treat_feasible_post_relax_as_hard_negative() -> None:
+    records = [
+        _sampling_record(
+            "post-positive",
+            block_count=96,
+            stage="post_relax",
+            tiers=(0, 0, 0),
+            cap_margin=(0.5, 0.6, 0.7),
+            hard_feasible=(True, True, True),
+        ),
+        _sampling_record(
+            "post-infeasible",
+            block_count=96,
+            stage="post_relax",
+            tiers=(0, 1, 0),
+            cap_margin=(0.5, 0.6, 0.7),
+            hard_feasible=(True, False, True),
+        ),
+    ]
+
+    plan = ranker_training_schedule(records, steps=10, seed=17, preset="q5_dagger_v1")
+
+    assert plan.metadata["bucket_eligible"]["hard_negative"] == 1
+    assert plan.metadata["bucket_eligible"]["successful_positive"] == 2
+
+
 def test_ranker_sampler_target_telemetry_does_not_change_feature_view() -> None:
     base = _sampling_record("same", block_count=120, cap_margin=(1.0, 1.0, 1.0))
     changed = replace(
