@@ -25,8 +25,10 @@ from hcfp.ranker_upgrade import upgrade_candidate_metric_dim  # noqa: E402
 from hcfp.replay import (  # noqa: E402
     OFFICIAL_TARGET_KIND,
     RANKER_OBJECTIVES,
+    RANKER_SAMPLING_PRESETS,
     iter_replay,
     ranker_features_for_record,
+    ranker_training_schedule,
     train_ranker_steps,
 )
 
@@ -46,6 +48,17 @@ def main(argv: list[str] | None = None) -> int:
         choices=tuple(RANKER_OBJECTIVES),
         default="default",
         help="Ranker loss preset. The default preserves the existing objective.",
+    )
+    parser.add_argument(
+        "--sampling-preset",
+        choices=RANKER_SAMPLING_PRESETS,
+        default="legacy",
+        help="Ranker record sampler. The default preserves legacy modulo order.",
+    )
+    parser.add_argument(
+        "--sampling-seed",
+        type=int,
+        help="Deterministic sampler seed. Defaults to --seed.",
     )
     args = parser.parse_args(argv)
 
@@ -220,6 +233,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.ranker.parameters(), lr=args.learning_rate)
+    sampling_seed = args.seed if args.sampling_seed is None else args.sampling_seed
+    sampling_plan = ranker_training_schedule(
+        records,
+        steps=args.steps,
+        seed=sampling_seed,
+        preset=args.sampling_preset,
+    )
     history = train_ranker_steps(
         model,
         records,
@@ -227,6 +247,9 @@ def main(argv: list[str] | None = None) -> int:
         steps=args.steps,
         report_components=True,
         objective=objective or RANKER_OBJECTIVES["default"],
+        sampling_indices=(
+            None if args.sampling_preset == "legacy" else sampling_plan.indices
+        ),
     )
     loss_window = min(len(records), len(history))
     capabilities = dict(source["capabilities"])
@@ -280,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         "objective_preset": args.objective_preset if listwise_records else "pointwise",
         "training_objective_version": objective_version,
         "training_objective_weights": objective_weights,
+        "sampling": sampling_plan.metadata,
         "candidate_stage_filter": args.stage,
         "candidate_feature_version": feature_version,
         "candidate_feature_dim": feature_dim,

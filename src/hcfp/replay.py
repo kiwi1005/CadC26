@@ -116,6 +116,12 @@ class RankerLossReport:
 
 
 @dataclass(frozen=True)
+class RankerSamplingPlan:
+    indices: tuple[int, ...]
+    metadata: dict[str, object]
+
+
+@dataclass(frozen=True)
 class RankerObjective:
     name: str
     listwise: float
@@ -158,6 +164,13 @@ RANKER_OBJECTIVES = {
         pointwise=0.0,
         top_one=0.0,
     ),
+}
+RANKER_SAMPLING_PRESETS = ("legacy", "epoch_shuffle", "q5_dagger_v1")
+_Q5_DAGGER_QUOTAS = {
+    "hard_negative": 0.40,
+    "near_cap": 0.25,
+    "large_106_120": 0.20,
+    "successful_positive": 0.15,
 }
 
 
@@ -514,19 +527,30 @@ def train_ranker_steps(
     steps: int,
     report_components: bool = False,
     objective: RankerObjective = DEFAULT_RANKER_OBJECTIVE,
+    sampling_indices: Sequence[int] | None = None,
 ) -> list[float] | list[dict[str, float]]:
     materialized = list(records)
     if not materialized or steps <= 0:
         raise ValueError("ranker training requires records and positive steps")
     if any(record.target_kind != OFFICIAL_TARGET_KIND for record in materialized):
         raise ValueError("ranker training requires official v10 replay targets")
+    if sampling_indices is not None:
+        if len(sampling_indices) != steps:
+            raise ValueError("ranker sampling schedule must have one index per step")
+        if any(index < 0 or index >= len(materialized) for index in sampling_indices):
+            raise ValueError("ranker sampling schedule contains an out-of-range index")
     history = []
     model.train()
     for index in range(steps):
         optimizer.zero_grad(set_to_none=True)
+        record_index = (
+            sampling_indices[index]
+            if sampling_indices is not None
+            else index % len(materialized)
+        )
         report = ranker_loss_report(
             model,
-            materialized[index % len(materialized)],
+            materialized[record_index],
             objective=objective,
         )
         report.combined.backward()
@@ -534,6 +558,224 @@ def train_ranker_steps(
         optimizer.step()
         history.append(report.scalars() if report_components else float(report.combined.detach()))
     return history
+
+
+def ranker_training_schedule(
+    records: Sequence[ReplayRecord],
+    *,
+    steps: int,
+    seed: int,
+    preset: str,
+) -> RankerSamplingPlan:
+    if preset not in RANKER_SAMPLING_PRESETS:
+        raise ValueError(f"unsupported ranker sampling preset {preset!r}")
+    if not records or steps <= 0:
+        raise ValueError("ranker sampling requires records and positive steps")
+    if preset == "legacy":
+        indices = tuple(index % len(records) for index in range(steps))
+        return RankerSamplingPlan(
+            indices=indices,
+            metadata=_sampling_metadata(
+                preset=preset,
+                seed=seed,
+                steps=steps,
+                record_count=len(records),
+                indices=indices,
+                epoch_shuffle=False,
+                bucket_targets={},
+                bucket_eligible={},
+                bucket_draws={},
+                bucket_shortfall={},
+            ),
+        )
+    if preset == "epoch_shuffle":
+        indices = _draw_epoch_shuffled_indices(
+            tuple(range(len(records))),
+            count=steps,
+            seed=seed,
+            stream="epoch_shuffle",
+        )
+        return RankerSamplingPlan(
+            indices=indices,
+            metadata=_sampling_metadata(
+                preset=preset,
+                seed=seed,
+                steps=steps,
+                record_count=len(records),
+                indices=indices,
+                epoch_shuffle=True,
+                bucket_targets={},
+                bucket_eligible={},
+                bucket_draws={},
+                bucket_shortfall={},
+            ),
+        )
+    return _q5_dagger_sampling_schedule(records, steps=steps, seed=seed)
+
+
+def _q5_dagger_sampling_schedule(
+    records: Sequence[ReplayRecord],
+    *,
+    steps: int,
+    seed: int,
+) -> RankerSamplingPlan:
+    targets = _quota_counts(steps, _Q5_DAGGER_QUOTAS)
+    pools = {
+        "hard_negative": tuple(
+            index for index, record in enumerate(records) if _is_hard_negative(record)
+        ),
+        "near_cap": tuple(
+            index for index, record in enumerate(records) if _is_near_cap(record)
+        ),
+        "large_106_120": tuple(
+            index for index, record in enumerate(records) if 106 <= int(record.sample.case.n) <= 120
+        ),
+        "successful_positive": tuple(
+            index for index, record in enumerate(records) if _is_successful_positive(record)
+        ),
+    }
+    all_indices = tuple(range(len(records)))
+    draws_by_bucket: dict[str, tuple[int, ...]] = {}
+    shortfall: dict[str, int] = {}
+    for bucket, count in targets.items():
+        pool = pools[bucket]
+        if pool:
+            draws_by_bucket[bucket] = _draw_epoch_shuffled_indices(
+                pool,
+                count=count,
+                seed=seed,
+                stream=bucket,
+            )
+            shortfall[bucket] = 0
+        else:
+            draws_by_bucket[bucket] = _draw_epoch_shuffled_indices(
+                all_indices,
+                count=count,
+                seed=seed,
+                stream=f"{bucket}:fallback",
+            )
+            shortfall[bucket] = count
+    tagged = [
+        (bucket, draw_index, record_index)
+        for bucket, indices in draws_by_bucket.items()
+        for draw_index, record_index in enumerate(indices)
+    ]
+    tagged.sort(
+        key=lambda item: _stable_key(seed=seed, stream="q5_dagger_v1:interleave", epoch=item[1], index=item[2], extra=item[0])
+    )
+    indices = tuple(record_index for _bucket, _draw_index, record_index in tagged)
+    return RankerSamplingPlan(
+        indices=indices,
+        metadata=_sampling_metadata(
+            preset="q5_dagger_v1",
+            seed=seed,
+            steps=steps,
+            record_count=len(records),
+            indices=indices,
+            epoch_shuffle=True,
+            bucket_targets=targets,
+            bucket_eligible={bucket: len(pool) for bucket, pool in pools.items()},
+            bucket_draws={bucket: len(indices) for bucket, indices in draws_by_bucket.items()},
+            bucket_shortfall=shortfall,
+        ),
+    )
+
+
+def _quota_counts(steps: int, quotas: dict[str, float]) -> dict[str, int]:
+    raw = {name: steps * fraction for name, fraction in quotas.items()}
+    counts = {name: int(value) for name, value in raw.items()}
+    remainder = steps - sum(counts.values())
+    order = sorted(quotas, key=lambda name: (-(raw[name] - counts[name]), name))
+    for name in order[:remainder]:
+        counts[name] += 1
+    return counts
+
+
+def _draw_epoch_shuffled_indices(
+    pool: Sequence[int],
+    *,
+    count: int,
+    seed: int,
+    stream: str,
+) -> tuple[int, ...]:
+    if not pool and count:
+        raise ValueError("cannot draw from an empty ranker sampling pool")
+    draws: list[int] = []
+    epoch = 0
+    while len(draws) < count:
+        epoch_indices = sorted(
+            pool,
+            key=lambda index: _stable_key(seed=seed, stream=stream, epoch=epoch, index=index),
+        )
+        draws.extend(epoch_indices)
+        epoch += 1
+    return tuple(draws[:count])
+
+
+def _stable_key(
+    *,
+    seed: int,
+    stream: str,
+    epoch: int,
+    index: int,
+    extra: str = "",
+) -> str:
+    return hashlib.sha256(f"{seed}:{stream}:{epoch}:{index}:{extra}".encode()).hexdigest()
+
+
+def _sampling_metadata(
+    *,
+    preset: str,
+    seed: int,
+    steps: int,
+    record_count: int,
+    indices: Sequence[int],
+    epoch_shuffle: bool,
+    bucket_targets: dict[str, int],
+    bucket_eligible: dict[str, int],
+    bucket_draws: dict[str, int],
+    bucket_shortfall: dict[str, int],
+) -> dict[str, object]:
+    schedule_text = "\n".join(str(index) for index in indices)
+    return {
+        "preset": preset,
+        "seed": seed,
+        "steps": steps,
+        "record_count": record_count,
+        "epoch_shuffle": epoch_shuffle,
+        "bucket_targets": bucket_targets,
+        "bucket_eligible": bucket_eligible,
+        "bucket_draws": bucket_draws,
+        "bucket_shortfall": bucket_shortfall,
+        "fallback_draws": sum(bucket_shortfall.values()),
+        "schedule_sha256": hashlib.sha256(schedule_text.encode()).hexdigest(),
+    }
+
+
+def _is_hard_negative(record: ReplayRecord) -> bool:
+    if record.candidate_stage == "post_relax":
+        return True
+    if record.feasibility_tier is not None and bool((record.feasibility_tier > 0).any()):
+        return True
+    return bool(
+        record.post_repair_hard_feasible is not None
+        and not bool(record.post_repair_hard_feasible.bool().all())
+    )
+
+
+def _is_near_cap(record: ReplayRecord) -> bool:
+    if record.post_repair_cap_margin is None:
+        return False
+    margin = record.post_repair_cap_margin.to(dtype=torch.float32)
+    return bool(torch.isfinite(margin).all() and (margin.abs() <= 0.25).any())
+
+
+def _is_successful_positive(record: ReplayRecord) -> bool:
+    if record.post_repair_hard_feasible is not None and record.post_repair_cap_margin is not None:
+        feasible = record.post_repair_hard_feasible.to(dtype=torch.bool)
+        margin = record.post_repair_cap_margin.to(dtype=torch.float32)
+        return bool((feasible & (margin > 0.0)).any())
+    return bool(record.feasibility_tier is not None and (record.feasibility_tier == 0).any())
 
 
 def _v3_payload(record: ReplayRecord) -> dict[str, object]:

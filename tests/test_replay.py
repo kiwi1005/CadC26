@@ -28,6 +28,7 @@ from hcfp.replay import (
     official_replay_scores,
     ranker_features_for_record,
     ranker_loss_report,
+    ranker_training_schedule,
     record_from_analysis,
     records_from_learned_analysis,
     train_ranker_steps,
@@ -932,6 +933,159 @@ def _feature_ranker_model() -> HCFPModel:
     return model
 
 
+def _sampling_record(
+    sample_id: str,
+    *,
+    block_count: int,
+    stage: str = "initial",
+    tiers: tuple[int, ...] = (0, 0, 0),
+    cap_margin: tuple[float, ...] = (1.0, 1.0, 1.0),
+    hard_feasible: tuple[bool, ...] = (True, True, True),
+) -> ReplayRecord:
+    case = synthetic_case(block_count, device="cpu")
+    sample = DataSample(sample_id, case, extract_labels(case, safe_shelf(case), normalized=True))
+    count = len(tiers)
+    features = torch.arange(count * 8, dtype=torch.float32).reshape(count, 8)
+    return ReplayRecord(
+        sample,
+        "a" * 64,
+        features,
+        torch.arange(count, dtype=torch.float32),
+        candidate_row_ids=tuple(f"{sample_id}:row-{index}" for index in range(count)),
+        feasibility_tier=torch.tensor(tiers, dtype=torch.long),
+        target_rank=torch.arange(count, dtype=torch.long),
+        candidate_stage=stage,
+        post_repair_hard_feasible=torch.tensor(hard_feasible, dtype=torch.bool),
+        post_repair_cap_margin=torch.tensor(cap_margin, dtype=torch.float32),
+    )
+
+
+def test_ranker_sampling_legacy_matches_modulo_order() -> None:
+    records = [_sampling_record(f"r{index}", block_count=32) for index in range(3)]
+
+    plan = ranker_training_schedule(records, steps=8, seed=17, preset="legacy")
+
+    assert plan.indices == (0, 1, 2, 0, 1, 2, 0, 1)
+    assert plan.metadata["preset"] == "legacy"
+    assert plan.metadata["epoch_shuffle"] is False
+
+
+def test_ranker_sampling_epoch_shuffle_is_deterministic_per_epoch() -> None:
+    records = [_sampling_record(f"r{index}", block_count=32) for index in range(5)]
+
+    first = ranker_training_schedule(records, steps=12, seed=17, preset="epoch_shuffle")
+    second = ranker_training_schedule(records, steps=12, seed=17, preset="epoch_shuffle")
+    changed = ranker_training_schedule(records, steps=12, seed=18, preset="epoch_shuffle")
+
+    assert first.indices == second.indices
+    assert first.indices != changed.indices
+    assert sorted(first.indices[:5]) == list(range(5))
+    assert sorted(first.indices[5:10]) == list(range(5))
+    assert first.metadata["epoch_shuffle"] is True
+
+
+def test_q5_dagger_sampling_uses_overlapping_pools_and_requested_quota() -> None:
+    records = [
+        _sampling_record(
+            "overlap",
+            block_count=120,
+            tiers=(0, 1, 0),
+            cap_margin=(0.1, 1.0, 1.0),
+            hard_feasible=(True, False, True),
+        ),
+        _sampling_record("hard", block_count=32, tiers=(1, 1, 1), hard_feasible=(False, False, False)),
+        _sampling_record(
+            "near",
+            block_count=64,
+            cap_margin=(-0.2, -1.0, -1.0),
+        ),
+        _sampling_record("positive", block_count=96, cap_margin=(0.5, 1.0, 1.0)),
+    ]
+
+    plan = ranker_training_schedule(records, steps=10, seed=17, preset="q5_dagger_v1")
+
+    assert len(plan.indices) == 10
+    assert plan.metadata["bucket_targets"] == {
+        "hard_negative": 4,
+        "near_cap": 3,
+        "large_106_120": 2,
+        "successful_positive": 1,
+    }
+    assert plan.metadata["bucket_draws"] == plan.metadata["bucket_targets"]
+    eligible = plan.metadata["bucket_eligible"]
+    assert eligible == {
+        "hard_negative": 2,
+        "near_cap": 2,
+        "large_106_120": 1,
+        "successful_positive": 2,
+    }
+    assert sum(eligible.values()) > len(records)
+    assert plan.metadata["fallback_draws"] == 0
+
+
+def test_q5_dagger_sampling_reports_deterministic_fallback_shortfall() -> None:
+    records = [
+        _sampling_record(
+            "plain-a",
+            block_count=32,
+            tiers=(1, 1, 1),
+            cap_margin=(1.0, 1.0, 1.0),
+            hard_feasible=(False, False, False),
+        ),
+        _sampling_record(
+            "plain-b",
+            block_count=64,
+            tiers=(1, 1, 1),
+            cap_margin=(1.0, 1.0, 1.0),
+            hard_feasible=(False, False, False),
+        ),
+    ]
+
+    first = ranker_training_schedule(records, steps=10, seed=17, preset="q5_dagger_v1")
+    second = ranker_training_schedule(records, steps=10, seed=17, preset="q5_dagger_v1")
+
+    assert first.indices == second.indices
+    assert first.metadata["bucket_eligible"] == {
+        "hard_negative": 2,
+        "near_cap": 0,
+        "large_106_120": 0,
+        "successful_positive": 0,
+    }
+    assert first.metadata["bucket_shortfall"] == {
+        "hard_negative": 0,
+        "near_cap": 3,
+        "large_106_120": 2,
+        "successful_positive": 1,
+    }
+    assert first.metadata["fallback_draws"] == 6
+    assert len(first.indices) == 10
+
+
+def test_ranker_sampler_target_telemetry_does_not_change_feature_view() -> None:
+    base = _sampling_record("same", block_count=120, cap_margin=(1.0, 1.0, 1.0))
+    changed = replace(
+        base,
+        feasibility_tier=torch.tensor([1, 1, 1], dtype=torch.long),
+        post_repair_cap_margin=torch.tensor([0.0, -0.1, 0.2], dtype=torch.float32),
+    )
+
+    base_features = ranker_features_for_record(
+        base,
+        expected_dim=8,
+        expected_version="stored_candidate_features_v1",
+    )
+    changed_features = ranker_features_for_record(
+        changed,
+        expected_dim=8,
+        expected_version="stored_candidate_features_v1",
+    )
+    base_schedule = ranker_training_schedule([base], steps=4, seed=17, preset="q5_dagger_v1")
+    changed_schedule = ranker_training_schedule([changed], steps=4, seed=17, preset="q5_dagger_v1")
+
+    assert torch.equal(base_features, changed_features)
+    assert base_schedule.metadata["bucket_eligible"] != changed_schedule.metadata["bucket_eligible"]
+
+
 def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> None:
     telemetry = SimpleNamespace(
         hpwl=torch.tensor([5.0, 10.0, 5.0]),
@@ -1033,6 +1187,10 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
     assert report["first_window_mean_loss"] == report["first_loss"]
     assert report["last_window_mean_loss"] == report["last_loss"]
     assert report["objective_preset"] == "default"
+    assert report["sampling"]["preset"] == "legacy"
+    assert report["sampling"]["epoch_shuffle"] is False
+    assert report["sampling"]["steps"] == 1
+    assert report["sampling"]["record_count"] == 1
     assert report["training_objective_version"] == metadata["training_objective_version"]
     assert report["training_objective_weights"] == {
         "name": "ranker_post_repair_listwise_v3_feasibility_shadow",
@@ -1073,6 +1231,10 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
             "cpu",
             "--stage",
             "initial",
+            "--sampling-preset",
+            "epoch_shuffle",
+            "--sampling-seed",
+            "7",
         ],
         cwd=Path(__file__).resolve().parents[1],
         check=True,
@@ -1088,6 +1250,9 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
     )
     assert continued_metadata["parent_state_hash"] == metadata["state_hash"]
     assert continued_report["ranker_initialization"] == "continued_from_source_checkpoint"
+    assert continued_report["sampling"]["preset"] == "epoch_shuffle"
+    assert continued_report["sampling"]["seed"] == 7
+    assert continued_report["sampling"]["epoch_shuffle"] is True
     assert continued_report["candidate_feature_normalization"]["source"] == "source_checkpoint"
     assert (
         continued_report["candidate_feature_normalization"]["mean"]
