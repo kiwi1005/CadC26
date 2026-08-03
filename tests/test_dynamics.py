@@ -4,7 +4,13 @@ import pytest
 import torch
 
 from hcfp.case import from_official
-from hcfp.dynamics import DynamicsConfig, initialize_population, relax, typed_forces
+from hcfp.dynamics import (
+    DynamicsConfig,
+    ForceControl,
+    initialize_population,
+    relax,
+    typed_forces,
+)
 from hcfp.geometry import centers_from_xywh, normalize_xywh
 
 
@@ -163,6 +169,48 @@ def test_force_gate_validation_rejects_shape_nonfinite_and_negative() -> None:
     bad[0, 0, 0] = -1.0
     with pytest.raises(ValueError, match="nonnegative"):
         typed_forces(case, state, cfg, force_gates=bad)
+
+
+def test_collective_velocity_changes_free_geometry_and_preserves_hard_invariants() -> None:
+    case = _case("cpu")
+    cfg = DynamicsConfig(population=2, steps=1)
+    initial = _overlapped_initial(case)
+
+    def controller(_case, state, _step_fraction):
+        gates = torch.zeros((*state.center.shape[:2], 7), device=state.center.device)
+        velocity = torch.full_like(state.velocity, 0.01)
+        return ForceControl(gates, velocity)
+
+    controlled = relax(case, cfg, initial_xywh=initial, force_controller=controller)
+
+    assert not torch.equal(controlled.boxes, controlled.initial_boxes)
+    assert torch.equal(controlled.boxes[:, 0], case.target[0].expand(2, -1))
+    assert torch.equal(controlled.boxes[:, 2, 2:4], case.target[2, 2:4].expand(2, -1))
+    assert torch.equal(
+        controlled.diagnostics["learned_velocity"],
+        torch.full((2, 3, 3), 0.01),
+    )
+
+
+def test_collective_velocity_validation_rejects_shape_and_nonfinite() -> None:
+    case = _case("cpu")
+    cfg = DynamicsConfig(population=2, steps=1)
+
+    def bad_shape(_case, state, _step_fraction):
+        gates = torch.ones((*state.center.shape[:2], 7))
+        return ForceControl(gates, torch.zeros((2, 3, 2)))
+
+    with pytest.raises(ValueError, match="learned_velocity"):
+        relax(case, cfg, initial_xywh=_overlapped_initial(case), force_controller=bad_shape)
+
+    def nonfinite(_case, state, _step_fraction):
+        gates = torch.ones((*state.center.shape[:2], 7))
+        velocity = torch.zeros_like(state.velocity)
+        velocity[0, 0, 0] = float("nan")
+        return ForceControl(gates, velocity)
+
+    with pytest.raises(ValueError, match="finite"):
+        relax(case, cfg, initial_xywh=_overlapped_initial(case), force_controller=nonfinite)
 
 
 def _overlapped_initial(case):

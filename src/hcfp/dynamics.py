@@ -31,7 +31,17 @@ FORCE_CHANNELS = (
     "compaction",
     "mib",
 )
-ForceController = Callable[[FloorplanCase, "PopulationState", float], Tensor]
+
+
+@dataclass(frozen=True)
+class ForceControl:
+    force_gates: Tensor
+    learned_velocity: Tensor | None = None
+
+
+ForceController = Callable[
+    [FloorplanCase, "PopulationState", float], Tensor | ForceControl
+]
 
 
 @dataclass(frozen=True)
@@ -289,12 +299,16 @@ def step(
     config: DynamicsConfig,
     *,
     force_gates: Tensor | None = None,
+    learned_velocity: Tensor | None = None,
 ) -> tuple[PopulationState, dict[str, Tensor]]:
     gates = _validate_force_gates(force_gates, state) if force_gates is not None else None
     channels, force = typed_forces(case, state, config, force_gates=gates)
     velocity = config.momentum * state.velocity
     velocity[..., :2] += config.step_size * force[..., :2]
     velocity[..., 2] += config.shape_step * force[..., 2]
+    learned = _validate_learned_velocity(learned_velocity, state)
+    if learned is not None:
+        velocity += learned
     velocity[..., :2] = velocity[..., :2].clamp(-config.max_position_step, config.max_position_step)
     velocity[..., 2] = velocity[..., 2].clamp(-config.max_shape_step, config.max_shape_step)
 
@@ -318,7 +332,27 @@ def step(
     diagnostics.update({f"force_{name}": value for name, value in channels.items()})
     if gates is not None:
         diagnostics["force_gate"] = gates
+    if learned is not None:
+        diagnostics["learned_velocity"] = learned
     return next_state, diagnostics
+
+
+def _validate_learned_velocity(
+    learned_velocity: Tensor | None,
+    state: PopulationState,
+) -> Tensor | None:
+    if learned_velocity is None:
+        return None
+    velocity = torch.as_tensor(
+        learned_velocity,
+        dtype=torch.float32,
+        device=state.center.device,
+    )
+    if velocity.shape != state.velocity.shape:
+        raise ValueError("learned_velocity must have shape [K,N,3]")
+    if not bool(torch.isfinite(velocity).all()):
+        raise ValueError("learned_velocity must be finite")
+    return velocity
 
 
 def relax(
@@ -344,12 +378,26 @@ def relax(
     )
     diagnostics = _diagnostics(case, state)
     for step_index in range(cfg.steps):
-        force_gates = (
-            None
-            if force_controller is None
-            else force_controller(case, state, step_index / max(cfg.steps, 1))
+        force_gates: Tensor | None = None
+        learned_velocity: Tensor | None = None
+        if force_controller is not None:
+            control = force_controller(
+                case,
+                state,
+                step_index / max(cfg.steps, 1),
+            )
+            if isinstance(control, ForceControl):
+                force_gates = control.force_gates
+                learned_velocity = control.learned_velocity
+            else:
+                force_gates = control
+        state, diagnostics = step(
+            case,
+            state,
+            cfg,
+            force_gates=force_gates,
+            learned_velocity=learned_velocity,
         )
-        state, diagnostics = step(case, state, cfg, force_gates=force_gates)
         if not bool(torch.isfinite(state.center).all() and torch.isfinite(state.log_aspect).all()):
             raise FloatingPointError("collective dynamics produced non-finite geometry")
     boxes = (
