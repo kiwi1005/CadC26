@@ -66,11 +66,23 @@ def main(argv: list[str] | None = None) -> int:
         optimizer,
         steps=args.steps,
     )
-    checkpoint_hash = save_checkpoint(model, args.output, RUNTIME_NORMALIZATION)
+    checkpoint_metadata = {
+        "capabilities": dict(source["capabilities"]),
+        "trained_heads": sorted({*source["trained_heads"], "ranker"}),
+        "training_objective_version": "ranker_official_v10_v1",
+        "parent_state_hash": source["state_hash"],
+    }
+    checkpoint_hash = save_checkpoint(
+        model,
+        args.output,
+        RUNTIME_NORMALIZATION,
+        metadata=checkpoint_metadata,
+    )
     report = {
         "schema_version": 1,
         "source_checkpoint_hash": source["state_hash"],
         "checkpoint_hash": checkpoint_hash,
+        "checkpoint_metadata": checkpoint_metadata,
         "checkpoint_sha256": file_sha256(args.output),
         "source_checkpoint": args.checkpoint,
         "source_checkpoint_sha256": file_sha256(args.checkpoint),

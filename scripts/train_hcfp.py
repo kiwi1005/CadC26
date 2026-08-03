@@ -101,8 +101,9 @@ def main(argv: list[str] | None = None) -> int:
             yield sample
 
     compute_dtype = "bfloat16" if args.amp == "bf16" else "float32"
+    source_metadata = None
     if args.init_checkpoint:
-        loaded, _ = load_checkpoint(
+        loaded, source_metadata = load_checkpoint(
             args.init_checkpoint,
             expected_normalization=RUNTIME_NORMALIZATION,
             map_location="cpu",
@@ -150,13 +151,23 @@ def main(argv: list[str] | None = None) -> int:
                 constraint_enabled=bool(args.constraints),
             )
         )
+    checkpoint_metadata = _training_checkpoint_metadata(
+        args.stage,
+        model.config,
+        source_metadata,
+    )
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
     ema = ExponentialMovingAverage(model, args.ema_decay) if args.ema_decay > 0.0 else None
 
     def checkpoint_step(step: int, _report) -> None:
         if args.checkpoint_every > 0 and step % args.checkpoint_every == 0:
-            save_checkpoint(model, f"{args.output}.step-{step:08d}.pt", RUNTIME_NORMALIZATION)
+            save_checkpoint(
+                model,
+                f"{args.output}.step-{step:08d}.pt",
+                RUNTIME_NORMALIZATION,
+                metadata=checkpoint_metadata,
+            )
 
     history = train_steps(
         model,
@@ -175,7 +186,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if ema is not None:
         ema.copy_to(model)
-    checkpoint_hash = save_checkpoint(model, args.output, RUNTIME_NORMALIZATION)
+    checkpoint_hash = save_checkpoint(
+        model,
+        args.output,
+        RUNTIME_NORMALIZATION,
+        metadata=checkpoint_metadata,
+    )
     unique_sample_ids = sorted(set(consumed_sample_ids))
     direct_stream = None
     if args.floorset_lite_root:
@@ -197,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
         "command": ["scripts/train_hcfp.py", *command_args],
         "checkpoint": str(Path(args.output).resolve()),
         "checkpoint_hash": checkpoint_hash,
+        "checkpoint_metadata": checkpoint_metadata,
         "model_config": asdict(model.config),
         "stage": args.stage,
         "steps": args.steps,
@@ -224,6 +241,36 @@ def main(argv: list[str] | None = None) -> int:
 
 def _sample_id_hash(sample_ids: list[str]) -> str:
     return hashlib.sha256("\n".join(sample_ids).encode()).hexdigest()
+
+
+def _training_checkpoint_metadata(
+    stage: str,
+    config: ModelConfig,
+    source: dict[str, object] | None,
+) -> dict[str, object]:
+    trained_heads = set(source.get("trained_heads", [])) if source is not None else set()
+    trained_heads.add("encoder")
+    if stage in {"structure", "all"}:
+        trained_heads.add("structure")
+        if config.topology_enabled:
+            trained_heads.add("topology")
+        if config.constraint_enabled:
+            trained_heads.add("constraints")
+    if stage in {"initializer", "all"}:
+        trained_heads.add("initializer")
+    if stage in {"flow", "all"}:
+        trained_heads.add("flow")
+    capabilities = (
+        dict(source.get("capabilities", {})) if source is not None else {"flow": False}
+    )
+    if stage in {"flow", "all"}:
+        capabilities["flow"] = True
+    return {
+        "capabilities": capabilities,
+        "trained_heads": sorted(trained_heads),
+        "training_objective_version": "supervised_loss_v1",
+        "parent_state_hash": source.get("state_hash") if source is not None else None,
+    }
 
 
 if __name__ == "__main__":

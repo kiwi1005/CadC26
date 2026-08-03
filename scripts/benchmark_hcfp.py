@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from hcfp.benchmark import build_report  # noqa: E402
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
+from hcfp.learned import effective_flow_steps  # noqa: E402
 from hcfp.reference import OFFICIAL_FLOORSET_V10  # noqa: E402
 from hcfp.visualize import render_html  # noqa: E402
 
@@ -36,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--data-path", default="artifacts/floorset-v10")
     parser.add_argument("--cases", default="all", help="all or comma-separated test ids")
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--execution-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
@@ -157,8 +158,11 @@ def _run_optimizers(
                     "checkpoint": str(checkpoint),
                     "checkpoint_hash": checkpoint_metadata["state_hash"],
                     "normalization": checkpoint_metadata["normalization"],
+                    "capabilities": checkpoint_metadata["capabilities"],
+                    "trained_heads": checkpoint_metadata["trained_heads"],
                     "required": True,
-                    "flow_steps": flow_steps,
+                    "requested_flow_steps": flow_steps,
+                    "flow_steps": effective_flow_steps(flow_steps, checkpoint_metadata),
                     "flow_seed": flow_seed,
                     "tail_topk": tail_topk,
                 }

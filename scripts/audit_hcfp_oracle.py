@@ -29,7 +29,11 @@ from hcfp.benchmark import (  # noqa: E402
 from hcfp.case import from_official  # noqa: E402
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
-from hcfp.learned import LearnedConfig, analyze_case_with_checkpoint  # noqa: E402
+from hcfp.learned import (  # noqa: E402
+    LearnedConfig,
+    analyze_case_with_checkpoint,
+    effective_flow_steps,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=AnalyticConfig().direction_beam,
     )
-    parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--topology-seeds", type=int, default=0)
     parser.add_argument(
@@ -72,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
         map_location="cpu",
     )
     checkpoint_hash = str(checkpoint_metadata["state_hash"])
+    flow_steps = effective_flow_steps(args.flow_steps, checkpoint_metadata)
     device = select_device(args.device)
     analytic = AnalyticConfig(
         dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
@@ -80,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     config = LearnedConfig(
         analytic=analytic,
-        flow_steps=args.flow_steps,
+        flow_steps=flow_steps,
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
         topology_seeds=args.topology_seeds,
@@ -113,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
             "checkpoint": str(checkpoint),
             "checkpoint_hash": checkpoint_hash,
             "checkpoint_normalization": checkpoint_metadata["normalization"],
+            "checkpoint_capabilities": checkpoint_metadata["capabilities"],
+            "checkpoint_trained_heads": checkpoint_metadata["trained_heads"],
         }
     )
     report = {
@@ -123,7 +130,8 @@ def main(argv: list[str] | None = None) -> int:
             "dynamics_steps": args.dynamics_steps,
             "projection_steps": args.projection_steps,
             "direction_beam": args.direction_beam,
-            "flow_steps": args.flow_steps,
+            "requested_flow_steps": args.flow_steps,
+            "flow_steps": flow_steps,
             "flow_seed": args.flow_seed,
             "topology_seeds": args.topology_seeds,
             "allow_missing_topology": args.allow_missing_topology,

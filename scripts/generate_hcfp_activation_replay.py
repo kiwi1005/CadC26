@@ -44,6 +44,7 @@ from hcfp.learned import (  # noqa: E402
     LearnedResult,
     _learned_population,
     _merge_tail_analyses,
+    effective_flow_steps,
     select_official_from_analysis,
 )
 
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dynamics-steps", type=int, default=12)
     parser.add_argument("--projection-steps", type=int, default=24)
     parser.add_argument("--direction-beam", type=int, default=4)
-    parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--tail-topk", type=int, default=4)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int, required=True)
@@ -89,6 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         map_location="cpu",
     )
     model = model.to(device=device).eval()
+    flow_steps = effective_flow_steps(args.flow_steps, metadata)
     analytic_config = AnalyticConfig(
         dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
         projection_iterations=args.projection_steps,
@@ -96,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     config = LearnedConfig(
         analytic=analytic_config,
-        flow_steps=args.flow_steps,
+        flow_steps=flow_steps,
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
     )
@@ -164,7 +166,10 @@ def main(argv: list[str] | None = None) -> int:
             "path": args.checkpoint,
             "sha256": file_sha256(args.checkpoint),
             "state_hash": metadata["state_hash"],
+            "capabilities": metadata["capabilities"],
+            "trained_heads": metadata["trained_heads"],
         },
+        "requested_flow_steps": args.flow_steps,
         "candidate_config": config_payload,
         "candidate_config_hash": config_hash,
         "device": str(device),

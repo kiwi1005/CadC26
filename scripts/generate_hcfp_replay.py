@@ -19,7 +19,11 @@ from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.data import file_sha256  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
 from hcfp.floorset_lite import iter_floorset_lite  # noqa: E402
-from hcfp.learned import LearnedConfig, analyze_case_with_checkpoint  # noqa: E402
+from hcfp.learned import (  # noqa: E402
+    LearnedConfig,
+    analyze_case_with_checkpoint,
+    effective_flow_steps,
+)
 from hcfp.replay import OFFICIAL_TARGET_KIND, record_from_analysis, write_replay  # noqa: E402
 
 
@@ -32,7 +36,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--population", type=int, default=8)
     parser.add_argument("--dynamics-steps", type=int, default=4)
     parser.add_argument("--projection-steps", type=int, default=8)
-    parser.add_argument("--flow-steps", type=int, default=6)
+    parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--score-aware", action="store_true")
@@ -47,12 +51,13 @@ def main(argv: list[str] | None = None) -> int:
         expected_normalization=RUNTIME_NORMALIZATION,
         map_location="cpu",
     )
+    flow_steps = effective_flow_steps(args.flow_steps, checkpoint_metadata)
     analytic = AnalyticConfig(
         dynamics=DynamicsConfig(population=args.population, steps=args.dynamics_steps),
         projection_iterations=args.projection_steps,
         direction_beam=2,
     )
-    config = LearnedConfig(analytic=analytic, flow_steps=args.flow_steps, seed=args.flow_seed)
+    config = LearnedConfig(analytic=analytic, flow_steps=flow_steps, seed=args.flow_seed)
 
     def records():
         for sample in iter_floorset_lite(
@@ -92,13 +97,16 @@ def main(argv: list[str] | None = None) -> int:
             "path": args.checkpoint,
             "sha256": file_sha256(args.checkpoint),
             "state_hash": checkpoint_metadata["state_hash"],
+            "capabilities": checkpoint_metadata["capabilities"],
+            "trained_heads": checkpoint_metadata["trained_heads"],
         },
         "candidate_config": {
             "population": args.population,
             "dynamics_steps": args.dynamics_steps,
             "projection_steps": args.projection_steps,
             "direction_beam": analytic.direction_beam,
-            "flow_steps": args.flow_steps,
+            "requested_flow_steps": args.flow_steps,
+            "flow_steps": flow_steps,
             "flow_seed": args.flow_seed,
         },
         "target_distribution": {

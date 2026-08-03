@@ -9,11 +9,23 @@ import torch
 
 from hcfp.analytic import AnalyticConfig, solve_case_with_telemetry
 from hcfp.case import from_official
-from hcfp.checkpoint import RUNTIME_NORMALIZATION, save_checkpoint
+from hcfp.checkpoint import RUNTIME_NORMALIZATION, _payload_hash, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
-from hcfp.learned import LearnedConfig, analyze_case_with_checkpoint, solve_case_with_checkpoint
+from hcfp.learned import (
+    LearnedConfig,
+    analyze_case_with_checkpoint,
+    effective_flow_steps,
+    solve_case_with_checkpoint,
+)
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.verify import verify_feasible
+
+
+FLOW_METADATA = {
+    "capabilities": {"flow": True},
+    "trained_heads": ["flow"],
+    "training_objective_version": "supervised_loss_v1",
+}
 
 
 def _case():
@@ -166,13 +178,18 @@ def test_checkpoint_lane_runs_through_exact_safe_tail(tmp_path: Path) -> None:
     assert result.checkpoint_hash == saved_hash
     assert result.failure_reason is None
     assert verify_feasible(_case(), result.selected)
-    assert result.flow_steps == 6
+    assert result.flow_steps == 0
     assert result.candidate_count == 4
 
 
 def test_multistep_flow_population_preserves_exact_safe_output(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model.pt"
-    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata=FLOW_METADATA,
+    )
     config = LearnedConfig(analytic=_config(), flow_steps=3, flow_fraction=1.0)
 
     result = solve_case_with_checkpoint(_case(), checkpoint, config)
@@ -180,6 +197,48 @@ def test_multistep_flow_population_preserves_exact_safe_output(tmp_path: Path) -
     assert result.used_checkpoint is True
     assert result.flow_steps == 3
     assert verify_feasible(_case(), result.selected)
+
+
+def test_effective_flow_steps_rejects_negative_requests_before_capability_gate() -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        effective_flow_steps(-1, {"capabilities": {"flow": False}})
+
+
+def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "legacy.pt"
+    save_checkpoint(
+        HCFPModel(
+            ModelConfig(
+                hidden_dim=16,
+                topology_enabled=True,
+                constraint_enabled=True,
+            )
+        ),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    payload["schema_version"] = 1
+    for field in (
+        "capabilities",
+        "trained_heads",
+        "training_objective_version",
+        "parent_state_hash",
+    ):
+        payload.pop(field)
+    payload["state_hash"] = _payload_hash(payload)
+    torch.save(payload, checkpoint)
+
+    result = solve_case_with_checkpoint(
+        _case(),
+        checkpoint,
+        LearnedConfig(analytic=_config(), flow_steps=3, topology_seeds=1),
+    )
+
+    assert result.used_checkpoint is True
+    assert result.failure_reason is None
+    assert result.flow_steps == 0
+    assert result.topology_seed_attempted is True
 
 
 def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:
@@ -234,11 +293,11 @@ def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(tmp_path
     first = tmp_path / "first.pt"
     second = tmp_path / "second.pt"
     model = HCFPModel(ModelConfig(hidden_dim=16))
-    save_checkpoint(model, first, RUNTIME_NORMALIZATION)
+    save_checkpoint(model, first, RUNTIME_NORMALIZATION, metadata=FLOW_METADATA)
     with torch.no_grad():
         for parameter in model.ranker.parameters():
             parameter.add_(0.25)
-    save_checkpoint(model, second, RUNTIME_NORMALIZATION)
+    save_checkpoint(model, second, RUNTIME_NORMALIZATION, metadata=FLOW_METADATA)
     config = LearnedConfig(analytic=_config(), flow_steps=1, seed=17)
 
     first_analysis = analyze_case_with_checkpoint(_case(), first, config)

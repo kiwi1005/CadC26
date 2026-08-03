@@ -76,7 +76,7 @@ class LearnedAnalysis:
 @dataclass(frozen=True)
 class LearnedConfig:
     analytic: AnalyticConfig = AnalyticConfig()
-    flow_steps: int = 6
+    flow_steps: int = 0
     flow_fraction: float = 0.50
     flow_noise_scale: float = 1.0
     max_position_residual: float = 0.50
@@ -105,6 +105,15 @@ class LearnedConfig:
             raise ValueError("constraint_seeds require topology_seeds")
 
 
+def effective_flow_steps(requested: int, checkpoint_metadata: dict[str, Any]) -> int:
+    """Enable flow only when the checkpoint declares trained flow weights."""
+
+    if requested < 0:
+        raise ValueError("flow_steps must be non-negative")
+    capabilities = checkpoint_metadata.get("capabilities", {})
+    return requested if isinstance(capabilities, dict) and capabilities.get("flow") is True else 0
+
+
 def solve_case_with_checkpoint(
     case: FloorplanCase,
     checkpoint: str | Path,
@@ -129,6 +138,10 @@ def analyze_case_with_checkpoint(
             checkpoint,
             expected_normalization=RUNTIME_NORMALIZATION,
             map_location="cpu",
+        )
+        learned_cfg = replace(
+            learned_cfg,
+            flow_steps=effective_flow_steps(learned_cfg.flow_steps, metadata),
         )
         model = model.to(device=case.area.device).eval()
         topology_provenance: dict[str, object] = {}
@@ -339,7 +352,7 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
         tail = os.environ.get("HCFP_TAIL_TOPK")
         seed = os.environ.get("HCFP_FLOW_SEED")
         return LearnedConfig(
-            flow_steps=int(os.environ.get("HCFP_FLOW_STEPS", "6")),
+            flow_steps=int(os.environ.get("HCFP_FLOW_STEPS", "0")),
             tail_topk=int(tail) if tail else None,
             seed=int(seed) if seed is not None else None,
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),

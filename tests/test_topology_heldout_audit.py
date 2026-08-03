@@ -228,7 +228,7 @@ def test_training_cli_reports_exact_consumed_direct_stream(
 
     monkeypatch.setattr(train_cli, "iter_floorset_lite", sample_iterator)
     monkeypatch.setattr(train_cli, "train_steps", fake_train_steps)
-    monkeypatch.setattr(train_cli, "save_checkpoint", lambda *_args: "state-hash")
+    monkeypatch.setattr(train_cli, "save_checkpoint", lambda *_args, **_kwargs: "state-hash")
     argv = [
         "--floorset-lite-root",
         str(root),

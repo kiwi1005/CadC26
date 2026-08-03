@@ -57,6 +57,11 @@ def test_official_benchmark_audits_valid_checkpoint_usage(tmp_path: Path) -> Non
         HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1)),
         checkpoint,
         RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"flow": True},
+            "trained_heads": ["flow"],
+            "training_objective_version": "supervised_loss_v1",
+        },
     )
     output = tmp_path / "learned.json"
     subprocess.run(
@@ -96,6 +101,7 @@ def test_official_benchmark_audits_valid_checkpoint_usage(tmp_path: Path) -> Non
     assert report["lane_summary"]["learned"]["feasible"] == 1
     assert report["lane_metadata"]["learned"]["checkpoint_hash"] == checkpoint_hash
     assert report["lane_metadata"]["learned"]["required"] is True
+    assert report["lane_metadata"]["learned"]["requested_flow_steps"] == 2
     assert report["lane_metadata"]["learned"]["flow_steps"] == 2
     assert report["lane_metadata"]["learned"]["flow_seed"] == 17
     assert report["lane_metadata"]["learned"]["tail_topk"] == 1

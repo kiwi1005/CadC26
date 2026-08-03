@@ -259,11 +259,16 @@ def test_training_cli_emits_checkpoint_and_audit_report(tmp_path: Path) -> None:
     )
 
     report = json.loads(Path(f"{checkpoint}.training.json").read_text(encoding="utf-8"))
+    _, metadata = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
     assert checkpoint.is_file()
     assert report["sample_count"] == 1
     assert report["steps"] == 1
     assert report["constraint_enabled"] is False
     assert len(report["checkpoint_hash"]) == 64
+    assert metadata["capabilities"] == {"flow": True}
+    assert metadata["trained_heads"] == ["encoder", "flow", "initializer", "structure"]
+    assert metadata["training_objective_version"] == "supervised_loss_v1"
+    assert metadata["parent_state_hash"] is None
 
 
 def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path) -> None:
@@ -312,10 +317,18 @@ def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path)
     )
 
     report = json.loads(Path(f"{checkpoint}.training.json").read_text(encoding="utf-8"))
-    loaded, _ = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
+    loaded, metadata = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
     assert report["constraint_enabled"] is True
     assert report["model_config"]["constraint_enabled"] is True
     assert loaded.config.constraint_enabled is True
+    assert metadata["capabilities"] == {"flow": True}
+    assert metadata["trained_heads"] == [
+        "constraints",
+        "encoder",
+        "flow",
+        "initializer",
+        "structure",
+    ]
 
 
 def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path: Path) -> None:
@@ -326,6 +339,11 @@ def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path
         HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True)),
         source,
         RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"flow": True},
+            "trained_heads": ["encoder", "flow"],
+            "training_objective_version": "supervised_loss_v1",
+        },
     )
     write_shard(
         [_constraint_sample()],
@@ -353,6 +371,8 @@ def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path
             "cpu",
             "--amp",
             "off",
+            "--stage",
+            "structure",
             "--init-checkpoint",
             str(source),
         ],
@@ -363,7 +383,10 @@ def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path
     )
 
     report = json.loads(Path(f"{checkpoint}.training.json").read_text(encoding="utf-8"))
-    loaded, _ = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
+    loaded, metadata = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
     assert report["constraint_enabled"] is True
     assert report["model_config"]["constraint_enabled"] is True
     assert loaded.config.constraint_enabled is True
+    assert metadata["capabilities"] == {"flow": True}
+    assert metadata["trained_heads"] == ["constraints", "encoder", "flow", "structure"]
+    assert metadata["parent_state_hash"] == load_checkpoint(source)[1]["state_hash"]

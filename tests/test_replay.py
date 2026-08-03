@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from hcfp.analytic import AnalyticConfig, solve_case_with_telemetry
-from hcfp.checkpoint import RUNTIME_NORMALIZATION, save_checkpoint
+from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint, save_checkpoint
 from hcfp.data import DataSample, extract_labels, sample_to_payload
 from hcfp.dynamics import DynamicsConfig
 from hcfp.fallback import safe_shelf
@@ -101,6 +101,64 @@ def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> Non
     assert float(scores[0]) == pytest.approx(0.0)
     assert float(scores[1]) == pytest.approx(torch.log(torch.tensor(2.0)).item())
     assert float(scores[2]) > float(scores[:2].max())
+
+
+def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Path) -> None:
+    case = synthetic_case(32, device="cpu")
+    sample = DataSample("ranker-0", case, extract_labels(case, safe_shelf(case), normalized=True))
+    checkpoint = tmp_path / "source.pt"
+    source_hash = save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"flow": True},
+            "trained_heads": ["encoder", "flow"],
+            "training_objective_version": "supervised_loss_v1",
+        },
+    )
+    replay = tmp_path / "ranker.jsonl"
+    replay.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "checkpoint_hash": source_hash,
+                "target_kind": OFFICIAL_TARGET_KIND,
+                "sample": sample_to_payload(sample),
+                "candidate_features": [[0.0] * 8, [1.0] * 8],
+                "target_score": [0.0, 1.0],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    ranked = tmp_path / "ranked.pt"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp_ranker.py",
+            str(replay),
+            "--checkpoint",
+            str(checkpoint),
+            "--output",
+            str(ranked),
+            "--steps",
+            "1",
+            "--device",
+            "cpu",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    _, metadata = load_checkpoint(ranked, expected_normalization=RUNTIME_NORMALIZATION)
+    assert metadata["capabilities"] == {"flow": True}
+    assert metadata["trained_heads"] == ["encoder", "flow", "ranker"]
+    assert metadata["training_objective_version"] == "ranker_official_v10_v1"
+    assert metadata["parent_state_hash"] == source_hash
 
 
 def test_ranker_clis_reject_checkpoint_mismatch_and_split_leakage(tmp_path: Path) -> None:
