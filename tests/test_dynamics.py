@@ -54,3 +54,23 @@ def test_overlap_force_is_antisymmetric_for_center_tie() -> None:
     pair_force = channels["overlap"][0, :2]
     assert torch.allclose(pair_force[0], -pair_force[1])
     assert torch.linalg.vector_norm(pair_force[0]) > 0
+
+
+def test_full_supplied_population_is_retained_as_initial_candidates() -> None:
+    case = _case("cpu")
+    candidate = normalize_xywh(
+        case,
+        torch.tensor(
+            [[0.0, 0.0, 2.0, 2.0], [2.0, 0.0, 2.0, 2.0], [4.0, 0.0, 2.0, 2.0]]
+        ),
+    )
+    population = torch.stack((candidate, candidate + torch.tensor([0.0, 1.0, 0.0, 0.0])))
+    population[:, case.preplaced_mask] = case.target[case.preplaced_mask]
+
+    result = relax(
+        case,
+        DynamicsConfig(population=2, steps=0),
+        initial_xywh=population,
+    )
+
+    assert torch.equal(result.initial_boxes, population)

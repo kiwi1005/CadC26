@@ -447,6 +447,58 @@ def test_raw_feasible_analytic_dominator_replaces_selected_candidate(
     assert result[0][0] == 10.0
 
 
+def test_raw_repaired_constraint_dominator_replaces_selected_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hcfp.learned as learned
+
+    analysis = _pareto_analysis(
+        analytic_source="candidate_2",
+        analytic_exact_source=None,
+        analytic_fast_source=None,
+    )
+    analysis.analytic.incumbent_snapshot["constraint_seed_provenance"] = (
+        {"source": "candidate_3", "details": {"moves": ()}},
+    )
+
+    def to_official(_source, _case, candidate):
+        x = float(candidate[0, 0])
+        return [(x, 0.0, 2.0, 2.0), (x + 3.0, 0.0, 2.0, 2.0)]
+
+    monkeypatch.setattr(
+        learned,
+        "analyze_case_with_checkpoint",
+        lambda *_args: analysis,
+    )
+    monkeypatch.setattr(learned, "to_official_placements", to_official)
+    monkeypatch.setattr(learned, "verify_feasible", lambda *_args: True)
+    monkeypatch.setattr(
+        learned,
+        "repair_raw_constraints",
+        lambda _source, _rows, _record: SimpleNamespace(
+            placements=((10.0, 0.0, 2.0, 2.0), (13.0, 0.0, 2.0, 2.0))
+        ),
+    )
+    monkeypatch.setattr(
+        learned,
+        "_raw_quality",
+        lambda _source, _case, rows: {
+            10.0: (1.0, 10.0, 10.0),
+            20.0: (2.0, 20.0, 20.0),
+        }[rows[0][0]],
+    )
+
+    result = learned.solve(
+        _source(),
+        checkpoint=tmp_path / "model.pt",
+        config=_pareto_config(),
+        require_checkpoint=True,
+    )
+
+    assert result[0][0] == 10.0
+
+
 def test_raw_infeasible_or_tradeoff_candidate_cannot_trigger_pareto_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

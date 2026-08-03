@@ -22,7 +22,9 @@ assert SPEC is not None and SPEC.loader is not None
 audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(audit)
 TRAIN_SCRIPT = ROOT / "scripts/train_hcfp.py"
-TRAIN_SPEC = importlib.util.spec_from_file_location("train_hcfp_audit_test", TRAIN_SCRIPT)
+TRAIN_SPEC = importlib.util.spec_from_file_location(
+    "train_hcfp_audit_test", TRAIN_SCRIPT
+)
 assert TRAIN_SPEC is not None and TRAIN_SPEC.loader is not None
 train_cli = importlib.util.module_from_spec(TRAIN_SPEC)
 TRAIN_SPEC.loader.exec_module(train_cli)
@@ -419,6 +421,18 @@ def test_candidate_record_uses_training_baselines_and_uncapped_formula() -> None
     assert record["uncapped_objective"] == pytest.approx(2.0)
     assert record["official_capped_cost"] is None
 
+    constraint = audit._candidate_record(
+        case,
+        candidate,
+        1,
+        "learned_initial",
+        frozenset(),
+        1.0,
+        0.5,
+        constraint_indices=frozenset({1}),
+    )
+    assert constraint["candidate_type"] == "constraint"
+
 
 @pytest.mark.parametrize("produced", (0, 1))
 def test_topology_audit_fails_when_requested_count_is_missing(produced: int) -> None:
@@ -439,6 +453,171 @@ def test_topology_audit_fails_when_requested_count_is_missing(produced: int) -> 
         match=rf"requested 2 topology seeds, produced {produced}",
     ):
         audit._validate_topology_result("heldout/a", analysis, "state-hash", 2)
+
+
+def test_constraint_audit_fails_when_requested_count_is_missing() -> None:
+    analysis = SimpleNamespace(
+        result=SimpleNamespace(
+            used_checkpoint=True,
+            checkpoint_hash="state-hash",
+            failure_reason=None,
+            topology_seed_count=2,
+            constraint_seed_count=1,
+        ),
+        analytic=SimpleNamespace(
+            incumbent_snapshot={
+                "constraint_seed_failure_reason": "construction shortfall"
+            }
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"requested 2 constraint seeds, produced 1",
+    ):
+        audit._validate_topology_result(
+            "heldout/a",
+            analysis,
+            "state-hash",
+            2,
+            2,
+        )
+
+
+def test_constraint_seeds_require_positive_topology_count() -> None:
+    with pytest.raises(ValueError, match="requires --topology-seeds"):
+        audit._validate_args(SimpleNamespace(constraint_seeds=1, topology_seeds=0))
+
+
+def test_audit_sample_classifies_constraint_snapshot_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sample = _sample("heldout/a")
+    fallback = safe_shelf(sample.case)
+    candidates = fallback.unsqueeze(0).repeat(9, 1, 1)
+    snapshot = {
+        "exact_source": "fallback",
+        "topology_seed_sources": ("candidate_4", "candidate_8"),
+        "constraint_seed_sources": ("candidate_3", "candidate_7"),
+        "constraint_seed_provenance": (
+            {"source": "candidate_3", "kind": "combined"},
+            {"source": "candidate_7", "kind": "combined"},
+        ),
+    }
+    analysis = SimpleNamespace(
+        result=SimpleNamespace(
+            used_checkpoint=True,
+            checkpoint_hash="state-hash",
+            topology_seed_count=1,
+            constraint_seed_count=1,
+            candidate_count=4,
+            selected=fallback,
+        ),
+        analytic=SimpleNamespace(
+            raw_candidates=candidates,
+            projected_candidates=candidates.clone(),
+            incumbent_snapshot=snapshot,
+        ),
+    )
+    monkeypatch.setattr(
+        audit,
+        "analyze_case_with_checkpoint",
+        lambda *_args, **_kwargs: analysis,
+    )
+
+    result = audit._audit_sample(
+        0,
+        sample,
+        Path("checkpoint.pt"),
+        "state-hash",
+        torch.device("cpu"),
+        SimpleNamespace(),
+        1,
+        1,
+        1,
+    )
+
+    assert result["candidate_layout"]["constraint_count"] == 1
+    assert result["raw"]["candidates"][3]["candidate_type"] == "constraint"
+    assert result["raw"]["candidates"][4]["candidate_type"] == "topology"
+    assert result["post_bdp"]["candidates"][7]["candidate_type"] == "constraint"
+    assert result["post_bdp"]["candidates"][8]["candidate_type"] == "topology"
+    assert result["raw"]["oracles"]["constraint"]["candidate_index"] == 3
+    assert result["constraint_provenance"]["constraint_seed_sources"] == (
+        "candidate_3",
+        "candidate_7",
+    )
+
+
+def test_constraint_oracle_reports_soft_counts_and_topology_gain() -> None:
+    def candidate(
+        index: int,
+        candidate_type: str,
+        objective: float,
+        counts: tuple[int, int, int],
+    ) -> dict[str, object]:
+        boundary, grouping, mib = counts
+        return {
+            "candidate_index": index,
+            "source": "learned_initial",
+            "candidate_type": candidate_type,
+            "hard_feasible": True,
+            "hpwl_gap": 0.0,
+            "area_gap": 0.0,
+            "boundary_violations": boundary,
+            "grouping_violations": grouping,
+            "mib_violations": mib,
+            "total_soft_violations": boundary + grouping + mib,
+            "max_possible_violations": 10,
+            "violations_relative": (boundary + grouping + mib) / 10.0,
+            "official_capped_cost": None,
+            "uncapped_objective": objective,
+        }
+
+    candidates = [
+        candidate(1, "topology", 2.0, (2, 2, 2)),
+        candidate(2, "constraint", 1.5, (1, 2, 3)),
+    ]
+    oracles = audit._oracles(candidates)
+    case = {
+        "test_id": 0,
+        "block_count": 120,
+        "raw": {"candidates": candidates, "oracles": oracles},
+        "post_bdp": {"candidates": candidates, "oracles": oracles},
+        "incumbent": candidates[1],
+    }
+
+    summary = audit._summary([case])
+
+    assert oracles["constraint"] == {
+        "area_gap": 0.0,
+        "boundary_violations": 1,
+        "candidate_index": 2,
+        "candidate_type": "constraint",
+        "grouping_violations": 2,
+        "hard_feasible": True,
+        "hpwl_gap": 0.0,
+        "max_possible_violations": 10,
+        "mib_violations": 3,
+        "official_capped_cost": None,
+        "source": "learned_initial",
+        "total_soft_violations": 6,
+        "uncapped_objective": 1.5,
+        "violations_relative": 0.6,
+    }
+    assert summary["constraint_oracle"]["raw"]["available_cases"] == 1
+    assert summary["constraint_oracle"]["raw"]["total_boundary_violations"] == 1
+    assert summary["constraint_oracle"]["raw"]["total_grouping_violations"] == 2
+    assert summary["constraint_oracle"]["raw"]["total_mib_violations"] == 3
+    assert summary["topology_vs_constraint_gain"]["raw"] == {
+        "comparable_cases": 1,
+        "constraint_better_cases": 1,
+        "mean_constraint_gain": 0.5,
+        "tied_cases": 0,
+        "topology_better_cases": 0,
+        "weighted_mean_constraint_gain": 0.5,
+    }
+    assert summary["topology_vs_constraint_weighted_gain"]["post_bdp"] == 0.5
 
 
 def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
@@ -492,6 +671,7 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
 
     def fake_analysis(case, _checkpoint, config):
         assert config.topology_seeds == 1
+        assert config.constraint_seeds == 0
         assert config.analytic.dynamics.population == 1
         fallback = safe_shelf(case)
         candidates = fallback.unsqueeze(0).repeat(7, 1, 1)
@@ -559,9 +739,10 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
     assert first == second
     report = json.loads(first)
     assert report["sampling"]["heldout"]["sample_ids"] == ["heldout/a"]
-    assert report["sampling"]["heldout"]["sample_id_sha256"] == hashlib.sha256(
-        b"heldout/a"
-    ).hexdigest()
+    assert (
+        report["sampling"]["heldout"]["sample_id_sha256"]
+        == hashlib.sha256(b"heldout/a").hexdigest()
+    )
     assert report["sampling"]["heldout"]["exclude_overlap_count"] == 0
     assert report["sampling"]["exclude_training"]["count"] == 1
     assert report["sampling"]["exclude_training"]["consumed_count"] == 1
@@ -573,12 +754,20 @@ def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
         "sha256": audit.file_sha256(training_report),
     }
     assert report["checkpoint"]["state_hash"] == "state-hash"
+    assert report["config"]["constraint_seeds"] == 0
+    assert report["evaluation"]["official_raw_replay"] is False
     assert report["cases"][0]["baseline"] == {"area": 2.0, "hpwl": 0.0}
     assert report["cases"][0]["candidate_layout"]["topology_count"] == 1
+    assert report["cases"][0]["candidate_layout"]["constraint_count"] == 0
+    assert report["cases"][0]["raw"]["oracles"]["constraint"] is None
     assert report["cases"][0]["raw"]["candidates"][3]["source"] == "learned_initial"
     assert report["cases"][0]["raw"]["candidates"][3]["candidate_type"] == "topology"
-    assert report["cases"][0]["post_bdp"]["candidates"][6]["source"] == "learned_relaxed"
-    assert report["cases"][0]["post_bdp"]["candidates"][6]["candidate_type"] == "topology"
+    assert (
+        report["cases"][0]["post_bdp"]["candidates"][6]["source"] == "learned_relaxed"
+    )
+    assert (
+        report["cases"][0]["post_bdp"]["candidates"][6]["candidate_type"] == "topology"
+    )
     assert report["cases"][0]["topology_provenance"]["topology_seed_sources"] == [
         "candidate_3",
         "candidate_6",

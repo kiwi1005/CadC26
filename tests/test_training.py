@@ -5,8 +5,11 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
 import torch
 
+from hcfp.case import from_official
+from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint, save_checkpoint
 from hcfp.data import DataSample, extract_labels, pairwise_precedence, write_shard
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
@@ -18,6 +21,57 @@ def _sample() -> DataSample:
     from hcfp.fallback import safe_shelf
 
     return DataSample("train-0", case, extract_labels(case, safe_shelf(case), normalized=True))
+
+
+def _constraint_sample() -> DataSample:
+    case = from_official(
+        4,
+        [1.0, 1.0, 1.0, 1.0],
+        [[0, 1, 2.0], [1, 2, 1.0], [2, 3, 1.0]],
+        [[0, 0, 0.0]],
+        [[0.0, 0.0]],
+        [
+            [0, 0, 1, 1, 9],
+            [0, 0, 1, 1, 1],
+            [0, 0, 0, 1, 6],
+            [0, 0, 0, 0, 2],
+        ],
+    )
+    rectangles = torch.tensor(
+        [
+            [0.0, 0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5, 0.5],
+            [1.0, 0.0, 0.5, 0.5],
+            [1.5, 0.0, 0.5, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+    return DataSample(
+        "train-constraints",
+        case,
+        extract_labels(case, rectangles, normalized=True),
+    )
+
+
+def _empty_constraint_sample() -> DataSample:
+    case = from_official(
+        3,
+        [1.0, 1.0, 1.0],
+        [],
+        [[0, 0, 0.0]],
+        [[0.0, 0.0]],
+        [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+    )
+    side = torch.sqrt(case.area[0])
+    rectangles = torch.tensor(
+        [
+            [0.0, 0.0, side, side],
+            [side, 0.0, side, side],
+            [2.0 * side, 0.0, side, side],
+        ],
+        dtype=torch.float32,
+    )
+    return DataSample("train-empty-constraints", case, extract_labels(case, rectangles, normalized=True))
 
 
 def test_all_supervised_heads_train_with_finite_losses() -> None:
@@ -33,6 +87,54 @@ def test_all_supervised_heads_train_with_finite_losses() -> None:
     history = train_steps(model, [_sample()], optimizer, steps=2, population=2, seed=8)
     assert len(history) == 2
     assert all(torch.isfinite(torch.tensor(step["total"])) for step in history)
+
+
+def test_constraint_supervision_contributes_finite_gradients() -> None:
+    torch.manual_seed(6)
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True))
+    report = supervised_loss(model, _constraint_sample(), population=2, stage="structure", seed=9)
+
+    assert torch.isfinite(report.total)
+    assert torch.isfinite(report.constraint)
+    assert float(report.constraint.detach()) > 0.0
+
+    report.total.backward()
+    grads = [
+        parameter.grad
+        for name, parameter in model.named_parameters()
+        if name.startswith("constraints.")
+    ]
+    assert grads
+    assert any(grad is not None and float(grad.detach().abs().sum()) > 0.0 for grad in grads)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_constraint_supervision_runs_on_cuda() -> None:
+    model = HCFPModel(
+        ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True)
+    ).cuda()
+
+    report = supervised_loss(
+        model,
+        _constraint_sample(),
+        population=2,
+        stage="structure",
+        seed=9,
+    )
+
+    assert report.total.is_cuda
+    assert torch.isfinite(report.total)
+
+
+def test_constraint_supervision_handles_empty_constraint_sets() -> None:
+    torch.manual_seed(7)
+    sample = _empty_constraint_sample()
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True))
+    report = supervised_loss(model, sample, population=2, stage="structure", seed=10)
+
+    assert torch.isfinite(report.total)
+    assert torch.isfinite(report.constraint)
+    assert float(report.constraint.detach()) == 0.0
 
 
 def test_train_steps_restarts_stream_factory_without_materializing() -> None:
@@ -160,4 +262,108 @@ def test_training_cli_emits_checkpoint_and_audit_report(tmp_path: Path) -> None:
     assert checkpoint.is_file()
     assert report["sample_count"] == 1
     assert report["steps"] == 1
+    assert report["constraint_enabled"] is False
     assert len(report["checkpoint_hash"]) == 64
+
+
+def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path) -> None:
+    shard = tmp_path / "train.tar"
+    legacy = tmp_path / "legacy.pt"
+    checkpoint = tmp_path / "constraint-model.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1)),
+        legacy,
+        RUNTIME_NORMALIZATION,
+    )
+    write_shard(
+        [_constraint_sample()],
+        shard,
+        provenance={
+            "source": "FloorSet-train",
+            "source_version": "fixture-v1",
+            "split": "train",
+            "denylist_sha256": "fixture-denylist",
+        },
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp.py",
+            str(shard),
+            "-o",
+            str(checkpoint),
+            "--steps",
+            "1",
+            "--population",
+            "2",
+            "--device",
+            "cpu",
+            "--amp",
+            "off",
+            "--constraints",
+            "--init-checkpoint",
+            str(legacy),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    report = json.loads(Path(f"{checkpoint}.training.json").read_text(encoding="utf-8"))
+    loaded, _ = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
+    assert report["constraint_enabled"] is True
+    assert report["model_config"]["constraint_enabled"] is True
+    assert loaded.config.constraint_enabled is True
+
+
+def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path: Path) -> None:
+    shard = tmp_path / "train.tar"
+    source = tmp_path / "constraint-source.pt"
+    checkpoint = tmp_path / "constraint-preserved.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True)),
+        source,
+        RUNTIME_NORMALIZATION,
+    )
+    write_shard(
+        [_constraint_sample()],
+        shard,
+        provenance={
+            "source": "FloorSet-train",
+            "source_version": "fixture-v1",
+            "split": "train",
+            "denylist_sha256": "fixture-denylist",
+        },
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp.py",
+            str(shard),
+            "-o",
+            str(checkpoint),
+            "--steps",
+            "1",
+            "--population",
+            "2",
+            "--device",
+            "cpu",
+            "--amp",
+            "off",
+            "--init-checkpoint",
+            str(source),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    report = json.loads(Path(f"{checkpoint}.training.json").read_text(encoding="utf-8"))
+    loaded, _ = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
+    assert report["constraint_enabled"] is True
+    assert report["model_config"]["constraint_enabled"] is True
+    assert loaded.config.constraint_enabled is True

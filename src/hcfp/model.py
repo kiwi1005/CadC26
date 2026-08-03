@@ -30,6 +30,7 @@ class ModelConfig:
     candidate_metric_dim: int = 8
     compute_dtype: str = "float32"
     topology_enabled: bool = False
+    constraint_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.hidden_dim <= 0 or self.encoder_layers <= 0:
@@ -54,6 +55,9 @@ class ModelOutput:
     rank_score: Tensor
     positive_permutation: Tensor | None = None
     negative_permutation: Tensor | None = None
+    contact_logits: Tensor | None = None
+    boundary_order_scores: Tensor | None = None
+    mib_log_aspect: Tensor | None = None
 
 
 def soft_sequence_pair_relation_logits(positive: Tensor, negative: Tensor) -> Tensor:
@@ -304,6 +308,39 @@ class RepairAwareRanker(nn.Module):
         return self.net(torch.cat((pooled, metrics), dim=1)).squeeze(1).float()
 
 
+class ConstraintHeads(nn.Module):
+    """Candidate-independent learned Q2 soft-constraint predictions."""
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.left = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        self.right = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        self.contact = nn.Linear(config.hidden_dim, 5)
+        self.boundary = nn.Linear(config.hidden_dim, 4)
+        self.mib = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(config.hidden_dim, 1),
+        )
+
+    def forward(
+        self,
+        case: FloorplanCase,
+        embedding: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        pair = torch.tanh(self.left(embedding)[:, None, :] + self.right(embedding)[None, :, :])
+        contact = self.contact(pair).float()
+        boundary = self.boundary(embedding).float()
+        if case.mib_membership.numel():
+            membership = case.mib_membership.to(device=embedding.device, dtype=embedding.dtype)
+            counts = membership.sum(dim=1, keepdim=True).clamp_min(1.0)
+            pooled = membership @ embedding / counts
+            mib = self.mib(pooled).squeeze(-1).float()
+        else:
+            mib = embedding.new_empty((case.mib_membership.shape[0],), dtype=torch.float32)
+        return contact, boundary, mib
+
+
 class HCFPModel(nn.Module):
     def __init__(self, config: ModelConfig | None = None):
         super().__init__()
@@ -316,6 +353,8 @@ class HCFPModel(nn.Module):
         self.ranker = RepairAwareRanker(self.config)
         if self.config.topology_enabled:
             self.topology = DualPermutationHead(self.config.hidden_dim)
+        if self.config.constraint_enabled:
+            self.constraints = ConstraintHeads(self.config)
 
     def forward(
         self,
@@ -336,6 +375,11 @@ class HCFPModel(nn.Module):
             negative: Tensor | None = None
             if self.config.topology_enabled:
                 positive, negative = self.topology(embedding, case.block_mask)
+            contact_logits: Tensor | None = None
+            boundary_scores: Tensor | None = None
+            mib_log_aspect: Tensor | None = None
+            if self.config.constraint_enabled:
+                contact_logits, boundary_scores, mib_log_aspect = self.constraints(case, embedding)
             center, aspect = self.initializer(case, embedding, population)
             flow_velocity = self.flow(case, embedding, population, flow_state, flow_time)
             gates = self.gates(embedding, population, step_fraction)
@@ -351,4 +395,7 @@ class HCFPModel(nn.Module):
             rank_score=score.float(),
             positive_permutation=(positive.float() if positive is not None else None),
             negative_permutation=(negative.float() if negative is not None else None),
+            contact_logits=(contact_logits.float() if contact_logits is not None else None),
+            boundary_order_scores=(boundary_scores.float() if boundary_scores is not None else None),
+            mib_log_aspect=(mib_log_aspect.float() if mib_log_aspect is not None else None),
         )

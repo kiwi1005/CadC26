@@ -280,8 +280,17 @@ def relax(
     cfg = config or DynamicsConfig()
     if initial_xywh is None:
         initial_xywh = safe_shelf(case).to(device=case.area.device, dtype=torch.float32)
+    supplied = torch.as_tensor(
+        initial_xywh,
+        dtype=torch.float32,
+        device=case.area.device,
+    )
     state = initialize_population(case, cfg, initial_xywh)
-    initial_boxes = xywh_from_state(case, state.center, state.log_aspect)
+    initial_boxes = (
+        supplied.clone()
+        if supplied.shape == (cfg.population, case.n, 4)
+        else xywh_from_state(case, state.center, state.log_aspect)
+    )
     diagnostics = _diagnostics(case, state)
     for _ in range(cfg.steps):
         state, diagnostics = step(case, state, cfg)

@@ -23,6 +23,8 @@ from hcfp.analytic import (
 from hcfp.case import FloorplanCase, from_official
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
+from hcfp.constraints.construction import construct_constraint_variants
+from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
 from hcfp.geometry import xywh_from_state
@@ -58,6 +60,9 @@ class LearnedResult:
     topology_seed_attempted: bool = False
     topology_seed_accepted: bool = False
     topology_seed_count: int = 0
+    constraint_seed_attempted: bool = False
+    constraint_seed_accepted: bool = False
+    constraint_seed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -77,6 +82,7 @@ class LearnedConfig:
     tail_topk: int | None = None
     seed: int | None = None
     topology_seeds: int = 0
+    constraint_seeds: int = 0
 
     def __post_init__(self) -> None:
         if self.flow_steps < 0:
@@ -91,6 +97,10 @@ class LearnedConfig:
             raise ValueError("tail_topk must be positive")
         if self.topology_seeds < 0:
             raise ValueError("topology_seeds must be non-negative")
+        if self.constraint_seeds < 0:
+            raise ValueError("constraint_seeds must be non-negative")
+        if self.constraint_seeds and not self.topology_seeds:
+            raise ValueError("constraint_seeds require topology_seeds")
 
 
 def solve_case_with_checkpoint(
@@ -159,6 +169,9 @@ def analyze_case_with_checkpoint(
                 bool(topology_provenance.get("topology_seed_attempted", False)),
                 bool(topology_provenance.get("topology_seed_accepted", False)),
                 int(topology_provenance.get("topology_seed_count", 0)),
+                bool(topology_provenance.get("constraint_seed_attempted", False)),
+                bool(topology_provenance.get("constraint_seed_accepted", False)),
+                int(topology_provenance.get("constraint_seed_count", 0)),
             ),
             analysis,
         )
@@ -224,8 +237,22 @@ def select_official_from_analysis(
 ) -> list[tuple[float, float, float, float]]:
     """Apply the exact runtime raw-selection chain to an existing analysis."""
 
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    selected_source = snapshot.get("exact_source")
     placements = to_official_placements(source, case, analysis.result.selected)
+    placements = _repair_constraint_candidate(
+        source,
+        placements,
+        snapshot,
+        selected_source,
+    )
     if verify_feasible(source, placements):
+        placements = _raw_constraint_pareto_guard(
+            source,
+            case,
+            analysis,
+            placements,
+        )
         return _raw_analytic_pareto_guard(
             source,
             case,
@@ -251,6 +278,12 @@ def select_official_from_analysis(
     )
     for index in order:
         candidate = to_official_placements(source, case, candidates[index])
+        candidate = _repair_constraint_candidate(
+            source,
+            candidate,
+            snapshot,
+            f"candidate_{index}",
+        )
         if verify_feasible(source, candidate):
             if index == 0:
                 break
@@ -277,6 +310,7 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             tail_topk=int(tail) if tail else None,
             seed=int(seed) if seed is not None else None,
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
+            constraint_seeds=int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "0")),
         )
     if isinstance(config, AnalyticConfig):
         return LearnedConfig(analytic=config)
@@ -412,6 +446,34 @@ def _merge_tail_analyses(
             str(candidate["stage"]) for candidate in candidates
         )
         snapshot["topology_seed_provenance"] = candidates
+        constraint_count = min(
+            int(topology_provenance.get("constraint_seed_count", 0)),
+            learned_count - topology_count,
+        )
+        if constraint_count:
+            residual_count = learned_count - topology_count - constraint_count
+            constraint_records = tuple(
+                topology_provenance.get("constraint_seed_records", ())
+            )
+            if len(constraint_records) != constraint_count:
+                constraint_records = tuple({} for _ in range(constraint_count))
+            constraint_candidates = tuple(
+                {
+                    **dict(constraint_records[index]),
+                    "source": f"candidate_{start + residual_count + index}",
+                    "candidate_type": "constraint",
+                    "stage": stage,
+                }
+                for stage, start in (
+                    ("initial", initial_start),
+                    ("post_relax", final_start),
+                )
+                for index in range(constraint_count)
+            )
+            snapshot["constraint_seed_sources"] = tuple(
+                str(candidate["source"]) for candidate in constraint_candidates
+            )
+            snapshot["constraint_seed_provenance"] = constraint_candidates
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -486,11 +548,92 @@ def _raw_analytic_pareto_guard(
     return (
         min(
             admitted,
-            key=lambda item: (item[0][0], item[0][1] + 0.05 * item[0][2], item[1]),
+            key=lambda item: (
+                item[0][0],
+                item[0][1] + 0.05 * item[0][2],
+                item[1],
+            ),
         )[2]
         if admitted
         else current
     )
+
+
+def _raw_constraint_pareto_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    current: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Admit only raw-repaired constraint candidates that dominate current."""
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    records = _constraint_records(snapshot)
+    if not records:
+        return current
+    try:
+        current_metrics = _raw_quality(source, case, current)
+    except (TypeError, ValueError):
+        return current
+    projected = analysis.analytic.projected_candidates
+    admitted = []
+    for candidate_source, record in records.items():
+        index = _candidate_index(candidate_source)
+        if index is None or not 0 <= index < projected.shape[0]:
+            continue
+        placement = to_official_placements(
+            source,
+            case,
+            projected[index].detach().to(device="cpu", dtype=torch.float32),
+        )
+        placement = list(repair_raw_constraints(source, placement, record).placements)
+        if not verify_feasible(source, placement):
+            continue
+        try:
+            metrics = _raw_quality(source, case, placement)
+        except (TypeError, ValueError):
+            continue
+        if _dominates(metrics, current_metrics):
+            admitted.append((metrics, index, placement))
+    return (
+        min(
+            admitted,
+            key=lambda item: (
+                item[0][0],
+                item[0][1] + 0.05 * item[0][2],
+                item[1],
+            ),
+        )[2]
+        if admitted
+        else current
+    )
+
+
+def _repair_constraint_candidate(
+    source: Any,
+    placements: list[tuple[float, float, float, float]],
+    snapshot: dict[str, object],
+    candidate_source: object,
+) -> list[tuple[float, float, float, float]]:
+    record = _constraint_records(snapshot).get(str(candidate_source))
+    if record is None:
+        return placements
+    repaired = list(repair_raw_constraints(source, placements, record).placements)
+    return repaired if verify_feasible(source, repaired) else placements
+
+
+def _constraint_records(
+    snapshot: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    records: dict[str, dict[str, object]] = {}
+    raw = snapshot.get("constraint_seed_provenance", ())
+    for record in raw if isinstance(raw, (tuple, list)) else ():
+        if not isinstance(record, dict):
+            continue
+        source = str(record.get("source", ""))
+        if _candidate_index(source) is not None:
+            records[source] = record
+    return records
 
 
 def _raw_quality(
@@ -605,6 +748,7 @@ def _learned_population(
         keep = torch.argsort(scores, stable=True)[: config.tail_topk]
         learned_boxes = learned_boxes[keep]
     topology = learned_boxes.new_empty((0, case.n, 4))
+    constraints = learned_boxes.new_empty((0, case.n, 4))
     failure_reason: str | None = None
     if config.topology_seeds:
         try:
@@ -619,7 +763,24 @@ def _learned_population(
             topology = learned_boxes.new_empty((0, case.n, 4))
             failure_reason = f"{type(exc).__name__}: {exc}"
         if topology.numel():
-            learned_boxes = torch.cat((learned_boxes, topology), dim=0)
+            if config.constraint_seeds:
+                try:
+                    constraints = _constraint_seed_candidates(
+                        case,
+                        output,
+                        topology,
+                        count=config.constraint_seeds,
+                        provenance=provenance,
+                    )
+                except (RuntimeError, ValueError) as exc:
+                    constraints = learned_boxes.new_empty((0, case.n, 4))
+                    if provenance is not None:
+                        provenance["constraint_seed_failure_reason"] = (
+                            f"{type(exc).__name__}: {exc}"
+                        )
+            learned_boxes = torch.cat(
+                (learned_boxes, constraints, topology), dim=0
+            )
     if provenance is not None:
         topology_count = int(topology.shape[0])
         provenance.update(
@@ -627,11 +788,141 @@ def _learned_population(
                 "topology_seed_attempted": config.topology_seeds > 0,
                 "topology_seed_accepted": topology_count > 0,
                 "topology_seed_count": topology_count,
+                "constraint_seed_attempted": config.constraint_seeds > 0,
+                "constraint_seed_accepted": int(constraints.shape[0]) > 0,
+                "constraint_seed_count": int(constraints.shape[0]),
             }
         )
         if failure_reason is not None:
             provenance["topology_seed_failure_reason"] = failure_reason
     return learned_boxes
+
+
+def _constraint_seed_candidates(
+    case: FloorplanCase,
+    output: Any,
+    topology: Tensor,
+    *,
+    count: int,
+    provenance: dict[str, object] | None = None,
+) -> Tensor:
+    if count <= 0:
+        return topology.new_empty((0, case.n, 4))
+    contact_logits = getattr(output, "contact_logits", None)
+    relation_scores = (
+        contact_logits[..., 1:5]
+        if contact_logits is not None
+        else output.precedence_logits[..., :4]
+    )
+    boundary_scores = getattr(output, "boundary_order_scores", None)
+    mib_log_aspect = getattr(output, "mib_log_aspect", None)
+    relation_scores = relation_scores.detach().to(device="cpu", dtype=torch.float32)
+    if boundary_scores is not None:
+        boundary_scores = boundary_scores.detach().to(
+            device="cpu", dtype=torch.float32
+        )
+    if mib_log_aspect is not None:
+        mib_log_aspect = mib_log_aspect.detach().to(
+            device="cpu", dtype=torch.float32
+        )
+
+    reference = safe_shelf(case).detach().to(device="cpu", dtype=torch.float32)
+    hpwl_denominator = max(
+        total_hpwl(case, reference), torch.finfo(torch.float64).eps
+    )
+    bbox_denominator = max(bbox_area(reference), torch.finfo(torch.float64).eps)
+    pool: list[Tensor] = []
+    records: list[dict[str, object]] = []
+    for topology_index, source in enumerate(
+        topology.detach().to(device="cpu", dtype=torch.float32)
+    ):
+        for variant in construct_constraint_variants(
+            case,
+            source,
+            relation_scores=relation_scores,
+            boundary_order_scores=boundary_scores,
+            mib_log_aspect=mib_log_aspect,
+        ):
+            candidate = variant.xywh
+            if any(torch.equal(candidate, prior) for prior in pool):
+                continue
+            hard_feasible = verify_feasible(case, candidate)
+            raw_soft = soft_violation_normalized(case, candidate).raw_total
+            normalized_hpwl = total_hpwl(case, candidate) / hpwl_denominator
+            normalized_bbox = bbox_area(candidate) / bbox_denominator
+            pool.append(candidate)
+            records.append(
+                {
+                    "kind": variant.kind,
+                    "topology_seed_index": topology_index,
+                    "candidate_sha256": _tensor_sha256(candidate),
+                    "hard_feasible": hard_feasible,
+                    "priority": {
+                        "raw_soft_violation": raw_soft,
+                        "normalized_quality": normalized_hpwl + normalized_bbox,
+                        "normalized_hpwl": normalized_hpwl,
+                        "normalized_bbox_area": normalized_bbox,
+                    },
+                    "details": variant.details,
+                }
+            )
+    if not pool:
+        raise ValueError("constraint construction produced no changed candidate")
+
+    kind_order = {
+        "combined": 0,
+        "group_contacts": 1,
+        "boundary_frame": 2,
+        "mib_shapes": 3,
+    }
+
+    def priority(index: int) -> tuple[object, ...]:
+        metric = records[index]["priority"]
+        assert isinstance(metric, dict)
+        return (
+            not bool(records[index]["hard_feasible"]),
+            int(metric["raw_soft_violation"]),
+            float(metric["normalized_quality"]),
+            kind_order.get(str(records[index]["kind"]), 99),
+            int(records[index]["topology_seed_index"]),
+            str(records[index]["candidate_sha256"]),
+        )
+
+    ordered_indices = sorted(range(len(pool)), key=priority)
+    representatives = sorted(
+        (
+            min(
+                (
+                    index
+                    for index, record in enumerate(records)
+                    if record["kind"] == kind
+                ),
+                key=priority,
+            )
+            for kind in sorted({str(record["kind"]) for record in records})
+        ),
+        key=priority,
+    )
+    selected_indices = representatives[:count]
+    selected_indices.extend(
+        index
+        for index in ordered_indices
+        if index not in selected_indices
+    )
+    selected_indices = selected_indices[:count]
+    selected_records = tuple(dict(records[index]) for index in selected_indices)
+    if provenance is not None:
+        provenance["constraint_seed_pool_size"] = len(pool)
+        provenance["constraint_seed_records"] = selected_records
+        provenance["constraint_seed_kind_counts"] = {
+            kind: sum(record["kind"] == kind for record in selected_records)
+            for kind in sorted({str(record["kind"]) for record in selected_records})
+        }
+        provenance["constraint_seed_selection"] = "best-per-kind-then-priority"
+    return torch.stack([pool[index] for index in selected_indices]).to(
+        device=topology.device,
+        dtype=topology.dtype,
+    )
 
 
 def _topology_seed_candidates(

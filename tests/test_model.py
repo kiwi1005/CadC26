@@ -42,6 +42,24 @@ def test_model_outputs_are_bounded_and_honor_hard_masks() -> None:
     assert torch.equal(output.flow_velocity[:, case.fixed_mask | case.preplaced_mask, 2], torch.zeros(5, 2))
     assert torch.all(output.force_gates > 0.0)
     assert 0.45 < float(output.outline[2].detach()) < 0.95
+    assert output.contact_logits is None
+    assert output.boundary_order_scores is None
+    assert output.mib_log_aspect is None
+    assert not any(name.startswith("constraints.") for name in HCFPModel(cfg).state_dict())
+
+
+def test_constraint_heads_are_optional_and_candidate_independent() -> None:
+    torch.manual_seed(13)
+    case = _case()
+    cfg = ModelConfig(hidden_dim=24, encoder_layers=1, constraint_enabled=True)
+    output = HCFPModel(cfg)(case, population=3)
+
+    assert output.contact_logits is not None
+    assert output.boundary_order_scores is not None
+    assert output.mib_log_aspect is not None
+    assert output.contact_logits.shape == (case.n, case.n, 5)
+    assert output.boundary_order_scores.shape == (case.n, 4)
+    assert output.mib_log_aspect.shape == (case.mib_membership.shape[0],)
 
 
 def test_model_takes_one_optimizer_step() -> None:
@@ -64,3 +82,39 @@ def test_model_takes_one_optimizer_step() -> None:
     optimizer.step()
 
     assert any(not torch.equal(before[name], value.detach()) for name, value in model.named_parameters())
+
+
+def test_constraint_heads_receive_gradients_when_enabled() -> None:
+    torch.manual_seed(17)
+    case = _case()
+    model = HCFPModel(ModelConfig(hidden_dim=24, encoder_layers=1, constraint_enabled=True))
+    output = model(case, population=2)
+    assert output.contact_logits is not None
+    assert output.boundary_order_scores is not None
+    assert output.mib_log_aspect is not None
+
+    loss = (
+        output.contact_logits.square().mean()
+        + output.boundary_order_scores.square().mean()
+        + output.mib_log_aspect.square().mean()
+    )
+    loss.backward()
+
+    grads = [
+        parameter.grad
+        for name, parameter in model.named_parameters()
+        if name.startswith("constraints.")
+    ]
+    assert grads
+    assert all(grad is not None and torch.isfinite(grad).all() for grad in grads)
+
+
+def test_legacy_state_loads_into_constraint_model_with_only_missing_head_keys() -> None:
+    legacy = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+    upgraded = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True))
+
+    incompatible = upgraded.load_state_dict(legacy.state_dict(), strict=False)
+
+    assert incompatible.unexpected_keys == []
+    assert incompatible.missing_keys
+    assert all(name.startswith("constraints.") for name in incompatible.missing_keys)

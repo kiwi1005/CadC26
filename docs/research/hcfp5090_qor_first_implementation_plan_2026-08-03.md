@@ -3,7 +3,7 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: Q0 and Q1 verified; Q2 is the active next stage
+Status: Q0/Q1 verified; Q2 QoR gate passed but full promotion is held for Q4
 
 ## Execution checkpoint
 
@@ -16,8 +16,14 @@ Status: Q0 and Q1 verified; Q2 is the active next stage
   weighted post-BDP topology-oracle gain with 512/512 hard-feasible
   topology-stage records. The training report is bound to checkpoint state hash
   `48ba552c518f...` and any provenance mismatch fails closed.
-- Q2 contact, boundary, and MIB construction is now the next implementation
-  boundary. Q3 remains gated on Q2 increasing useful candidate density.
+- Q2 contact, boundary, and MIB construction now controls runtime geometry.
+  The disjoint official-raw audit records 16/16 constraint-oracle wins over
+  topology, `+0.5753` score-weighted post-BDP `J` gain, and 10/16 cap crosses.
+- Q2 is not default-promoted: group connectivity is 77.3% rather than 95%,
+  the one area-compatible MIB construction still overlaps before a stronger
+  projector, and displacement reduction is not demonstrated.
+- Q4 component-aware BDP is the active remediation boundary. Q3 collective
+  dynamics remains deferred until Q4 preserves Q2's useful-candidate gain.
 
 ## Decision
 
@@ -210,6 +216,24 @@ reported rather than hidden.
 - Boundary violation falls materially on eligible cases.
 - Post-BDP repair displacement falls by at least 20%.
 
+### Q2 measured result
+
+The implementation and candidate-density gate pass, but default promotion is
+held until Q4 closes the remaining projection gaps:
+
+| Gate | Result | Decision |
+|---|---:|---|
+| constraint oracle versus topology | 16/16 wins; weighted `J` gain `+0.5753` | pass |
+| hard-feasible constraint candidates | 305/512 raw; 330/512 post-BDP | pass |
+| boundary violations | 492 -> 393; boundary-frame representatives 78/78 feasible with zero boundary violations | pass |
+| edge-normalized group connectivity | 0.7% -> 77.3% | hold; target is 95% |
+| compatible MIB construction | zero MIB violation in the sole compatible case, but candidate overlaps | semantic pass; promotion hold |
+| post-BDP displacement | weighted mean `1.2216` raw-coordinate units versus `0` for topology | hold |
+| final runtime safety | 16/16 hard feasible; 16/16 better than analytic oracle | pass |
+
+The authoritative result record is
+[`hcfp5090_q2_constraint_results_2026-08-03.md`](hcfp5090_q2_constraint_results_2026-08-03.md).
+
 ## Q3: geometry-aware collective dynamics
 
 Each rollout step rebuilds pair features from current geometry:
@@ -306,8 +330,8 @@ not ordinary binary accuracy.
 | Q1c | preplaced adaptation and longest-path seeds | Q1b | opt-in | oracle@16 gain |
 | Q2a | contact labels and MST decoder | Q1c | opt-in | connected ratio |
 | Q2b | latch/boundary/MIB construction | Q2a | opt-in | soft QoR gain |
-| Q3 | dynamic messages and live force gates | Q1/Q2 | opt-in | oracle gain |
-| Q4 | component beam, reset, superiorization | Q1/Q2 | opt-in | displacement/runtime |
+| Q3 | dynamic messages and live force gates | Q4 | opt-in | oracle gain |
+| Q4 | component beam, reset, superiorization | Q1/Q2 | opt-in, active | displacement/runtime |
 | Q5 | replay v2 and listwise ranker | Q0--Q4 | training/selection | rank gates |
 | Q6 | A100 profile and submission freeze | all promoted gates | packaging | final smoke |
 

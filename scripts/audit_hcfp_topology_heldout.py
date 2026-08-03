@@ -73,6 +73,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-blocks", type=int, default=120)
     parser.add_argument("--population", type=int, default=8)
     parser.add_argument("--topology-seeds", type=int, default=16)
+    parser.add_argument(
+        "--constraint-seeds",
+        type=int,
+        default=0,
+        help="constraint-constructed seeds appended before topology seeds",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument(
         "--sampling",
@@ -129,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
         topology_seeds=args.topology_seeds,
+        constraint_seeds=args.constraint_seeds,
     )
     heldout, split_provenance = _collect_heldout(
         args.root,
@@ -151,6 +158,7 @@ def main(argv: list[str] | None = None) -> int:
             config,
             args.population,
             args.topology_seeds,
+            args.constraint_seeds,
         )
         for index, (sample, _source) in enumerate(heldout)
     ]
@@ -172,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_blocks": args.max_blocks,
             "population": args.population,
             "topology_seeds": args.topology_seeds,
+            "constraint_seeds": args.constraint_seeds,
             "device": str(device),
             "sampling": training_sampling,
             "dynamics_steps": args.dynamics_steps,
@@ -186,6 +195,13 @@ def main(argv: list[str] | None = None) -> int:
             "file_sha256": file_sha256(checkpoint),
             "state_hash": checkpoint_hash,
             "normalization": checkpoint_metadata["normalization"],
+        },
+        "evaluation": {
+            "mode": "hcfp.verify exact-v10-parity primitives",
+            "official_raw_replay": False,
+            "official_raw_replay_gap": (
+                "FloorSet-Lite audit does not load the pinned Shapely official evaluator"
+            ),
         },
         "sampling": {
             "source": "FloorSet-Lite training",
@@ -207,13 +223,19 @@ def main(argv: list[str] | None = None) -> int:
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(output)
     print(json.dumps(report["summary"], indent=2, sort_keys=True))
     return 0
 
 
 def _validate_args(args: argparse.Namespace) -> None:
+    if args.constraint_seeds < 0:
+        raise ValueError("--constraint-seeds must be non-negative")
+    if args.constraint_seeds and args.topology_seeds <= 0:
+        raise ValueError("--constraint-seeds requires --topology-seeds > 0")
     for name in (
         "heldout_limit",
         "heldout_max_layouts_per_file",
@@ -226,7 +248,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--exclude-train-limit must be positive")
     if args.min_blocks <= 0 or args.max_blocks < args.min_blocks:
         raise ValueError("--min-blocks/--max-blocks must define a positive range")
-    if args.dynamics_steps < 0 or args.projection_steps <= 0 or args.direction_beam <= 0:
+    if (
+        args.dynamics_steps < 0
+        or args.projection_steps <= 0
+        or args.direction_beam <= 0
+    ):
         raise ValueError("candidate search step and beam counts are invalid")
     if args.flow_steps < 0:
         raise ValueError("--flow-steps must be non-negative")
@@ -395,7 +421,9 @@ def _collect_heldout(
     source_files = [sample_id.rsplit(":", 1)[0] for sample_id in selected_ids]
     overlap = exclude_ids.intersection(selected_ids)
     if overlap:
-        raise RuntimeError(f"heldout split overlaps exclude training IDs: {sorted(overlap)}")
+        raise RuntimeError(
+            f"heldout split overlaps exclude training IDs: {sorted(overlap)}"
+        )
     return selected, {
         "exclude_training": dict(exclude_provenance),
         "heldout": {
@@ -424,10 +452,17 @@ def _audit_sample(
     config: LearnedConfig,
     population: int,
     topology_seeds: int,
+    constraint_seeds: int,
 ) -> dict[str, Any]:
     case = sample.case.to(device=device, dtype=torch.float32)
     analysis = analyze_case_with_checkpoint(case, checkpoint, config)
-    _validate_topology_result(sample.sample_id, analysis, checkpoint_hash, topology_seeds)
+    _validate_topology_result(
+        sample.sample_id,
+        analysis,
+        checkpoint_hash,
+        topology_seeds,
+        constraint_seeds,
+    )
     learned_count = analysis.result.candidate_count - population
     sources = candidate_source_layout(population, learned_count)
     raw = analysis.analytic.raw_candidates
@@ -444,6 +479,24 @@ def _audit_sample(
             f"sample {sample.sample_id}: topology provenance names "
             f"{len(topology_indices)} candidates, expected {2 * topology_seeds}"
         )
+    constraint_indices = _topology_indices(snapshot.get("constraint_seed_sources"))
+    if len(constraint_indices) != 2 * constraint_seeds:
+        raise RuntimeError(
+            f"sample {sample.sample_id}: constraint provenance names "
+            f"{len(constraint_indices)} candidates, expected {2 * constraint_seeds}"
+        )
+    invalid_indices = (topology_indices | constraint_indices) - frozenset(
+        range(len(sources))
+    )
+    if invalid_indices:
+        raise RuntimeError(
+            f"sample {sample.sample_id}: seed provenance indices are outside candidate layout: "
+            f"{sorted(invalid_indices)}"
+        )
+    if topology_indices & constraint_indices:
+        raise RuntimeError(
+            f"sample {sample.sample_id}: topology and constraint provenance overlap"
+        )
     baseline_area = float(sample.labels.baseline_area)
     baseline_hpwl = float(sample.labels.baseline_hpwl)
     raw_records = _candidate_records(
@@ -453,6 +506,7 @@ def _audit_sample(
         topology_indices,
         baseline_area,
         baseline_hpwl,
+        constraint_indices=constraint_indices,
     )
     projected_records = _candidate_records(
         case,
@@ -461,6 +515,7 @@ def _audit_sample(
         topology_indices,
         baseline_area,
         baseline_hpwl,
+        constraint_indices=constraint_indices,
     )
     incumbent_index, incumbent_source = _incumbent_source(
         snapshot.get("exact_source"),
@@ -474,6 +529,7 @@ def _audit_sample(
         topology_indices,
         baseline_area,
         baseline_hpwl,
+        constraint_indices=constraint_indices,
     )
     return {
         "test_id": index,
@@ -484,12 +540,18 @@ def _audit_sample(
             "population": population,
             "learned_count": learned_count,
             "topology_count": topology_seeds,
+            "constraint_count": constraint_seeds,
             "candidate_count": len(sources),
         },
         "topology_provenance": {
             key: value
             for key, value in snapshot.items()
             if str(key).startswith("topology_")
+        },
+        "constraint_provenance": {
+            key: value
+            for key, value in snapshot.items()
+            if str(key).startswith("constraint_")
         },
         "raw": {"candidates": raw_records, "oracles": _oracles(raw_records)},
         "post_bdp": {
@@ -505,8 +567,12 @@ def _validate_topology_result(
     analysis: Any,
     checkpoint_hash: str,
     requested_count: int,
+    requested_constraint_count: int = 0,
 ) -> None:
-    if not analysis.result.used_checkpoint or analysis.result.checkpoint_hash != checkpoint_hash:
+    if (
+        not analysis.result.used_checkpoint
+        or analysis.result.checkpoint_hash != checkpoint_hash
+    ):
         reason = analysis.result.failure_reason or "checkpoint was not used"
         raise RuntimeError(f"sample {sample_id}: {reason}")
     produced = int(analysis.result.topology_seed_count)
@@ -519,6 +585,16 @@ def _validate_topology_result(
             f"sample {sample_id}: requested {requested_count} topology seeds, "
             f"produced {produced}: {reason}"
         )
+    produced_constraints = int(getattr(analysis.result, "constraint_seed_count", 0))
+    if produced_constraints != requested_constraint_count:
+        reason = analysis.analytic.incumbent_snapshot.get(
+            "constraint_seed_failure_reason",
+            "constraint construction produced an incomplete candidate set",
+        )
+        raise RuntimeError(
+            f"sample {sample_id}: requested {requested_constraint_count} constraint seeds, "
+            f"produced {produced_constraints}: {reason}"
+        )
 
 
 def _candidate_records(
@@ -528,6 +604,8 @@ def _candidate_records(
     topology_indices: frozenset[int],
     baseline_area: float,
     baseline_hpwl: float,
+    *,
+    constraint_indices: frozenset[int] = frozenset(),
 ) -> list[dict[str, Any]]:
     return [
         _candidate_record(
@@ -538,6 +616,7 @@ def _candidate_records(
             topology_indices,
             baseline_area,
             baseline_hpwl,
+            constraint_indices=constraint_indices,
         )
         for index, (source, candidate) in enumerate(zip(sources, boxes, strict=True))
     ]
@@ -551,6 +630,8 @@ def _candidate_record(
     topology_indices: frozenset[int],
     baseline_area: float,
     baseline_hpwl: float,
+    *,
+    constraint_indices: frozenset[int] = frozenset(),
 ) -> dict[str, Any]:
     boxes = candidate.detach().to(device="cpu", dtype=torch.float32)
     verification = verify(case, boxes)
@@ -566,7 +647,9 @@ def _candidate_record(
         "candidate_index": int(index),
         "source": source,
         "candidate_type": (
-            "topology"
+            "constraint"
+            if index in constraint_indices
+            else "topology"
             if index in topology_indices
             else "fallback"
             if index == 0
@@ -615,12 +698,40 @@ def _oracles(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     result["learned_residual"] = select_candidate_oracle(
         [row for row in candidates if row["candidate_type"] == "learned_residual"]
     )
+    result["constraint"] = _constraint_oracle(candidates)
     return result
+
+
+def _constraint_oracle(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    typed = [row for row in candidates if row["candidate_type"] == "constraint"]
+    oracle = select_candidate_oracle(typed)
+    if oracle is None:
+        return None
+    winner = next(
+        row
+        for row in typed
+        if int(row["candidate_index"]) == int(oracle["candidate_index"])
+    )
+    return {
+        **oracle,
+        "candidate_type": "constraint",
+        **{
+            field: int(winner[field])
+            for field in (
+                "boundary_violations",
+                "grouping_violations",
+                "mib_violations",
+                "total_soft_violations",
+                "max_possible_violations",
+            )
+        },
+    }
 
 
 def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
     attribution = summarize_attribution_cases(cases)
     candidate_types = summarize_candidate_types(cases)
+    constraint_oracle, topology_vs_constraint = _constraint_summary(cases)
     return {
         "cases": len(cases),
         "topology_vs_analytic_weighted_gain": {
@@ -632,17 +743,112 @@ def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "hard_feasibility": {
             stage: {
                 "candidate_count": attribution[stage]["candidate_count"],
-                "hard_feasible_candidates": attribution[stage]["hard_feasible_candidates"],
+                "hard_feasible_candidates": attribution[stage][
+                    "hard_feasible_candidates"
+                ],
                 "rate": attribution[stage]["hard_feasibility_rate"],
-                "candidate_count_by_type": candidate_types[stage]["candidate_count_by_type"],
-                "hard_feasible_by_type": candidate_types[stage]["hard_feasible_by_type"],
+                "candidate_count_by_type": candidate_types[stage][
+                    "candidate_count_by_type"
+                ],
+                "hard_feasible_by_type": candidate_types[stage][
+                    "hard_feasible_by_type"
+                ],
             }
             for stage in ("raw", "post_bdp")
         },
         "selected_vs_analytic": _selected_vs_analytic(cases),
+        "constraint_oracle": constraint_oracle,
+        "topology_vs_constraint_gain": topology_vs_constraint,
+        "topology_vs_constraint_weighted_gain": {
+            stage: topology_vs_constraint[stage]["weighted_mean_constraint_gain"]
+            for stage in ("raw", "post_bdp")
+        },
         "attribution": attribution,
         "candidate_types": candidate_types,
     }
+
+
+def _constraint_summary(
+    cases: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    oracle_summary = {}
+    gain_summary = {}
+    for stage in ("raw", "post_bdp"):
+        values: list[tuple[int, dict[str, Any]]] = []
+        gains: list[tuple[int, float]] = []
+        constraint_better = topology_better = tied = 0
+        for case in cases:
+            oracles = case[stage]["oracles"]
+            constraint = oracles.get("constraint")
+            topology = oracles.get("topology")
+            blocks = int(case["block_count"])
+            if constraint is not None:
+                values.append((blocks, constraint))
+            if constraint is None or topology is None:
+                continue
+            gain = float(topology["uncapped_objective"]) - float(
+                constraint["uncapped_objective"]
+            )
+            gains.append((blocks, gain))
+            if gain > 1.0e-9:
+                constraint_better += 1
+            elif gain < -1.0e-9:
+                topology_better += 1
+            else:
+                tied += 1
+        oracle_summary[stage] = {
+            "available_cases": len(values),
+            "mean_uncapped_objective": (
+                sum(float(row["uncapped_objective"]) for _blocks, row in values)
+                / len(values)
+                if values
+                else None
+            ),
+            "weighted_mean_uncapped_objective": _weighted_mean(
+                [(blocks, float(row["uncapped_objective"])) for blocks, row in values]
+            ),
+            **{
+                f"total_{name}": sum(int(row[name]) for _blocks, row in values)
+                for name in (
+                    "boundary_violations",
+                    "grouping_violations",
+                    "mib_violations",
+                )
+            },
+            **{
+                f"mean_{name}": (
+                    sum(int(row[name]) for _blocks, row in values) / len(values)
+                    if values
+                    else None
+                )
+                for name in (
+                    "boundary_violations",
+                    "grouping_violations",
+                    "mib_violations",
+                )
+            },
+        }
+        gain_summary[stage] = {
+            "comparable_cases": len(gains),
+            "constraint_better_cases": constraint_better,
+            "topology_better_cases": topology_better,
+            "tied_cases": tied,
+            "mean_constraint_gain": (
+                sum(gain for _blocks, gain in gains) / len(gains) if gains else None
+            ),
+            "weighted_mean_constraint_gain": _weighted_mean(gains),
+        }
+    return oracle_summary, gain_summary
+
+
+def _weighted_mean(values: list[tuple[int, float]]) -> float | None:
+    if not values:
+        return None
+    max_blocks = max(blocks for blocks, _value in values)
+    weights = [math.exp((blocks - max_blocks) / 12.0) for blocks, _value in values]
+    return sum(
+        value * weight for (_blocks, value), weight in zip(values, weights, strict=True)
+    ) / sum(weights)
 
 
 def _selected_vs_analytic(cases: list[dict[str, Any]]) -> dict[str, Any]:
@@ -681,7 +887,8 @@ def _selected_vs_analytic(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "tied_cases": tied,
         "mean_selected_gain": sum(gain for _blocks, gain in gains) / len(gains),
         "weighted_mean_selected_gain": sum(
-            gain * weight for (_blocks, gain), weight in zip(gains, weights, strict=True)
+            gain * weight
+            for (_blocks, gain), weight in zip(gains, weights, strict=True)
         )
         / sum(weights),
     }

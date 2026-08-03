@@ -267,6 +267,58 @@ def test_opt_in_topology_seed_changes_geometry_and_records_provenance(
     )
 
 
+def test_opt_in_constraint_seeds_follow_topology_and_keep_source_provenance(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(19)
+    case = _case()
+    checkpoint = tmp_path / "topology-constraints.pt"
+    save_checkpoint(
+        HCFPModel(
+            ModelConfig(hidden_dim=16, encoder_layers=1, topology_enabled=True)
+        ),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+    )
+    config = LearnedConfig(
+        analytic=replace(
+            LearnedConfig().analytic,
+            dynamics=DynamicsConfig(population=2, steps=0),
+            projection_iterations=4,
+            direction_beam=1,
+        ),
+        flow_steps=0,
+        topology_seeds=2,
+        constraint_seeds=2,
+        seed=23,
+    )
+
+    analysis = analyze_case_with_checkpoint(case, checkpoint, config)
+
+    assert analysis.result.used_checkpoint
+    assert analysis.result.topology_seed_count == 2
+    assert analysis.result.constraint_seed_attempted
+    assert analysis.result.constraint_seed_accepted
+    assert analysis.result.constraint_seed_count == 2
+    snapshot = analysis.analytic.incumbent_snapshot
+    assert len(snapshot["topology_seed_sources"]) == 4
+    assert len(snapshot["constraint_seed_sources"]) == 4
+    assert len(snapshot["constraint_seed_provenance"]) == 4
+    initial_constraint = int(
+        str(snapshot["constraint_seed_sources"][0]).removeprefix("candidate_")
+    )
+    initial_topology = int(
+        str(snapshot["topology_seed_sources"][0]).removeprefix("candidate_")
+    )
+    assert initial_constraint < initial_topology
+    assert snapshot["constraint_seed_kind_counts"]
+
+
+def test_constraint_seeds_require_topology_seeds() -> None:
+    with pytest.raises(ValueError, match="require topology"):
+        LearnedConfig(constraint_seeds=1)
+
+
 def test_topology_seed_failure_returns_unmodified_learned_population(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

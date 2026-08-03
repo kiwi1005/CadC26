@@ -43,6 +43,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="opt in to typed membership messages and the dual-permutation head",
     )
+    parser.add_argument(
+        "--constraints",
+        action="store_true",
+        default=None,
+        help="opt in to learned Q2 constraint heads and supervision",
+    )
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--amp", choices=("off", "bf16"), default="bf16")
     parser.add_argument("--ema-decay", type=float, default=0.999)
@@ -110,21 +116,30 @@ def main(argv: list[str] | None = None) -> int:
             loaded.config,
             compute_dtype=compute_dtype,
             topology_enabled=topology_enabled,
+            constraint_enabled=(
+                loaded.config.constraint_enabled
+                if args.constraints is None
+                else args.constraints
+            ),
         )
         model = HCFPModel(config)
         incompatible = model.load_state_dict(loaded.state_dict(), strict=False)
-        topology_prefixes = (
+        allowed_missing_prefixes = (
             "topology.",
             "encoder.group_message.",
             "encoder.mib_message.",
+            "constraints.",
         )
-        invalid = [
+        invalid_missing = [
             name
-            for name in (*incompatible.missing_keys, *incompatible.unexpected_keys)
-            if not name.startswith(topology_prefixes)
+            for name in incompatible.missing_keys
+            if not name.startswith(allowed_missing_prefixes)
         ]
-        if invalid:
-            raise ValueError(f"init checkpoint state mismatch: {invalid}")
+        invalid_unexpected = list(incompatible.unexpected_keys)
+        if invalid_missing or invalid_unexpected:
+            raise ValueError(
+                f"init checkpoint state mismatch: missing={invalid_missing} unexpected={invalid_unexpected}"
+            )
     else:
         model = HCFPModel(
             ModelConfig(
@@ -132,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 encoder_layers=args.encoder_layers,
                 compute_dtype=compute_dtype,
                 topology_enabled=bool(args.topology),
+                constraint_enabled=bool(args.constraints),
             )
         )
     model = model.to(device)
@@ -189,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         "device": str(device),
         "compute_dtype": compute_dtype,
         "topology_enabled": model.config.topology_enabled,
+        "constraint_enabled": model.config.constraint_enabled,
         "ema_decay": args.ema_decay if ema is not None else None,
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,

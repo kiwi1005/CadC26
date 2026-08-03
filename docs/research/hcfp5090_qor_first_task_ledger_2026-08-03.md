@@ -45,12 +45,33 @@ uncapped-objective gain. Q2 is unblocked after the Q1 integration commit.
 
 ## Q2 — constraint construction
 
-- [ ] Extract side-specific cluster contact labels.
-- [ ] Decode a deterministic maximum contact spanning tree per group.
-- [ ] Implement hysteretic contact latch state.
-- [ ] Add boundary virtual nodes and per-side slot order.
-- [ ] Construct compatible MIB shapes from one group variable.
-- [ ] Measure group connectivity, soft violations, and repair displacement.
+- [x] Extract side-specific cluster contact labels.
+- [x] Decode a deterministic maximum contact spanning tree per group.
+- [x] Implement hysteretic contact latch state.
+- [x] Add boundary virtual nodes and per-side slot order.
+- [x] Construct compatible MIB shapes from one group variable.
+- [x] Connect learned contact, boundary-order, and MIB heads to runtime variants.
+- [x] Replay zero-gap contacts in raw FP64 coordinates without hard regressions.
+- [x] Preserve constructed populations through the dynamics/tail boundary.
+- [x] Run a disjoint 16-case official-raw audit on 106--120-block cases.
+- [~] Raise edge-normalized group connectivity from 77.3% to the 95% gate.
+- [~] Carry compatible zero-MIB construction through overlap legalization.
+- [~] Prove at least 20% lower post-BDP repair displacement.
+
+Current gate: **PARTIAL PASS — useful candidate density and QoR pass; default
+promotion remains on hold**. On the pinned official evaluator, the constraint
+oracle beats topology on 16/16 cases. Its score-weighted post-BDP `J` is
+`2.2821` versus `2.8574` for topology, a `+0.5753` gain, and 10/16 constraint
+oracles cross below the official cap. Grouping violations fall from 407 to 93
+and boundary violations from 492 to 393. Final Pareto-safe runtime output is
+hard feasible on 16/16 and beats the analytic post-BDP oracle on 16/16.
+
+The full Q2 gate is not yet met: edge-normalized group connectivity is 77.3%,
+the single area-compatible MIB case constructs zero MIB violations but still
+needs overlap legalization, and constraint candidates require nonzero movement
+where the already-feasible topology seeds require none. These are the direct
+inputs to Q4 component-aware projection. Q4 is therefore unblocked as the
+remediation stage; Q3 remains deferred until Q4 preserves the Q2 QoR gain.
 
 ## Q3 — collective dynamics
 
@@ -60,11 +81,12 @@ uncapped-objective gain. Q2 is unblocked after the Q1 integration commit.
 - [ ] Connect learned force gates to active typed-force channels.
 - [ ] Run rollout stability and CPU/CUDA differential tests.
 
-Q3 starts only when Q1/Q2 increase useful candidate density.
+Q3 starts only when Q4 preserves the Q2 useful-candidate gain without creating
+a runtime or displacement regression.
 
 ## Q4 — component-aware BDP
 
-- [ ] Build and refresh conflict connected components every outer sweep.
+- [~] Build and refresh conflict connected components every outer sweep.
 - [ ] Score directions with movement, HPWL, topology, latch, and boundary terms.
 - [ ] Branch only uncertain directions and reject cycles.
 - [ ] Add repeated-signature reset and bounded HPWL superiorization.
