@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,13 @@ SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
 RUNTIME_NORMALIZATION = {"coordinate_scale": "sqrt_total_area_v1", "geometry_dtype": "float32"}
 _METADATA_FIELDS = (
+    "capabilities",
+    "trained_heads",
+    "training_objective_version",
+    "training_objective_weights",
+    "parent_state_hash",
+)
+_REQUIRED_METADATA_FIELDS = (
     "capabilities",
     "trained_heads",
     "training_objective_version",
@@ -83,6 +91,9 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     schema_version = payload.get("schema_version")
     if schema_version == SCHEMA_VERSION:
         metadata = _metadata_from_payload(payload, SCHEMA_VERSION)
+        if "training_objective_weights" not in payload:
+            metadata = dict(metadata)
+            metadata.pop("training_objective_weights", None)
         digest.update(
             json.dumps(
                 {"schema_version": SCHEMA_VERSION, **metadata},
@@ -108,10 +119,10 @@ def _payload_hash(payload: dict[str, Any]) -> str:
 def _metadata_from_payload(payload: dict[str, Any], schema_version: int) -> dict[str, Any]:
     if schema_version == LEGACY_SCHEMA_VERSION:
         return _normalize_metadata(None)
-    missing = [name for name in _METADATA_FIELDS if name not in payload]
+    missing = [name for name in _REQUIRED_METADATA_FIELDS if name not in payload]
     if missing:
         raise ValueError(f"checkpoint metadata missing: {missing}")
-    return _normalize_metadata({name: payload[name] for name in _METADATA_FIELDS})
+    return _normalize_metadata({name: payload.get(name) for name in _METADATA_FIELDS})
 
 
 def _normalize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -147,6 +158,35 @@ def _normalize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     objective = supplied.get("training_objective_version")
     if objective is not None and (not isinstance(objective, str) or not objective):
         raise ValueError("training_objective_version must be a non-empty string or null")
+    weights = supplied.get("training_objective_weights")
+    if weights is not None:
+        if not isinstance(weights, dict):
+            raise ValueError("training_objective_weights must be a mapping or null")
+        required = {"name", "listwise", "feasibility_order", "pointwise", "top_one"}
+        if set(weights) != required:
+            raise ValueError("training_objective_weights has an unsupported schema")
+        if not isinstance(weights["name"], str) or not weights["name"]:
+            raise ValueError("training_objective_weights name must be a non-empty string")
+        for name in ("listwise", "feasibility_order", "pointwise", "top_one"):
+            if type(weights[name]) not in {float, int}:
+                raise ValueError("training_objective_weights values must be numeric")
+            if not math.isfinite(float(weights[name])) or float(weights[name]) < 0.0:
+                raise ValueError(
+                    "training_objective_weights values must be finite and non-negative"
+                )
+        weights = {
+            "name": weights["name"],
+            "listwise": float(weights["listwise"]),
+            "feasibility_order": float(weights["feasibility_order"]),
+            "pointwise": float(weights["pointwise"]),
+            "top_one": float(weights["top_one"]),
+        }
+        if not any(weights[name] > 0.0 for name in required - {"name"}):
+            raise ValueError("training_objective_weights must enable at least one loss term")
+        if objective is not None and weights["name"] != objective:
+            raise ValueError(
+                "training_objective_weights name must match training_objective_version"
+            )
     parent_hash = supplied.get("parent_state_hash")
     if parent_hash is not None and (
         not isinstance(parent_hash, str)
@@ -158,5 +198,6 @@ def _normalize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
         "capabilities": capabilities,
         "trained_heads": trained_heads,
         "training_objective_version": objective,
+        "training_objective_weights": weights,
         "parent_state_hash": parent_hash,
     }

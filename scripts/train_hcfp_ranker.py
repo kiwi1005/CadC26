@@ -24,6 +24,7 @@ from hcfp.ranker_features import RANKER_FEATURE_DIM, RANKER_FEATURE_VERSION  # n
 from hcfp.ranker_upgrade import upgrade_candidate_metric_dim  # noqa: E402
 from hcfp.replay import (  # noqa: E402
     OFFICIAL_TARGET_KIND,
+    RANKER_OBJECTIVES,
     iter_replay,
     ranker_features_for_record,
     train_ranker_steps,
@@ -40,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--stage", choices=("all", "initial", "post_relax"), default="all")
+    parser.add_argument(
+        "--objective-preset",
+        choices=tuple(RANKER_OBJECTIVES),
+        default="default",
+        help="Ranker loss preset. The default preserves the existing objective.",
+    )
     args = parser.parse_args(argv)
 
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -143,10 +150,19 @@ def main(argv: list[str] | None = None) -> int:
     ]
     del records_by_replay
     continuing_ranker = _checkpoint_has_trained_ranker(source)
+    objective = (
+        RANKER_OBJECTIVES[args.objective_preset]
+        if listwise_records
+        else None
+    )
     expected_scene_embedding = (
         False if listwise_records else model.config.ranker_use_scene_embedding
     )
     if continuing_ranker:
+        if listwise_records and source.get("training_objective_version") != objective.name:
+            raise ValueError("ranker continuation requires the same training objective")
+        if listwise_records and source.get("training_objective_weights") != objective.as_metadata():
+            raise ValueError("ranker continuation requires the same objective weights")
         if (
             model.config.candidate_metric_dim != feature_dim
             or model.config.ranker_feature_version != feature_version
@@ -186,10 +202,21 @@ def main(argv: list[str] | None = None) -> int:
         feature_version=feature_version,
         use_scene_embedding=expected_scene_embedding,
     )
-    objective = (
-        "ranker_post_repair_listwise_v3_feasibility_shadow"
-        if listwise_records
+    objective_version = (
+        objective.name
+        if listwise_records and objective is not None
         else "ranker_official_v10_pointwise_v1"
+    )
+    objective_weights = (
+        objective.as_metadata()
+        if listwise_records and objective is not None
+        else {
+            "name": "ranker_official_v10_pointwise_v1",
+            "listwise": 0.0,
+            "feasibility_order": 0.0,
+            "pointwise": 1.0,
+            "top_one": 0.0,
+        }
     )
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.ranker.parameters(), lr=args.learning_rate)
@@ -199,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         optimizer,
         steps=args.steps,
         report_components=True,
+        objective=objective or RANKER_OBJECTIVES["default"],
     )
     loss_window = min(len(records), len(history))
     capabilities = dict(source["capabilities"])
@@ -206,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint_metadata = {
         "capabilities": capabilities,
         "trained_heads": sorted({*source["trained_heads"], "ranker"}),
-        "training_objective_version": objective,
+        "training_objective_version": objective_version,
+        "training_objective_weights": objective_weights,
         "parent_state_hash": source["state_hash"],
     }
     checkpoint_hash = save_checkpoint(
@@ -248,6 +277,9 @@ def main(argv: list[str] | None = None) -> int:
         ],
         "records": len(records),
         "listwise_records": listwise_records,
+        "objective_preset": args.objective_preset if listwise_records else "pointwise",
+        "training_objective_version": objective_version,
+        "training_objective_weights": objective_weights,
         "candidate_stage_filter": args.stage,
         "candidate_feature_version": feature_version,
         "candidate_feature_dim": feature_dim,

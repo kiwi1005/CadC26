@@ -22,6 +22,13 @@ def test_checkpoint_roundtrip_preserves_config_metadata_and_weights(tmp_path: Pa
         "capabilities": {"flow": True},
         "trained_heads": ["structure", "flow"],
         "training_objective_version": "supervised_loss_v1",
+        "training_objective_weights": {
+            "name": "supervised_loss_v1",
+            "listwise": 0.0,
+            "feasibility_order": 0.0,
+            "pointwise": 1.0,
+            "top_one": 0.0,
+        },
         "parent_state_hash": "a" * 64,
     }
     saved_hash = save_checkpoint(model, path, normalization, metadata=checkpoint_metadata)
@@ -33,6 +40,7 @@ def test_checkpoint_roundtrip_preserves_config_metadata_and_weights(tmp_path: Pa
     assert metadata["capabilities"] == {"flow": True}
     assert metadata["trained_heads"] == ["flow", "structure"]
     assert metadata["training_objective_version"] == "supervised_loss_v1"
+    assert metadata["training_objective_weights"] == checkpoint_metadata["training_objective_weights"]
     assert metadata["parent_state_hash"] == "a" * 64
     assert loaded.config == model.config
     for key, value in model.state_dict().items():
@@ -63,6 +71,16 @@ def test_checkpoint_fails_closed_on_hash_and_config_mismatch(tmp_path: Path) -> 
         ("capabilities", {"flow": False}),
         ("trained_heads", ["flow", "ranker"]),
         ("training_objective_version", "other_objective_v1"),
+        (
+            "training_objective_weights",
+            {
+                "name": "supervised_loss_v1",
+                "listwise": 1.0,
+                "feasibility_order": 0.0,
+                "pointwise": 0.0,
+                "top_one": 0.0,
+            },
+        ),
         ("parent_state_hash", "b" * 64),
     ],
 )
@@ -79,16 +97,75 @@ def test_v2_hash_covers_capability_metadata(
             "capabilities": {"flow": True},
             "trained_heads": ["flow"],
             "training_objective_version": "supervised_loss_v1",
+            "training_objective_weights": {
+                "name": "supervised_loss_v1",
+                "listwise": 0.0,
+                "feasibility_order": 0.0,
+                "pointwise": 1.0,
+                "top_one": 0.0,
+            },
             "parent_state_hash": "a" * 64,
         },
     )
     payload = torch.load(path, map_location="cpu", weights_only=True)
     payload[field] = replacement
+    if field == "training_objective_version":
+        payload["training_objective_weights"]["name"] = replacement
     broken = tmp_path / f"broken-{field}.pt"
     torch.save(payload, broken)
 
     with pytest.raises(ValueError, match="hash mismatch"):
         load_checkpoint(broken)
+
+
+def test_checkpoint_rejects_invalid_objective_weights(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        save_checkpoint(
+            HCFPModel(ModelConfig(hidden_dim=16)),
+            tmp_path / "bad.pt",
+            metadata={
+                "training_objective_version": "bad",
+                "training_objective_weights": {
+                    "name": "bad",
+                    "listwise": float("nan"),
+                    "feasibility_order": 0.0,
+                    "pointwise": 0.0,
+                    "top_one": 0.0,
+                },
+            },
+        )
+
+    with pytest.raises(ValueError, match="name must match"):
+        save_checkpoint(
+            HCFPModel(ModelConfig(hidden_dim=16)),
+            tmp_path / "mismatch.pt",
+            metadata={
+                "training_objective_version": "expected",
+                "training_objective_weights": {
+                    "name": "different",
+                    "listwise": 1.0,
+                    "feasibility_order": 0.0,
+                    "pointwise": 0.0,
+                    "top_one": 0.0,
+                },
+            },
+        )
+
+    with pytest.raises(ValueError, match="enable at least one"):
+        save_checkpoint(
+            HCFPModel(ModelConfig(hidden_dim=16)),
+            tmp_path / "zero.pt",
+            metadata={
+                "training_objective_version": "zero",
+                "training_objective_weights": {
+                    "name": "zero",
+                    "listwise": 0.0,
+                    "feasibility_order": 0.0,
+                    "pointwise": 0.0,
+                    "top_one": 0.0,
+                },
+            },
+        )
 
 
 def test_schema_v1_load_preserves_legacy_hash_and_disables_capabilities(tmp_path: Path) -> None:

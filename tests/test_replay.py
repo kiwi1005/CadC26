@@ -22,6 +22,7 @@ from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
 from hcfp.replay import (
     OFFICIAL_TARGET_KIND,
+    RANKER_OBJECTIVES,
     ReplayRecord,
     iter_replay,
     official_replay_scores,
@@ -1031,6 +1032,16 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
     assert report["loss_window_records"] == 1
     assert report["first_window_mean_loss"] == report["first_loss"]
     assert report["last_window_mean_loss"] == report["last_loss"]
+    assert report["objective_preset"] == "default"
+    assert report["training_objective_version"] == metadata["training_objective_version"]
+    assert report["training_objective_weights"] == {
+        "name": "ranker_post_repair_listwise_v3_feasibility_shadow",
+        "listwise": 1.0,
+        "feasibility_order": 0.25,
+        "pointwise": 0.05,
+        "top_one": 0.0,
+    }
+    assert metadata["training_objective_weights"] == report["training_objective_weights"]
     assert set(report["last_loss_components"]) == {
         "combined",
         "feasibility_order",
@@ -1086,6 +1097,58 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
         continued_report["candidate_feature_normalization"]["scale"]
         == report["candidate_feature_normalization"]["scale"]
     )
+
+    mismatch = tmp_path / "ranked-mismatch.pt"
+    mismatched = subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp_ranker.py",
+            str(continuation_replay),
+            "--checkpoint",
+            str(ranked),
+            "--output",
+            str(mismatch),
+            "--steps",
+            "1",
+            "--device",
+            "cpu",
+            "--stage",
+            "initial",
+            "--objective-preset",
+            "v4b",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+    )
+    assert mismatched.returncode != 0
+    assert "same training objective" in mismatched.stderr
+
+
+def test_v4b_ranker_objective_changes_only_requested_weights() -> None:
+    record = _v3_record()
+    model = _feature_ranker_model()
+
+    default = ranker_loss_report(model, record, objective=RANKER_OBJECTIVES["default"])
+    v4b = ranker_loss_report(model, record, objective=RANKER_OBJECTIVES["v4b"])
+
+    expected = v4b.listwise + 0.50 * v4b.feasibility_order
+    assert v4b.combined.detach().item() == pytest.approx(float(expected.detach()))
+    assert v4b.pointwise.detach().item() == pytest.approx(default.pointwise.detach().item())
+    assert v4b.top_one.detach().item() == pytest.approx(default.top_one.detach().item())
+    assert v4b.combined.detach().item() != pytest.approx(default.combined.detach().item())
+
+
+@pytest.mark.parametrize("bad_weight", (-1.0, float("inf"), float("nan")))
+def test_ranker_objective_rejects_invalid_weights(bad_weight: float) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        type(RANKER_OBJECTIVES["default"])(
+            name="bad",
+            listwise=bad_weight,
+            feasibility_order=0.0,
+            pointwise=0.0,
+            top_one=0.0,
+        )
 
 
 def test_ranker_clis_reject_checkpoint_mismatch_and_split_leakage(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -112,6 +113,52 @@ class RankerLossReport:
             "listwise_weight_mean": float(self.listwise_weight_mean.detach()),
             "listwise_weight_max": float(self.listwise_weight_max.detach()),
         }
+
+
+@dataclass(frozen=True)
+class RankerObjective:
+    name: str
+    listwise: float
+    feasibility_order: float
+    pointwise: float
+    top_one: float
+
+    def __post_init__(self) -> None:
+        values = (self.listwise, self.feasibility_order, self.pointwise, self.top_one)
+        if not self.name:
+            raise ValueError("ranker objective name must be non-empty")
+        if any(not math.isfinite(value) or value < 0.0 for value in values):
+            raise ValueError("ranker objective weights must be finite and non-negative")
+        if not any(value > 0.0 for value in values):
+            raise ValueError("ranker objective must enable at least one loss term")
+
+    def as_metadata(self) -> dict[str, float | str]:
+        return {
+            "name": self.name,
+            "listwise": self.listwise,
+            "feasibility_order": self.feasibility_order,
+            "pointwise": self.pointwise,
+            "top_one": self.top_one,
+        }
+
+
+DEFAULT_RANKER_OBJECTIVE = RankerObjective(
+    name="ranker_post_repair_listwise_v3_feasibility_shadow",
+    listwise=1.0,
+    feasibility_order=0.25,
+    pointwise=0.05,
+    top_one=0.0,
+)
+RANKER_OBJECTIVES = {
+    "default": DEFAULT_RANKER_OBJECTIVE,
+    "v4b": RankerObjective(
+        name="ranker_post_repair_listwise_v4b_feasibility050_shadow",
+        listwise=1.0,
+        feasibility_order=0.50,
+        pointwise=0.0,
+        top_one=0.0,
+    ),
+}
 
 
 def official_replay_scores(
@@ -323,7 +370,12 @@ def ranker_loss(model: HCFPModel, record: ReplayRecord) -> Tensor:
     return ranker_loss_report(model, record).combined
 
 
-def ranker_loss_report(model: HCFPModel, record: ReplayRecord) -> RankerLossReport:
+def ranker_loss_report(
+    model: HCFPModel,
+    record: ReplayRecord,
+    *,
+    objective: RankerObjective = DEFAULT_RANKER_OBJECTIVE,
+) -> RankerLossReport:
     device = next(model.parameters()).device
     if record.candidate_features.shape[1] == model.config.candidate_metric_dim:
         features = record.candidate_features.detach().to(device=device, dtype=torch.float32)
@@ -340,10 +392,15 @@ def ranker_loss_report(model: HCFPModel, record: ReplayRecord) -> RankerLossRepo
     else:
         embedding = features.new_empty((0, 0))
     prediction = model.ranker(embedding, len(features), features)
-    return _ranker_loss_from_prediction(prediction, record)
+    return _ranker_loss_from_prediction(prediction, record, objective=objective)
 
 
-def _ranker_loss_from_prediction(prediction: Tensor, record: ReplayRecord) -> RankerLossReport:
+def _ranker_loss_from_prediction(
+    prediction: Tensor,
+    record: ReplayRecord,
+    *,
+    objective: RankerObjective = DEFAULT_RANKER_OBJECTIVE,
+) -> RankerLossReport:
     device = prediction.device
     target = record.target_score.to(device=device)
     target = (target - target.mean()) / target.std(unbiased=False).clamp_min(1.0e-6)
@@ -363,7 +420,12 @@ def _ranker_loss_from_prediction(prediction: Tensor, record: ReplayRecord) -> Ra
     oracle = torch.argmin(target_rank).reshape(1)
     top_one = F.cross_entropy(-prediction.unsqueeze(0), oracle)
     feasibility_order = _feasibility_order_loss(prediction, record, device=device)
-    combined = listwise + 0.25 * feasibility_order + 0.05 * pointwise
+    combined = (
+        objective.listwise * listwise
+        + objective.feasibility_order * feasibility_order
+        + objective.pointwise * pointwise
+        + objective.top_one * top_one
+    )
     return RankerLossReport(
         combined,
         listwise,
@@ -451,6 +513,7 @@ def train_ranker_steps(
     *,
     steps: int,
     report_components: bool = False,
+    objective: RankerObjective = DEFAULT_RANKER_OBJECTIVE,
 ) -> list[float] | list[dict[str, float]]:
     materialized = list(records)
     if not materialized or steps <= 0:
@@ -461,7 +524,11 @@ def train_ranker_steps(
     model.train()
     for index in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        report = ranker_loss_report(model, materialized[index % len(materialized)])
+        report = ranker_loss_report(
+            model,
+            materialized[index % len(materialized)],
+            objective=objective,
+        )
         report.combined.backward()
         torch.nn.utils.clip_grad_norm_(model.ranker.parameters(), max_norm=5.0)
         optimizer.step()
