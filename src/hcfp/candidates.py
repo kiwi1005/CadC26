@@ -24,11 +24,12 @@ def candidate_features(case: FloorplanCase, boxes: Tensor, anchor: Tensor) -> Te
     centers = centers_from_xywh(work)
     anchor_center = centers_from_xywh(anchor.to(device=work.device, dtype=torch.float32))
     displacement = torch.linalg.vector_norm(centers - anchor_center, dim=-1)
-    overlap = torch.triu(overlap_area_matrix(work), diagonal=1).sum(dim=(-2, -1))
+    overlap_upper = torch.triu(overlap_area_matrix(work), diagonal=1)
+    overlap = overlap_upper.sum(dim=(-2, -1))
+    overlap_pair_count = (overlap_upper > 0.0).sum(dim=(-2, -1)).to(dtype=torch.float32)
     hpwl = hpwl_tensor(case, centers)
     area = bbox_area_tensor(work)
     aspect = log_aspect_from_xywh(work).abs()
-    index = torch.linspace(0.0, 1.0, work.shape[0], device=work.device)
     return torch.stack(
         (
             torch.log1p(overlap),
@@ -38,7 +39,7 @@ def candidate_features(case: FloorplanCase, boxes: Tensor, anchor: Tensor) -> Te
             displacement.amax(dim=1),
             aspect.mean(dim=1),
             aspect.amax(dim=1),
-            index,
+            torch.log1p(overlap_pair_count),
         ),
         dim=1,
     ).float()
