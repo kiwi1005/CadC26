@@ -18,6 +18,7 @@ from hcfp.learned import (
     analyze_case_with_checkpoint,
     effective_collective_steps,
     effective_flow_steps,
+    effective_tail_topk,
     solve_case_with_checkpoint,
 )
 from hcfp.model import HCFPModel, ModelConfig
@@ -34,6 +35,12 @@ COLLECTIVE_METADATA = {
     "capabilities": {"collective": True},
     "trained_heads": ["collective"],
     "training_objective_version": "collective_loss_v1",
+}
+
+RANKER_METADATA = {
+    "capabilities": {"ranker": True},
+    "trained_heads": ["ranker"],
+    "training_objective_version": "ranker_loss_v1",
 }
 
 
@@ -361,6 +368,25 @@ def test_effective_collective_steps_requires_all_checkpoint_and_model_gates() ->
     assert effective_collective_steps(2, COLLECTIVE_METADATA, ModelConfig(hidden_dim=16)) == 0
 
 
+def test_effective_tail_topk_requires_ranker_capability_and_head() -> None:
+    assert effective_tail_topk(None, {}) is None
+    assert effective_tail_topk(1, RANKER_METADATA) == 1
+    assert (
+        effective_tail_topk(
+            1,
+            {**RANKER_METADATA, "capabilities": {"ranker": False}},
+        )
+        is None
+    )
+    assert (
+        effective_tail_topk(
+            1,
+            {**RANKER_METADATA, "trained_heads": []},
+        )
+        is None
+    )
+
+
 def test_effective_flow_steps_rejects_negative_requests_before_capability_gate() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         effective_flow_steps(-1, {"capabilities": {"flow": False}})
@@ -374,6 +400,11 @@ def test_effective_collective_steps_rejects_negative_requests_before_capability_
 def test_learned_config_rejects_negative_collective_steps() -> None:
     with pytest.raises(ValueError, match="collective_steps must be non-negative"):
         LearnedConfig(collective_steps=-1)
+
+
+def test_effective_tail_topk_rejects_nonpositive_requests() -> None:
+    with pytest.raises(ValueError, match="tail_topk must be positive"):
+        effective_tail_topk(0, RANKER_METADATA)
 
 
 def test_energy_history_merge_repeats_last_observation_for_shorter_tail() -> None:
@@ -630,7 +661,7 @@ def test_collective_default_off_preserves_selected_and_candidate_pool(tmp_path: 
     )
 
 
-def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:
+def test_untrained_ranker_request_does_not_prune_learned_candidates(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model.pt"
     save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
     config = LearnedConfig(analytic=_config(), tail_topk=1)
@@ -638,8 +669,42 @@ def test_ranker_prunes_only_learned_sidecar_candidates(tmp_path: Path) -> None:
     result = solve_case_with_checkpoint(_case(), checkpoint, config)
 
     assert result.used_checkpoint is True
-    assert result.candidate_count == 3
+    assert result.candidate_count == 4
     assert verify_feasible(_case(), result.selected)
+
+
+def test_trained_ranker_capability_prunes_learned_sidecar_candidates(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+        metadata=RANKER_METADATA,
+    )
+    config = LearnedConfig(analytic=_config(), tail_topk=1)
+
+    first = solve_case_with_checkpoint(_case(), checkpoint, config)
+    second = solve_case_with_checkpoint(_case(), checkpoint, config)
+
+    assert first.used_checkpoint is True
+    assert first.candidate_count == 3
+    assert torch.equal(first.selected, second.selected)
+    assert second.candidate_count == 3
+    assert verify_feasible(_case(), first.selected)
+
+
+def test_ranker_capability_requires_matching_trained_head(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="matching trained heads"):
+        save_checkpoint(
+            HCFPModel(ModelConfig(hidden_dim=16)),
+            tmp_path / "bad-ranker.pt",
+            RUNTIME_NORMALIZATION,
+            metadata={
+                "capabilities": {"ranker": True},
+                "trained_heads": [],
+                "training_objective_version": "ranker_loss_v1",
+            },
+        )
 
 
 def test_split_tail_preserves_standalone_analytic_candidates(tmp_path: Path) -> None:

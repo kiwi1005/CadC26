@@ -148,6 +148,28 @@ def effective_collective_steps(
     return 0
 
 
+def effective_tail_topk(
+    requested: int | None,
+    checkpoint_metadata: dict[str, Any],
+) -> int | None:
+    """Enable ranker pruning only when checkpoint metadata proves it is trained."""
+
+    if requested is None:
+        return None
+    if requested <= 0:
+        raise ValueError("tail_topk must be positive")
+    capabilities = checkpoint_metadata.get("capabilities", {})
+    trained_heads = checkpoint_metadata.get("trained_heads", [])
+    if (
+        isinstance(capabilities, dict)
+        and capabilities.get("ranker") is True
+        and isinstance(trained_heads, (list, tuple))
+        and "ranker" in trained_heads
+    ):
+        return requested
+    return None
+
+
 def solve_case_with_checkpoint(
     case: FloorplanCase,
     checkpoint: str | Path,
@@ -176,6 +198,7 @@ def analyze_case_with_checkpoint(
         learned_cfg = replace(
             learned_cfg,
             flow_steps=effective_flow_steps(learned_cfg.flow_steps, metadata),
+            tail_topk=effective_tail_topk(learned_cfg.tail_topk, metadata),
             collective_steps=effective_collective_steps(
                 learned_cfg.collective_steps,
                 metadata,
