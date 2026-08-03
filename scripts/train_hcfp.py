@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import replace
+from dataclasses import asdict, replace
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -24,6 +25,7 @@ from hcfp.training import ExponentialMovingAverage, TRAINING_STAGES, train_steps
 
 
 def main(argv: list[str] | None = None) -> int:
+    command_args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("shards", nargs="*", help="input .tar shards")
     parser.add_argument("--floorset-lite-root", help="direct official training root; avoids copied shards")
@@ -35,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--population", type=int, default=8)
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--encoder-layers", type=int, default=3)
+    parser.add_argument(
+        "--topology",
+        action="store_true",
+        default=None,
+        help="opt in to typed membership messages and the dual-permutation head",
+    )
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--amp", choices=("off", "bf16"), default="bf16")
     parser.add_argument("--ema-decay", type=float, default=0.999)
@@ -42,12 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(command_args)
 
     torch.manual_seed(args.seed)
     device = select_device(args.device)
     if bool(args.shards) == bool(args.floorset_lite_root):
         raise ValueError("provide either shards or --floorset-lite-root")
+    if args.sample_limit is not None and args.sample_limit <= 0:
+        raise ValueError("--sample-limit must be positive")
     manifests = [read_shard_manifest(path) for path in args.shards]
     for manifest in manifests:
         provenance = manifest.get("provenance", {})
@@ -60,20 +70,29 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("training shard provenance is missing a validation denylist checksum")
     sample_count = sum(len(manifest.get("samples", [])) for manifest in manifests) if manifests else args.sample_limit
 
+    consumed_sample_ids: list[str] = []
+
     def training_samples():
         if args.floorset_lite_root:
-            yield from iter_floorset_lite(
+            stream = iter_floorset_lite(
                 args.floorset_lite_root,
                 limit=args.sample_limit,
                 seed=args.seed,
                 score_aware=args.sampling == "score-aware",
             )
-            return
-        for path in args.shards:
-            for sample in iter_shard(path):
-                if sample.sample_id.lower().startswith(("validation-", "val-", "official/")):
-                    raise ValueError(f"official validation-like sample ID is forbidden: {sample.sample_id}")
-                yield sample
+        else:
+            stream = (
+                sample
+                for path in args.shards
+                for sample in iter_shard(path)
+            )
+        for sample in stream:
+            if sample.sample_id.lower().startswith(("validation-", "val-", "official/")):
+                raise ValueError(
+                    f"official validation-like sample ID is forbidden: {sample.sample_id}"
+                )
+            consumed_sample_ids.append(sample.sample_id)
+            yield sample
 
     compute_dtype = "bfloat16" if args.amp == "bf16" else "float32"
     if args.init_checkpoint:
@@ -82,15 +101,37 @@ def main(argv: list[str] | None = None) -> int:
             expected_normalization=RUNTIME_NORMALIZATION,
             map_location="cpu",
         )
-        config = replace(loaded.config, compute_dtype=compute_dtype)
+        topology_enabled = (
+            loaded.config.topology_enabled
+            if args.topology is None
+            else args.topology
+        )
+        config = replace(
+            loaded.config,
+            compute_dtype=compute_dtype,
+            topology_enabled=topology_enabled,
+        )
         model = HCFPModel(config)
-        model.load_state_dict(loaded.state_dict(), strict=True)
+        incompatible = model.load_state_dict(loaded.state_dict(), strict=False)
+        topology_prefixes = (
+            "topology.",
+            "encoder.group_message.",
+            "encoder.mib_message.",
+        )
+        invalid = [
+            name
+            for name in (*incompatible.missing_keys, *incompatible.unexpected_keys)
+            if not name.startswith(topology_prefixes)
+        ]
+        if invalid:
+            raise ValueError(f"init checkpoint state mismatch: {invalid}")
     else:
         model = HCFPModel(
             ModelConfig(
                 hidden_dim=args.hidden_dim,
                 encoder_layers=args.encoder_layers,
                 compute_dtype=compute_dtype,
+                topology_enabled=bool(args.topology),
             )
         )
     model = model.to(device)
@@ -112,22 +153,47 @@ def main(argv: list[str] | None = None) -> int:
         ema=ema,
         on_step=checkpoint_step,
     )
+    if len(consumed_sample_ids) != args.steps:
+        raise RuntimeError(
+            f"training consumed {len(consumed_sample_ids)} samples for {args.steps} steps"
+        )
     if ema is not None:
         ema.copy_to(model)
     checkpoint_hash = save_checkpoint(model, args.output, RUNTIME_NORMALIZATION)
+    unique_sample_ids = sorted(set(consumed_sample_ids))
+    direct_stream = None
+    if args.floorset_lite_root:
+        direct_stream = {
+            "root": str(Path(args.floorset_lite_root).resolve()),
+            "sampling": args.sampling,
+            "seed": args.seed,
+            "source_limit": args.sample_limit,
+            "max_layouts_per_file": None,
+            "consumed_count": len(consumed_sample_ids),
+            "ordered_sample_id_count": len(consumed_sample_ids),
+            "ordered_sample_id_sha256": _sample_id_hash(consumed_sample_ids),
+            "unique_sample_id_count": len(unique_sample_ids),
+            "unique_sample_id_sha256": _sample_id_hash(unique_sample_ids),
+            "checkpoint_hash": checkpoint_hash,
+        }
     report = {
-        "schema_version": 1,
-        "checkpoint": str(Path(args.output)),
+        "schema_version": 2,
+        "command": ["scripts/train_hcfp.py", *command_args],
+        "checkpoint": str(Path(args.output).resolve()),
         "checkpoint_hash": checkpoint_hash,
+        "model_config": asdict(model.config),
         "stage": args.stage,
         "steps": args.steps,
         "population": args.population,
+        "seed": args.seed,
         "device": str(device),
         "compute_dtype": compute_dtype,
+        "topology_enabled": model.config.topology_enabled,
         "ema_decay": args.ema_decay if ema is not None else None,
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,
         "sampling": args.sampling,
+        "direct_floorset_lite_stream": direct_stream,
         "shards": [{"path": str(path), "sha256": file_sha256(path)} for path in args.shards],
         "floorset_lite_root": args.floorset_lite_root,
         "first_loss": history[0],
@@ -137,6 +203,10 @@ def main(argv: list[str] | None = None) -> int:
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
+
+
+def _sample_id_hash(sample_ids: list[str]) -> str:
+    return hashlib.sha256("\n".join(sample_ids).encode()).hexdigest()
 
 
 if __name__ == "__main__":

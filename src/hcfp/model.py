@@ -12,6 +12,7 @@ import torch
 from torch import nn
 
 from hcfp.case import FloorplanCase
+from hcfp.topology import DualPermutationHead
 
 
 Tensor = torch.Tensor
@@ -28,6 +29,7 @@ class ModelConfig:
     force_channels: int = 7
     candidate_metric_dim: int = 8
     compute_dtype: str = "float32"
+    topology_enabled: bool = False
 
     def __post_init__(self) -> None:
         if self.hidden_dim <= 0 or self.encoder_layers <= 0:
@@ -50,6 +52,38 @@ class ModelOutput:
     flow_velocity: Tensor
     force_gates: Tensor
     rank_score: Tensor
+    positive_permutation: Tensor | None = None
+    negative_permutation: Tensor | None = None
+
+
+def soft_sequence_pair_relation_logits(positive: Tensor, negative: Tensor) -> Tensor:
+    """Convert two soft rank assignments into differentiable L/R/U/D logits."""
+
+    plus = torch.as_tensor(positive)
+    minus = torch.as_tensor(negative, device=plus.device)
+    if plus.shape != minus.shape or plus.ndim < 2 or plus.shape[-1] != plus.shape[-2]:
+        raise ValueError("soft permutations must have matching [...,N,N] shapes")
+    if not torch.is_floating_point(plus) or not torch.is_floating_point(minus):
+        raise ValueError("soft permutations must be floating point")
+    n = plus.shape[-1]
+    before_rank = torch.triu(
+        torch.ones((n, n), dtype=plus.dtype, device=plus.device),
+        diagonal=1,
+    )
+    plus_before = plus @ before_rank @ plus.transpose(-1, -2)
+    minus_before = minus @ before_rank @ minus.transpose(-1, -2)
+    plus_after = plus_before.transpose(-1, -2)
+    minus_after = minus_before.transpose(-1, -2)
+    probabilities = torch.stack(
+        (
+            plus_before * minus_before,
+            plus_after * minus_after,
+            plus_before * minus_after,
+            plus_after * minus_before,
+        ),
+        dim=-1,
+    )
+    return probabilities.clamp_min(torch.finfo(probabilities.dtype).tiny).log()
 
 
 def _mlp(width: int, layers: int) -> nn.Sequential:
@@ -67,6 +101,9 @@ class SceneEncoder(nn.Module):
         self.config = config
         self.input = nn.Linear(_NODE_FEATURES, config.hidden_dim)
         self.message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        if config.topology_enabled:
+            self.group_message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+            self.mib_message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
         self.layers = _mlp(config.hidden_dim, config.encoder_layers)
 
     def forward(self, case: FloorplanCase) -> Tensor:
@@ -74,9 +111,25 @@ class SceneEncoder(nn.Module):
         hidden = self.input(features)
         weights = case.b2b_weight.to(device=hidden.device, dtype=hidden.dtype)
         weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1.0)
+        if self.config.topology_enabled:
+            typed_weights = []
+            for membership in (case.group_membership, case.mib_membership):
+                adjacency = torch.zeros_like(weights)
+                if membership.numel():
+                    active = membership.to(device=hidden.device, dtype=hidden.dtype)
+                    adjacency = active.transpose(0, 1) @ active
+                    adjacency.fill_diagonal_(0.0)
+                    adjacency = (adjacency > 0.0).to(dtype=hidden.dtype)
+                typed_weights.append(
+                    adjacency / adjacency.sum(dim=1, keepdim=True).clamp_min(1.0)
+                )
         for layer in self.layers:
             if isinstance(layer, nn.LayerNorm):
-                hidden = hidden + self.message(weights @ hidden)
+                message = self.message(weights @ hidden)
+                if self.config.topology_enabled:
+                    message = message + self.group_message(typed_weights[0] @ hidden)
+                    message = message + self.mib_message(typed_weights[1] @ hidden)
+                hidden = hidden + message
             hidden = layer(hidden)
         return hidden.float()
 
@@ -261,6 +314,8 @@ class HCFPModel(nn.Module):
         self.flow = RectifiedFlowHead(self.config)
         self.gates = TypedForceGateController(self.config)
         self.ranker = RepairAwareRanker(self.config)
+        if self.config.topology_enabled:
+            self.topology = DualPermutationHead(self.config.hidden_dim)
 
     def forward(
         self,
@@ -277,17 +332,23 @@ class HCFPModel(nn.Module):
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=enabled):
             embedding = self.encoder(case)
             precedence, outline = self.structure(case, embedding)
+            positive: Tensor | None = None
+            negative: Tensor | None = None
+            if self.config.topology_enabled:
+                positive, negative = self.topology(embedding, case.block_mask)
             center, aspect = self.initializer(case, embedding, population)
             flow_velocity = self.flow(case, embedding, population, flow_state, flow_time)
             gates = self.gates(embedding, population, step_fraction)
             score = self.ranker(embedding, population, candidate_metrics)
         return ModelOutput(
-            embedding.float(),
-            precedence.float(),
-            outline.float(),
-            center.float(),
-            aspect.float(),
-            flow_velocity.float(),
-            gates.float(),
-            score.float(),
+            embedding=embedding.float(),
+            precedence_logits=precedence.float(),
+            outline=outline.float(),
+            center_residual=center.float(),
+            log_aspect_residual=aspect.float(),
+            flow_velocity=flow_velocity.float(),
+            force_gates=gates.float(),
+            rank_score=score.float(),
+            positive_permutation=(positive.float() if positive is not None else None),
+            negative_permutation=(negative.float() if negative is not None else None),
         )

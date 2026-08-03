@@ -3,7 +3,21 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: approved for staged implementation
+Status: Q0 and Q1 verified; Q2 is the active next stage
+
+## Execution checkpoint
+
+- Q0 exact cap attribution is committed and does not change runtime selection.
+- Q1 structure now drives opt-in, cycle-free candidate geometry and passes the
+  disjoint large-case internal held-out gate.
+- The Q1 gate uses 16 samples from 16 FloorSet-Lite source files, spans
+  107--120 blocks, reconstructs and excludes the exact 1,000 samples consumed
+  from the configured 2,048-sample source stream, and records `+24.3934`
+  weighted post-BDP topology-oracle gain with 512/512 hard-feasible
+  topology-stage records. The training report is bound to checkpoint state hash
+  `48ba552c518f...` and any provenance mismatch fails closed.
+- Q2 contact, boundary, and MIB construction is now the next implementation
+  boundary. Q3 remains gated on Q2 increasing useful candidate density.
 
 ## Decision
 
@@ -350,4 +364,3 @@ official ICCAD contest schedule. Source URLs are preserved below for audit:
 13. https://proceedings.neurips.cc/paper_files/paper/2024/hash/fe224a60b878e79d5b3d79d7f113f76b-Abstract-Conference.html
 14. https://proceedings.mlr.press/v267/lee25y.html
 15. https://www.iccad-contest.org/index.html
-

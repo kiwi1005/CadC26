@@ -13,6 +13,8 @@ from hcfp.topology import (
     REL_RIGHT,
     DualPermutationHead,
     adapt_preplaced_topology,
+    anchor_safe_order_variants,
+    anchored_longest_path_coordinates,
     antisymmetry_loss,
     check_preplaced_compatibility,
     copy_preplaced_targets,
@@ -21,6 +23,7 @@ from hcfp.topology import (
     hard_permutation,
     longest_path_coordinates,
     pack_sequence_pair,
+    pack_sequence_pair_with_anchors,
     partial_label_nll,
     relation_mask_from_rectangles,
     sinkhorn,
@@ -185,6 +188,149 @@ def test_longest_path_rejects_cycle() -> None:
         )
 
 
+def test_anchored_longest_path_moves_predecessors_before_exact_anchor() -> None:
+    coordinates = anchored_longest_path_coordinates(
+        torch.ones(3),
+        torch.tensor(((0, 1), (1, 2))),
+        fixed_coordinates=torch.tensor((0.0, 0.0, 0.0)),
+        fixed_mask=torch.tensor((False, True, False)),
+        origin=0.0,
+    )
+
+    assert coordinates.tolist() == [-1.0, 0.0, 1.0]
+
+
+def test_anchored_sequence_pack_preserves_topology_and_preplaced_target() -> None:
+    dimensions = torch.ones((3, 2))
+    positive = torch.tensor((0, 1, 2))
+    negative = torch.tensor((0, 1, 2))
+    targets = torch.tensor(
+        (
+            (0.0, 0.0, 0.0, 0.0),
+            (0.0, 3.0, 1.0, 1.0),
+            (0.0, 0.0, 0.0, 0.0),
+        )
+    )
+    mask = torch.tensor((False, True, False))
+
+    rectangles = pack_sequence_pair_with_anchors(
+        dimensions,
+        positive,
+        negative,
+        targets,
+        mask,
+    )
+
+    assert torch.equal(rectangles[mask], targets[mask])
+    assert rectangles[:, 0].tolist() == [-1.0, 0.0, 1.0]
+    topology = decode_sequence_pair(positive, negative)
+    realized = relation_mask_from_rectangles(rectangles)
+    first, second = torch.where(~torch.eye(3, dtype=torch.bool))
+    assert realized[first, second, topology.relation[first, second]].all()
+
+
+def test_anchored_sequence_pack_rejects_incompatible_targets() -> None:
+    with pytest.raises(ValueError, match="contradict"):
+        pack_sequence_pair_with_anchors(
+            torch.ones((2, 2)),
+            torch.tensor((0, 1)),
+            torch.tensor((0, 1)),
+            torch.tensor(((2.0, 0.0, 1.0, 1.0), (0.0, 0.0, 1.0, 1.0))),
+            torch.ones(2, dtype=torch.bool),
+        )
+
+
+def test_anchored_sequence_pack_can_leave_numerical_spacing() -> None:
+    rectangles = pack_sequence_pair_with_anchors(
+        torch.ones((2, 2)),
+        torch.tensor((0, 1)),
+        torch.tensor((0, 1)),
+        torch.zeros((2, 4)),
+        torch.zeros(2, dtype=torch.bool),
+        spacing=1.0e-5,
+    )
+
+    gap = float(rectangles[1, 0] - (rectangles[0, 0] + rectangles[0, 2]))
+    assert gap == pytest.approx(1.0e-5, abs=2.0e-8)
+
+
+def test_anchor_safe_variants_recover_movable_mediated_paths_deterministically() -> None:
+    dimensions = torch.ones((6, 2))
+    positive = torch.tensor((0, 1, 2, 3, 4, 5))
+    negative = torch.tensor((0, 1, 2, 5, 4, 3))
+    preplaced = torch.tensor((True, False, True, True, False, True))
+    safe_positive = torch.tensor((0, 2, 3, 5, 1, 4))
+    safe_negative = torch.tensor((0, 2, 5, 3, 1, 4))
+    targets = torch.zeros((6, 4))
+    targets[preplaced] = pack_sequence_pair(
+        dimensions,
+        safe_positive,
+        safe_negative,
+    )[preplaced]
+    original = decode_sequence_pair(positive, negative)
+
+    assert (0, 1) in map(tuple, original.horizontal_edges.tolist())
+    assert (1, 2) in map(tuple, original.horizontal_edges.tolist())
+    assert (5, 4) in map(tuple, original.vertical_edges.tolist())
+    assert (4, 3) in map(tuple, original.vertical_edges.tolist())
+    with pytest.raises(ValueError, match="contradict"):
+        pack_sequence_pair_with_anchors(
+            dimensions,
+            positive,
+            negative,
+            targets,
+            preplaced,
+            spacing=1.0e-5,
+        )
+
+    first = anchor_safe_order_variants(positive, negative, preplaced)
+    second = anchor_safe_order_variants(positive, negative, preplaced)
+
+    assert len(first) == 4
+    assert [variant.name for variant in first] == [variant.name for variant in second]
+    assert [variant.positive.tolist() for variant in first] == [
+        variant.positive.tolist() for variant in second
+    ]
+    assert [variant.negative.tolist() for variant in first] == [
+        variant.negative.tolist() for variant in second
+    ]
+    accepted = []
+    for variant in first:
+        assert variant.positive[preplaced[variant.positive]].tolist() == [0, 2, 3, 5]
+        assert variant.negative[preplaced[variant.negative]].tolist() == [0, 2, 5, 3]
+        assert variant.positive[~preplaced[variant.positive]].tolist() == [1, 4]
+        assert variant.negative[~preplaced[variant.negative]].tolist() == [1, 4]
+        topology = decode_sequence_pair(variant.positive, variant.negative)
+        assert _is_acyclic(6, topology.horizontal_edges)
+        assert _is_acyclic(6, topology.vertical_edges)
+        candidate = pack_sequence_pair_with_anchors(
+            dimensions,
+            variant.positive,
+            variant.negative,
+            targets,
+            preplaced,
+            spacing=1.0e-5,
+        )
+        realized = relation_mask_from_rectangles(candidate)
+        pair = ~torch.eye(6, dtype=torch.bool)
+        assert realized.gather(-1, topology.relation.clamp_min(0).unsqueeze(-1))[
+            pair
+        ].all()
+        assert torch.equal(candidate[preplaced], targets[preplaced])
+        accepted.append(candidate)
+    assert accepted
+
+
+def test_anchor_safe_variants_do_not_duplicate_unanchored_order() -> None:
+    order = torch.tensor((2, 0, 1))
+
+    assert anchor_safe_order_variants(
+        order,
+        order.flip(0),
+        torch.zeros(3, dtype=torch.bool),
+    ) == ()
+
+
 def test_low_confidence_preplaced_conflict_repairs_and_rechecks() -> None:
     positive = torch.tensor((1, 0, 2))
     negative = torch.tensor((1, 0, 2))
@@ -214,6 +360,42 @@ def test_low_confidence_preplaced_conflict_repairs_and_rechecks() -> None:
     )
     assert check_preplaced_compatibility(*repaired, targets, mask).compatible
     assert torch.equal(targets, original_targets)
+
+
+def test_preplaced_repair_can_rechoose_low_confidence_ambiguous_anchor_relation() -> None:
+    positive = torch.tensor((0, 1, 2))
+    negative = torch.tensor((1, 0, 2))
+    targets = torch.tensor(
+        (
+            (2.0, 2.0, 2.0, 1.0),
+            (0.0, 0.0, 1.0, 1.0),
+            (2.0, 4.0, 2.0, 1.0),
+        )
+    )
+    mask = torch.ones(3, dtype=torch.bool)
+    confidence = torch.zeros((3, 3, 4))
+    confidence[0, 1, REL_ABOVE] = 0.49
+    confidence[1, 0, REL_BELOW] = 0.49
+    confidence[1, 2, REL_LEFT] = 0.10
+    confidence[2, 1, REL_RIGHT] = 0.10
+    confidence[0, 2, REL_LEFT] = 0.10
+    confidence[2, 0, REL_RIGHT] = 0.10
+    before = decode_sequence_pair(positive, negative).relation
+
+    repaired = adapt_preplaced_topology(
+        positive,
+        negative,
+        targets,
+        mask,
+        relation_confidence=confidence,
+    )
+    after = decode_sequence_pair(*repaired).relation
+
+    assert check_preplaced_compatibility(*repaired, targets, mask).compatible
+    assert int(after[0, 2]) == REL_BELOW
+    assert int(after[0, 1]) != int(before[0, 1]) or int(after[1, 2]) != int(
+        before[1, 2]
+    )
 
 
 def test_preplaced_adaptation_rejects_unsafe_repairs() -> None:
@@ -285,7 +467,8 @@ def test_preplaced_adaptation_preserves_nonconflicting_movable_relations() -> No
         )
     )
     mask = torch.tensor((True, True, False))
-    confidence = torch.zeros((3, 3))
+    confidence = torch.full((3, 3), 0.9)
+    confidence[0, 1] = confidence[1, 0] = 0.1
     before = decode_sequence_pair(positive, negative).relation
 
     repaired = adapt_preplaced_topology(

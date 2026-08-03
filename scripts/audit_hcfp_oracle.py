@@ -21,7 +21,9 @@ from hcfp.analytic import AnalyticConfig, select_device, to_official_placements 
 from hcfp.benchmark import (  # noqa: E402
     candidate_oracles,
     candidate_source_layout,
+    select_candidate_oracle,
     summarize_attribution_cases,
+    summarize_candidate_types,
     uncapped_objective,
 )
 from hcfp.case import from_official  # noqa: E402
@@ -51,6 +53,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--flow-steps", type=int, default=6)
     parser.add_argument("--flow-seed", type=int, default=0)
+    parser.add_argument("--topology-seeds", type=int, default=0)
+    parser.add_argument(
+        "--allow-missing-topology",
+        action="store_true",
+        help="diagnostic only: keep cases whose requested topology decode was rejected",
+    )
     parser.add_argument("--tail-topk", type=int)
     args = parser.parse_args(argv)
 
@@ -75,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         flow_steps=args.flow_steps,
         tail_topk=args.tail_topk,
         seed=args.flow_seed,
+        topology_seeds=args.topology_seeds,
     )
 
     data_path = Path(args.data_path)
@@ -93,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             device,
             config,
             args.population,
+            args.allow_missing_topology,
         )
         for test_id in test_ids
     ]
@@ -115,12 +125,14 @@ def main(argv: list[str] | None = None) -> int:
             "direction_beam": args.direction_beam,
             "flow_steps": args.flow_steps,
             "flow_seed": args.flow_seed,
+            "topology_seeds": args.topology_seeds,
+            "allow_missing_topology": args.allow_missing_topology,
             "tail_topk": args.tail_topk,
         },
         "cases": cases,
         "summary": {
-            "all": summarize_attribution_cases(cases),
-            "106-120": summarize_attribution_cases(large_cases),
+            "all": _summary(cases),
+            "106-120": _summary(large_cases),
         },
     }
     output = Path(args.output)
@@ -140,6 +152,7 @@ def _audit_case(
     device: torch.device,
     config: LearnedConfig,
     population: int,
+    allow_missing_topology: bool,
 ) -> dict[str, Any]:
     sample = evaluator.dataset[test_id]
     inputs, labels = sample["input"], sample["label"]
@@ -178,6 +191,19 @@ def _audit_case(
         raise RuntimeError(
             f"case {test_id}: {analysis.result.failure_reason or 'checkpoint was not used'}"
         )
+    if (
+        config.topology_seeds > 0
+        and analysis.result.topology_seed_count != config.topology_seeds
+        and not allow_missing_topology
+    ):
+        reason = analysis.analytic.incumbent_snapshot.get(
+            "topology_seed_failure_reason",
+            "topology decode produced an incomplete candidate set",
+        )
+        raise RuntimeError(
+            f"case {test_id}: requested {config.topology_seeds} topology seeds, "
+            f"produced {analysis.result.topology_seed_count}: {reason}"
+        )
 
     learned_count = analysis.result.candidate_count - population
     sources = candidate_source_layout(population, learned_count)
@@ -188,6 +214,8 @@ def _audit_case(
             f"case {test_id}: source layout {len(sources)} does not match "
             f"raw/projected candidates {tuple(raw.shape)}/{tuple(projected.shape)}"
         )
+    snapshot = analysis.analytic.incumbent_snapshot
+    topology_indices = _topology_indices(snapshot.get("topology_seed_sources"))
     metric_args = (baseline, constraints, b2b, p2b, pins, area, target_positions)
     raw_records = _candidate_records(
         evaluator_module,
@@ -195,6 +223,7 @@ def _audit_case(
         case,
         raw,
         sources,
+        topology_indices,
         metric_args,
     )
     projected_records = _candidate_records(
@@ -203,10 +232,11 @@ def _audit_case(
         case,
         projected,
         sources,
+        topology_indices,
         metric_args,
     )
     incumbent_index, incumbent_source = _incumbent_source(
-        analysis.analytic.incumbent_snapshot.get("exact_source"),
+        snapshot.get("exact_source"),
         sources,
     )
     incumbent = _candidate_record(
@@ -216,6 +246,7 @@ def _audit_case(
         analysis.result.selected,
         incumbent_index,
         incumbent_source,
+        topology_indices,
         metric_args,
     )
     return {
@@ -228,12 +259,18 @@ def _audit_case(
         "candidate_layout": {
             "population": population,
             "learned_count": learned_count,
+            "topology_count": len(topology_indices) // 2,
             "candidate_count": len(sources),
         },
-        "raw": {"candidates": raw_records, "oracles": candidate_oracles(raw_records)},
+        "topology_provenance": {
+            key: value
+            for key, value in snapshot.items()
+            if str(key).startswith("topology_")
+        },
+        "raw": {"candidates": raw_records, "oracles": _oracles(raw_records)},
         "post_bdp": {
             "candidates": projected_records,
-            "oracles": candidate_oracles(projected_records),
+            "oracles": _oracles(projected_records),
         },
         "incumbent": incumbent,
     }
@@ -258,6 +295,7 @@ def _candidate_records(
     case: Any,
     boxes: torch.Tensor,
     sources: tuple[str, ...],
+    topology_indices: frozenset[int],
     metric_args: tuple[Any, ...],
 ) -> list[dict[str, Any]]:
     return [
@@ -268,6 +306,7 @@ def _candidate_records(
             candidate,
             index,
             candidate_source,
+            topology_indices,
             metric_args,
         )
         for index, (candidate_source, candidate) in enumerate(zip(sources, boxes))
@@ -281,6 +320,7 @@ def _candidate_record(
     candidate: torch.Tensor,
     index: int,
     candidate_source: str,
+    topology_indices: frozenset[int],
     metric_args: tuple[Any, ...],
 ) -> dict[str, Any]:
     positions = to_official_placements(source, case, candidate.detach().to(device="cpu"))
@@ -297,13 +337,56 @@ def _candidate_record(
     return {
         "candidate_index": int(index),
         "source": candidate_source,
+        "candidate_type": (
+            "topology"
+            if index in topology_indices
+            else "fallback"
+            if index == 0
+            else "learned_residual"
+            if candidate_source.startswith("learned_")
+            else "analytic"
+        ),
         "hard_feasible": bool(metrics.is_feasible),
+        "overlap_violations": int(metrics.overlap_violations),
+        "area_violations": int(metrics.area_violations),
+        "dimension_violations": int(metrics.dimension_violations),
+        "fixed_violations": int(metrics.fixed_violations),
+        "preplaced_violations": int(metrics.preplaced_violations),
         "hpwl_gap": float(metrics.hpwl_gap),
         "area_gap": float(metrics.area_gap),
+        "boundary_violations": int(metrics.boundary_violations),
+        "grouping_violations": int(metrics.grouping_violations),
+        "mib_violations": int(metrics.mib_violations),
+        "total_soft_violations": int(metrics.total_soft_violations),
+        "max_possible_violations": int(metrics.max_possible_violations),
         "violations_relative": float(metrics.violations_relative),
         "official_capped_cost": float(metrics.cost),
         "uncapped_objective": objective,
     }
+
+
+def _topology_indices(value: object) -> frozenset[int]:
+    indices: set[int] = set()
+    for source in value if isinstance(value, (list, tuple)) else ():
+        text = str(source)
+        if text.startswith("candidate_"):
+            indices.add(int(text.removeprefix("candidate_")))
+    return frozenset(indices)
+
+
+def _oracles(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    result = candidate_oracles(candidates)
+    topology = [row for row in candidates if row["candidate_type"] == "topology"]
+    residual = [row for row in candidates if row["candidate_type"] == "learned_residual"]
+    result["topology"] = select_candidate_oracle(topology)
+    result["learned_residual"] = select_candidate_oracle(residual)
+    return result
+
+
+def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    result = summarize_attribution_cases(cases)
+    result["candidate_types"] = summarize_candidate_types(cases)
+    return result
 
 
 def _incumbent_source(exact_source: object, sources: tuple[str, ...]) -> tuple[int, str]:

@@ -19,6 +19,7 @@ from hcfp.topology.sequence_pair import decode_sequence_pair
 
 
 Tensor = torch.Tensor
+MAX_REPAIR_SEARCH_STATES = 4096
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,13 @@ class PreplacedConflict:
 class PreplacedCompatibility:
     compatible: bool
     conflicts: tuple[PreplacedConflict, ...]
+
+
+@dataclass(frozen=True)
+class AnchorSafeOrderVariant:
+    name: str
+    positive: Tensor
+    negative: Tensor
 
 
 def check_preplaced_compatibility(
@@ -67,6 +75,58 @@ def check_preplaced_compatibility(
                 conflicts.append(PreplacedConflict(first, second, predicted, valid))
     result = tuple(conflicts)
     return PreplacedCompatibility(not result, result)
+
+
+def anchor_safe_order_variants(
+    positive: Tensor,
+    negative: Tensor,
+    preplaced_mask: Tensor,
+) -> tuple[AnchorSafeOrderVariant, ...]:
+    """Group anchors before/after movables without changing within-group order."""
+
+    plus = torch.as_tensor(positive, dtype=torch.long)
+    minus = torch.as_tensor(negative, dtype=torch.long, device=plus.device)
+    topology = decode_sequence_pair(plus, minus)
+    if not bool(topology.active_mask.all()):
+        raise ValueError("anchor-safe variants require permutations of every block")
+    mask = torch.as_tensor(preplaced_mask, dtype=torch.bool, device=plus.device)
+    if mask.shape != topology.active_mask.shape:
+        raise ValueError("preplaced_mask must have shape [N]")
+    if not bool(mask.any()) or bool(mask.all()):
+        return ()
+
+    def grouped(order: Tensor, anchors_first: bool) -> Tensor:
+        anchors = order[mask[order]]
+        movable = order[~mask[order]]
+        parts = (anchors, movable) if anchors_first else (movable, anchors)
+        return torch.cat(parts)
+
+    original = (tuple(plus.tolist()), tuple(minus.tolist()))
+    seen = {original}
+    variants = []
+    for positive_prefix, negative_prefix in (
+        (True, True),
+        (True, False),
+        (False, True),
+        (False, False),
+    ):
+        variant_plus = grouped(plus, positive_prefix)
+        variant_minus = grouped(minus, negative_prefix)
+        key = (tuple(variant_plus.tolist()), tuple(variant_minus.tolist()))
+        if key in seen:
+            continue
+        seen.add(key)
+        variants.append(
+            AnchorSafeOrderVariant(
+                name=(
+                    f"positive_{'prefix' if positive_prefix else 'suffix'}_"
+                    f"negative_{'prefix' if negative_prefix else 'suffix'}"
+                ),
+                positive=variant_plus,
+                negative=variant_minus,
+            )
+        )
+    return tuple(variants)
 
 
 def adapt_preplaced_topology(
@@ -125,24 +185,70 @@ def adapt_preplaced_topology(
     )
     gaps = _relation_gaps(targets)
     pending: list[PreplacedConflict] = []
+    reserved_pairs: set[tuple[int, int]] = set()
+    preplaced_indices = torch.nonzero(mask, as_tuple=False).flatten().tolist()
+    for offset, first in enumerate(preplaced_indices):
+        for second in preplaced_indices[offset + 1 :]:
+            predicted = int(topology.relation[first, second])
+            choices = tuple(
+                int(value)
+                for value in torch.nonzero(
+                    allowed[first, second], as_tuple=False
+                ).flatten()
+            )
+            conflict = conflict_pairs.get((first, second))
+            confidence_value = _relation_confidence_value(
+                confidence,
+                first,
+                second,
+                predicted,
+            )
+            if len(choices) == 1:
+                _add_relation_edges(
+                    plus_edges,
+                    minus_edges,
+                    first,
+                    second,
+                    choices[0],
+                )
+                reserved_pairs.add((first, second))
+            elif conflict is not None or confidence_value <= repair_threshold:
+                pending.append(
+                    PreplacedConflict(first, second, predicted, choices)
+                )
+                reserved_pairs.add((first, second))
+
     for first in range(targets.shape[0]):
         for second in range(first + 1, targets.shape[0]):
-            conflict = conflict_pairs.get((first, second))
-            if conflict is not None:
-                pending.append(conflict)
+            if (first, second) in reserved_pairs:
                 continue
             relation = int(topology.relation[first, second])
-            _add_relation_edges(plus_edges, minus_edges, first, second, relation)
+            both_preplaced = bool(mask[first] and mask[second])
+            relation_confidence_value = _relation_confidence_value(
+                confidence,
+                first,
+                second,
+                relation,
+            )
+            if both_preplaced or relation_confidence_value > repair_threshold:
+                _add_relation_edges(plus_edges, minus_edges, first, second, relation)
 
-    # ponytail: this is greedy and may conservatively reject a repair that bounded
-    # backtracking could find; add that search only with rejected-case evidence.
+    if not _acyclic(targets.shape[0], plus_edges) or not _acyclic(
+        targets.shape[0], minus_edges
+    ):
+        raise ValueError(
+            "high-confidence relations contradict exact preplaced constraints"
+        )
+
     pending.sort(
         key=lambda item: (
+            len(item.allowed),
             _predicted_confidence(confidence, item),
             item.first,
             item.second,
         )
     )
+    pending_choices: list[tuple[int, ...]] = []
     for conflict in pending:
         candidates = (
             torch.nonzero(allowed[conflict.first, conflict.second], as_tuple=False)
@@ -151,14 +257,26 @@ def adapt_preplaced_topology(
         )
         candidates.sort(
             key=lambda relation: (
+                int(relation != conflict.predicted),
                 -float(gaps[conflict.first, conflict.second, relation]),
                 int(relation),
             )
         )
-        repaired = False
-        for relation in candidates:
-            plus_trial = set(plus_edges)
-            minus_trial = set(minus_edges)
+        pending_choices.append(tuple(int(relation) for relation in candidates))
+
+    stack = [(0, plus_edges, minus_edges)]
+    repaired_edges: tuple[set[tuple[int, int]], set[tuple[int, int]]] | None = None
+    states = 0
+    while stack and states < MAX_REPAIR_SEARCH_STATES:
+        index, current_plus, current_minus = stack.pop()
+        states += 1
+        if index == len(pending):
+            repaired_edges = current_plus, current_minus
+            break
+        conflict = pending[index]
+        for relation in reversed(pending_choices[index]):
+            plus_trial = set(current_plus)
+            minus_trial = set(current_minus)
             _add_relation_edges(
                 plus_trial,
                 minus_trial,
@@ -169,14 +287,21 @@ def adapt_preplaced_topology(
             if _acyclic(targets.shape[0], plus_trial) and _acyclic(
                 targets.shape[0], minus_trial
             ):
-                plus_edges, minus_edges = plus_trial, minus_trial
-                repaired = True
-                break
-        if not repaired:
-            raise ValueError("low-confidence repair would create a sequence cycle")
+                stack.append((index + 1, plus_trial, minus_trial))
+    if repaired_edges is None:
+        if stack:
+            raise ValueError("low-confidence repair exceeded bounded search")
+        raise ValueError("low-confidence repair would create a sequence cycle")
+    plus_edges, minus_edges = repaired_edges
 
-    new_plus = _stable_topological_order(targets.shape[0], plus_edges, plus)
-    new_minus = _stable_topological_order(targets.shape[0], minus_edges, minus)
+    preferred_plus = torch.cat((plus[mask[plus]], plus[~mask[plus]]))
+    preferred_minus = torch.cat((minus[mask[minus]], minus[~mask[minus]]))
+    new_plus = _stable_topological_order(
+        targets.shape[0], plus_edges, preferred_plus
+    )
+    new_minus = _stable_topological_order(
+        targets.shape[0], minus_edges, preferred_minus
+    )
     repaired_report = check_preplaced_compatibility(
         new_plus, new_minus, targets, mask, tolerance=tolerance
     )
@@ -260,7 +385,20 @@ def _confidence_tensor(
 
 
 def _predicted_confidence(confidence: Tensor, conflict: PreplacedConflict) -> float:
-    first, second, relation = conflict.first, conflict.second, conflict.predicted
+    return _relation_confidence_value(
+        confidence,
+        conflict.first,
+        conflict.second,
+        conflict.predicted,
+    )
+
+
+def _relation_confidence_value(
+    confidence: Tensor,
+    first: int,
+    second: int,
+    relation: int,
+) -> float:
     if confidence.ndim == 2:
         return max(float(confidence[first, second]), float(confidence[second, first]))
     inverse = INVERSE_RELATION[relation]

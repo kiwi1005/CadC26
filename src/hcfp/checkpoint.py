@@ -44,7 +44,7 @@ def load_checkpoint(
     if payload.get("state_hash") != _payload_hash(payload):
         raise ValueError("checkpoint hash mismatch")
     config = ModelConfig(**payload["config"])
-    if expected_config is not None and asdict(expected_config) != payload["config"]:
+    if expected_config is not None and expected_config != config:
         raise ValueError("checkpoint config mismatch")
     normalization = payload.get("normalization", {})
     if expected_normalization is not None and normalization != expected_normalization:

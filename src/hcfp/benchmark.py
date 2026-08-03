@@ -19,6 +19,7 @@ ATTRIBUTION_SOURCES = (
 )
 ANALYTIC_SOURCES = frozenset(("fallback", "analytic_initial", "analytic_relaxed"))
 LEARNED_SOURCES = frozenset(("learned_initial", "learned_relaxed"))
+CANDIDATE_TYPES = ("fallback", "analytic", "learned_residual", "topology")
 
 
 def candidate_source_layout(population: int, learned_count: int) -> tuple[str, ...]:
@@ -28,8 +29,6 @@ def candidate_source_layout(population: int, learned_count: int) -> tuple[str, .
         raise ValueError("population must be positive")
     if learned_count < 0:
         raise ValueError("learned_count must be non-negative")
-    if learned_count > population:
-        raise ValueError("learned_count cannot exceed population")
     return (
         ("fallback",)
         + ("analytic_initial",) * population
@@ -104,6 +103,88 @@ def summarize_attribution_cases(cases: list[dict[str, Any]]) -> dict[str, Any]:
         "cases": len(ordered),
         "raw": _summarize_attribution_stage(ordered, "raw"),
         "post_bdp": _summarize_attribution_stage(ordered, "post_bdp", include_incumbent=True),
+    }
+
+
+def summarize_candidate_types(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate candidate-type oracles without conflating topology and residuals."""
+
+    ordered = sorted(cases, key=lambda row: int(row["test_id"]))
+    return {
+        stage: _summarize_candidate_type_stage(ordered, stage)
+        for stage in ("raw", "post_bdp")
+    }
+
+
+def _summarize_candidate_type_stage(
+    cases: list[dict[str, Any]],
+    stage: str,
+) -> dict[str, Any]:
+    counts = Counter({candidate_type: 0 for candidate_type in CANDIDATE_TYPES})
+    feasible = Counter({candidate_type: 0 for candidate_type in CANDIDATE_TYPES})
+    oracle_values: dict[str, list[tuple[int, float]]] = {
+        candidate_type: [] for candidate_type in CANDIDATE_TYPES
+    }
+    gains: list[tuple[int, float]] = []
+    topology_better = analytic_better = tied = 0
+    for case in cases:
+        candidates = case[stage]["candidates"]
+        for candidate in candidates:
+            candidate_type = str(candidate.get("candidate_type", "unknown"))
+            counts[candidate_type] += 1
+            feasible[candidate_type] += int(bool(candidate["hard_feasible"]))
+        for candidate_type in CANDIDATE_TYPES:
+            typed = [
+                row
+                for row in candidates
+                if str(row.get("candidate_type")) == candidate_type
+            ]
+            oracle = select_candidate_oracle(typed)
+            if oracle is not None:
+                oracle_values[candidate_type].append(
+                    (int(case["block_count"]), float(oracle["uncapped_objective"]))
+                )
+        analytic = candidate_oracles(candidates)["analytic"]
+        topology = select_candidate_oracle(
+            [row for row in candidates if row.get("candidate_type") == "topology"]
+        )
+        if analytic is None or topology is None:
+            continue
+        gain = float(analytic["uncapped_objective"]) - float(
+            topology["uncapped_objective"]
+        )
+        gains.append((int(case["block_count"]), gain))
+        if gain > 1.0e-9:
+            topology_better += 1
+        elif gain < -1.0e-9:
+            analytic_better += 1
+        else:
+            tied += 1
+    return {
+        "candidate_count_by_type": dict(counts),
+        "hard_feasible_by_type": dict(feasible),
+        "oracle_available_cases": {
+            candidate_type: len(values)
+            for candidate_type, values in oracle_values.items()
+        },
+        "mean_oracle_objective": {
+            candidate_type: fmean(value for _, value in values) if values else None
+            for candidate_type, values in oracle_values.items()
+        },
+        "weighted_mean_oracle_objective": {
+            candidate_type: _weighted_value(values)
+            for candidate_type, values in oracle_values.items()
+        },
+        "topology_vs_analytic": {
+            "comparable_cases": len(gains),
+            "topology_better_cases": topology_better,
+            "analytic_better_cases": analytic_better,
+            "tied_cases": tied,
+            "mean_topology_oracle_gain": (
+                fmean(gain for _, gain in gains) if gains else None
+            ),
+            "weighted_mean_topology_oracle_gain": _weighted_gain(gains),
+        },
     }
 
 
@@ -213,6 +294,16 @@ def _weighted_gain(gains: list[tuple[int, float]]) -> float | None:
     max_blocks = max(blocks for blocks, _ in gains)
     weights = [math.exp((blocks - max_blocks) / 12.0) for blocks, _ in gains]
     return sum(gain * weight for (_, gain), weight in zip(gains, weights)) / sum(weights)
+
+
+def _weighted_value(values: list[tuple[int, float]]) -> float | None:
+    if not values:
+        return None
+    max_blocks = max(blocks for blocks, _ in values)
+    weights = [math.exp((blocks - max_blocks) / 12.0) for blocks, _ in values]
+    return sum(value * weight for (_, value), weight in zip(values, weights)) / sum(
+        weights
+    )
 
 
 def weighted_score(rows: list[dict[str, Any]]) -> float:

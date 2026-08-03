@@ -1,0 +1,599 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from hcfp.case import from_official
+from hcfp.checkpoint import RUNTIME_NORMALIZATION
+from hcfp.data import DataSample, extract_labels
+from hcfp.fallback import safe_shelf
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/audit_hcfp_topology_heldout.py"
+SPEC = importlib.util.spec_from_file_location("topology_heldout_audit", SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+audit = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(audit)
+TRAIN_SCRIPT = ROOT / "scripts/train_hcfp.py"
+TRAIN_SPEC = importlib.util.spec_from_file_location("train_hcfp_audit_test", TRAIN_SCRIPT)
+assert TRAIN_SPEC is not None and TRAIN_SPEC.loader is not None
+train_cli = importlib.util.module_from_spec(TRAIN_SPEC)
+TRAIN_SPEC.loader.exec_module(train_cli)
+
+
+def _sample(sample_id: str, block_count: int = 2) -> DataSample:
+    rectangles = torch.tensor(
+        [[float(index), 0.0, 1.0, 1.0] for index in range(block_count)]
+    )
+    case = from_official(
+        block_count,
+        torch.ones(block_count),
+        [],
+        [],
+        [],
+        torch.zeros((block_count, 5), dtype=torch.long),
+    )
+    return DataSample(
+        sample_id,
+        case,
+        extract_labels(
+            case,
+            rectangles,
+            baseline_area=float(block_count),
+            baseline_hpwl=0.0,
+        ),
+    )
+
+
+def _training_report_payload(
+    root: Path,
+    checkpoint: Path,
+    sample_ids: list[str],
+    *,
+    seed: int = 10,
+    source_limit: int | None = 2,
+    checkpoint_hash: str = "state-hash",
+    model_config: dict[str, object] | None = None,
+) -> dict[str, object]:
+    unique_ids = sorted(set(sample_ids))
+    return {
+        "schema_version": 2,
+        "command": ["scripts/train_hcfp.py", "--floorset-lite-root", str(root)],
+        "checkpoint": str(checkpoint.resolve()),
+        "checkpoint_hash": checkpoint_hash,
+        "model_config": model_config or {"hidden_dim": 16},
+        "steps": len(sample_ids),
+        "direct_floorset_lite_stream": {
+            "root": str(root.resolve()),
+            "sampling": "score-aware",
+            "seed": seed,
+            "source_limit": source_limit,
+            "max_layouts_per_file": None,
+            "consumed_count": len(sample_ids),
+            "ordered_sample_id_count": len(sample_ids),
+            "ordered_sample_id_sha256": audit._sample_id_hash(sample_ids),
+            "unique_sample_id_count": len(unique_ids),
+            "unique_sample_id_sha256": audit._sample_id_hash(unique_ids),
+            "checkpoint_hash": checkpoint_hash,
+        },
+    }
+
+
+def test_heldout_sampling_excludes_training_ids_and_filters_block_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    excluded = [_sample("train/a", 3), _sample("train/b", 4)]
+    stream = [
+        (_sample("train/a", 3), {}),
+        (_sample("heldout/small", 1), {}),
+        (_sample("heldout/keep-5", 5), {}),
+        (_sample("heldout/large", 7), {}),
+        (_sample("heldout/keep-4", 4), {}),
+    ]
+
+    def heldout_iterator(_root, **kwargs):
+        assert kwargs == {
+            "limit": None,
+            "seed": 11,
+            "score_aware": True,
+            "max_layouts_per_file": 1,
+        }
+        return iter(stream)
+
+    monkeypatch.setattr(audit, "iter_floorset_lite_with_source", heldout_iterator)
+
+    excluded_ids = {sample.sample_id for sample in excluded}
+    expected_hash = audit._sample_id_hash(sorted(excluded_ids))
+    exclude_provenance = {
+        "count": len(excluded_ids),
+        "sample_id_sha256": expected_hash,
+    }
+
+    selected, provenance = audit._collect_heldout(
+        "training-root",
+        exclude_ids=excluded_ids,
+        exclude_provenance=exclude_provenance,
+        heldout_limit=2,
+        heldout_seed=11,
+        heldout_max_layouts_per_file=1,
+        min_blocks=2,
+        max_blocks=5,
+        score_aware=True,
+    )
+
+    selected_ids = [sample.sample_id for sample, _source in selected]
+    assert selected_ids == ["heldout/keep-5", "heldout/keep-4"]
+    assert not set(selected_ids).intersection(sample.sample_id for sample in excluded)
+    assert [sample.case.n for sample, _source in selected] == [5, 4]
+    assert provenance["exclude_training"]["count"] == 2
+    assert provenance["heldout"]["overlap_filtered_count"] == 1
+    assert provenance["heldout"]["block_filtered_count"] == 2
+    assert provenance["heldout"]["source_file_count"] == 2
+    assert provenance["exclude_training"]["sample_id_sha256"] == expected_hash
+
+
+def test_heldout_sampling_fails_closed_when_filtered_stream_is_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        audit,
+        "iter_floorset_lite_with_source",
+        lambda *_args, **_kwargs: iter(((_sample("train/a", 2), {}),)),
+    )
+
+    with pytest.raises(RuntimeError, match="0 disjoint in-range samples, expected 1"):
+        audit._collect_heldout(
+            "training-root",
+            exclude_ids={"train/a"},
+            exclude_provenance={"count": 1},
+            heldout_limit=1,
+            heldout_seed=11,
+            heldout_max_layouts_per_file=1,
+            min_blocks=2,
+            max_blocks=5,
+            score_aware=True,
+        )
+
+
+def test_consumed_stream_reconstruction_cycles_deterministically(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    samples = (_sample("train/a"), _sample("train/b"))
+    calls: list[tuple[Path, dict[str, object]]] = []
+
+    def sample_iterator(path, **kwargs):
+        calls.append((Path(path), kwargs))
+        return iter(samples)
+
+    monkeypatch.setattr(audit, "iter_floorset_lite", sample_iterator)
+
+    expected = ["train/a", "train/b", "train/a", "train/b", "train/a"]
+    first = audit._reconstruct_consumed_sample_ids(
+        root,
+        source_limit=2,
+        seed=10,
+        score_aware=True,
+        consumed_count=5,
+    )
+    second = audit._reconstruct_consumed_sample_ids(
+        root,
+        source_limit=2,
+        seed=10,
+        score_aware=True,
+        consumed_count=5,
+    )
+
+    assert first == expected
+    assert second == expected
+    assert calls == [(root, {"limit": 2, "seed": 10, "score_aware": True})] * 6
+
+
+def test_training_cli_reports_exact_consumed_direct_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    checkpoint = tmp_path / "model.pt"
+    samples = (_sample("train/a"), _sample("train/b"))
+    pulled_ids: list[str] = []
+
+    def sample_iterator(path, **kwargs):
+        assert Path(path).resolve() == root.resolve()
+        assert kwargs == {"limit": 2, "seed": 10, "score_aware": True}
+        return iter(samples)
+
+    def fake_train_steps(_model, sample_factory, _optimizer, *, steps, **_kwargs):
+        iterator = iter(sample_factory())
+        history = []
+        for _index in range(steps):
+            try:
+                sample = next(iterator)
+            except StopIteration:
+                iterator = iter(sample_factory())
+                sample = next(iterator)
+            pulled_ids.append(sample.sample_id)
+            history.append({"total": 1.0})
+        return history
+
+    monkeypatch.setattr(train_cli, "iter_floorset_lite", sample_iterator)
+    monkeypatch.setattr(train_cli, "train_steps", fake_train_steps)
+    monkeypatch.setattr(train_cli, "save_checkpoint", lambda *_args: "state-hash")
+    argv = [
+        "--floorset-lite-root",
+        str(root),
+        "--sample-limit",
+        "2",
+        "-o",
+        str(checkpoint),
+        "--steps",
+        "5",
+        "--population",
+        "1",
+        "--hidden-dim",
+        "16",
+        "--encoder-layers",
+        "1",
+        "--device",
+        "cpu",
+        "--amp",
+        "off",
+        "--ema-decay",
+        "0",
+        "--seed",
+        "10",
+    ]
+
+    assert train_cli.main(argv) == 0
+    first = Path(f"{checkpoint}.training.json").read_bytes()
+    assert train_cli.main(argv) == 0
+    second = Path(f"{checkpoint}.training.json").read_bytes()
+
+    assert first == second
+    assert pulled_ids == ["train/a", "train/b", "train/a", "train/b", "train/a"] * 2
+    report = json.loads(first)
+    contract = report["direct_floorset_lite_stream"]
+    consumed_ids = ["train/a", "train/b", "train/a", "train/b", "train/a"]
+    assert report["schema_version"] == 2
+    assert report["command"] == ["scripts/train_hcfp.py", *argv]
+    assert report["checkpoint"] == str(checkpoint.resolve())
+    assert report["checkpoint_hash"] == "state-hash"
+    assert report["model_config"]["hidden_dim"] == 16
+    assert contract == {
+        "checkpoint_hash": "state-hash",
+        "consumed_count": 5,
+        "max_layouts_per_file": None,
+        "ordered_sample_id_count": 5,
+        "ordered_sample_id_sha256": audit._sample_id_hash(consumed_ids),
+        "root": str(root.resolve()),
+        "sampling": "score-aware",
+        "seed": 10,
+        "source_limit": 2,
+        "unique_sample_id_count": 2,
+        "unique_sample_id_sha256": audit._sample_id_hash(["train/a", "train/b"]),
+    }
+
+
+def test_training_report_reconstructs_exact_unique_exclusion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    checkpoint = tmp_path / "model.pt"
+    training_report = Path(f"{checkpoint}.training.json")
+    consumed_ids = ["train/a", "train/b", "train/a"]
+    payload = _training_report_payload(root, checkpoint, consumed_ids)
+    training_report.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    samples = (_sample("train/a"), _sample("train/b"))
+    monkeypatch.setattr(
+        audit,
+        "iter_floorset_lite",
+        lambda *_args, **_kwargs: iter(samples),
+    )
+
+    excluded, provenance, contract = audit._load_training_exclusion(
+        training_report,
+        root=root,
+        checkpoint=checkpoint,
+        checkpoint_hash="state-hash",
+        checkpoint_config={"hidden_dim": 16},
+        asserted_seed=10,
+        asserted_limit=2,
+        asserted_sampling="score-aware",
+    )
+
+    assert excluded == {"train/a", "train/b"}
+    assert provenance["consumed_count"] == 3
+    assert provenance["ordered_sample_id_sha256"] == audit._sample_id_hash(consumed_ids)
+    assert provenance["unique_sample_id_sha256"] == audit._sample_id_hash(
+        ["train/a", "train/b"]
+    )
+    assert provenance["training_report"] == str(training_report.resolve())
+    assert contract == payload["direct_floorset_lite_stream"]
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "message"),
+    (
+        ("hash", "ordered sample ID hash mismatch"),
+        ("seed", "manual exclude seed"),
+        ("root", "root mismatch"),
+        ("checkpoint", "checkpoint hash mismatch"),
+        ("config", "model config mismatch"),
+        ("sampling", "manual sampling mode"),
+        ("count", "consumed count mismatch"),
+    ),
+)
+def test_training_report_mismatch_fails_closed(
+    mismatch: str,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "training"
+    checkpoint = tmp_path / "model.pt"
+    training_report = tmp_path / "explicit-training.json"
+    payload = _training_report_payload(root, checkpoint, ["train/a", "train/b"])
+    contract = payload["direct_floorset_lite_stream"]
+    assert isinstance(contract, dict)
+    kwargs: dict[str, object] = {}
+    if mismatch == "hash":
+        contract["ordered_sample_id_sha256"] = "wrong"
+    elif mismatch == "seed":
+        kwargs["asserted_seed"] = 11
+    elif mismatch == "root":
+        contract["root"] = str(tmp_path / "other-root")
+    elif mismatch == "checkpoint":
+        payload["checkpoint_hash"] = "wrong"
+    elif mismatch == "config":
+        payload["model_config"] = {"hidden_dim": 32}
+    elif mismatch == "sampling":
+        kwargs["asserted_sampling"] = "uniform"
+    elif mismatch == "count":
+        payload["steps"] = 3
+    training_report.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        audit,
+        "iter_floorset_lite",
+        lambda *_args, **_kwargs: iter((_sample("train/a"), _sample("train/b"))),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        audit._load_training_exclusion(
+            training_report,
+            root=root,
+            checkpoint=checkpoint,
+            checkpoint_hash="state-hash",
+            checkpoint_config={"hidden_dim": 16},
+            **kwargs,
+        )
+
+
+def test_candidate_record_uses_training_baselines_and_uncapped_formula() -> None:
+    side = 2.0**-0.5
+    case = from_official(
+        2,
+        [1.0, 1.0],
+        [[0, 1, 1.0]],
+        [],
+        [],
+        torch.zeros((2, 5), dtype=torch.long),
+    )
+    candidate = torch.tensor(
+        [
+            [0.0, 0.0, side, side],
+            [side, 0.0, side, side],
+        ]
+    )
+
+    record = audit._candidate_record(
+        case,
+        candidate,
+        1,
+        "analytic_initial",
+        frozenset(),
+        1.0,
+        0.5,
+    )
+
+    assert record["hard_feasible"] is True
+    assert record["hpwl_total"] == pytest.approx(1.0)
+    assert record["bbox_area"] == pytest.approx(2.0)
+    assert record["hpwl_gap"] == pytest.approx(1.0)
+    assert record["area_gap"] == pytest.approx(1.0)
+    assert record["violations_relative"] == 0.0
+    assert record["uncapped_objective"] == pytest.approx(2.0)
+    assert record["official_capped_cost"] is None
+
+
+@pytest.mark.parametrize("produced", (0, 1))
+def test_topology_audit_fails_when_requested_count_is_missing(produced: int) -> None:
+    analysis = SimpleNamespace(
+        result=SimpleNamespace(
+            used_checkpoint=True,
+            checkpoint_hash="state-hash",
+            failure_reason=None,
+            topology_seed_count=produced,
+        ),
+        analytic=SimpleNamespace(
+            incumbent_snapshot={"topology_seed_failure_reason": "decode shortfall"}
+        ),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=rf"requested 2 topology seeds, produced {produced}",
+    ):
+        audit._validate_topology_result("heldout/a", analysis, "state-hash", 2)
+
+
+def test_main_report_is_byte_deterministic_and_records_disjoint_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    excluded = _sample("train/a")
+    heldout = _sample("heldout/a")
+    training_root = tmp_path / "training"
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    checkpoint_config = {"hidden_dim": 16}
+    training_report = Path(f"{checkpoint.resolve()}.training.json")
+    training_report.write_text(
+        json.dumps(
+            _training_report_payload(
+                training_root,
+                checkpoint,
+                ["train/a"],
+                source_limit=1,
+                model_config=checkpoint_config,
+            ),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        audit,
+        "iter_floorset_lite",
+        lambda *_args, **_kwargs: iter((excluded,)),
+    )
+    monkeypatch.setattr(
+        audit,
+        "iter_floorset_lite_with_source",
+        lambda *_args, **_kwargs: iter(((excluded, {}), (heldout, {}))),
+    )
+    monkeypatch.setattr(
+        audit,
+        "load_checkpoint",
+        lambda *_args, **_kwargs: (
+            object(),
+            {
+                "state_hash": "state-hash",
+                "normalization": RUNTIME_NORMALIZATION,
+                "config": checkpoint_config,
+            },
+        ),
+    )
+
+    def fake_analysis(case, _checkpoint, config):
+        assert config.topology_seeds == 1
+        assert config.analytic.dynamics.population == 1
+        fallback = safe_shelf(case)
+        candidates = fallback.unsqueeze(0).repeat(7, 1, 1)
+        snapshot = {
+            "exact_source": "fallback",
+            "topology_seed_sources": ("candidate_3", "candidate_6"),
+            "topology_seed_count": 1,
+            "topology_seed_provenance": (
+                {"source": "candidate_3", "stage": "initial"},
+                {"source": "candidate_6", "stage": "post_relax"},
+            ),
+        }
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                used_checkpoint=True,
+                checkpoint_hash="state-hash",
+                failure_reason=None,
+                topology_seed_count=1,
+                candidate_count=3,
+                selected=fallback,
+            ),
+            analytic=SimpleNamespace(
+                raw_candidates=candidates,
+                projected_candidates=candidates.clone(),
+                incumbent_snapshot=snapshot,
+            ),
+        )
+
+    monkeypatch.setattr(audit, "analyze_case_with_checkpoint", fake_analysis)
+    output = tmp_path / "heldout.json"
+    argv = [
+        "--root",
+        str(training_root),
+        "--checkpoint",
+        str(checkpoint),
+        "--output",
+        str(output),
+        "--heldout-limit",
+        "1",
+        "--heldout-seed",
+        "11",
+        "--exclude-train-limit",
+        "1",
+        "--exclude-train-seed",
+        "10",
+        "--min-blocks",
+        "2",
+        "--max-blocks",
+        "2",
+        "--population",
+        "1",
+        "--topology-seeds",
+        "1",
+        "--device",
+        "cpu",
+        "--projection-steps",
+        "1",
+    ]
+
+    assert audit.main(argv) == 0
+    first = output.read_bytes()
+    assert audit.main(argv) == 0
+    second = output.read_bytes()
+
+    assert first == second
+    report = json.loads(first)
+    assert report["sampling"]["heldout"]["sample_ids"] == ["heldout/a"]
+    assert report["sampling"]["heldout"]["sample_id_sha256"] == hashlib.sha256(
+        b"heldout/a"
+    ).hexdigest()
+    assert report["sampling"]["heldout"]["exclude_overlap_count"] == 0
+    assert report["sampling"]["exclude_training"]["count"] == 1
+    assert report["sampling"]["exclude_training"]["consumed_count"] == 1
+    assert report["sampling"]["exclude_training"]["training_report"] == str(
+        training_report
+    )
+    assert report["sampling"]["training_report"] == {
+        "path": str(training_report),
+        "sha256": audit.file_sha256(training_report),
+    }
+    assert report["checkpoint"]["state_hash"] == "state-hash"
+    assert report["cases"][0]["baseline"] == {"area": 2.0, "hpwl": 0.0}
+    assert report["cases"][0]["candidate_layout"]["topology_count"] == 1
+    assert report["cases"][0]["raw"]["candidates"][3]["source"] == "learned_initial"
+    assert report["cases"][0]["raw"]["candidates"][3]["candidate_type"] == "topology"
+    assert report["cases"][0]["post_bdp"]["candidates"][6]["source"] == "learned_relaxed"
+    assert report["cases"][0]["post_bdp"]["candidates"][6]["candidate_type"] == "topology"
+    assert report["cases"][0]["topology_provenance"]["topology_seed_sources"] == [
+        "candidate_3",
+        "candidate_6",
+    ]
+    assert report["summary"]["hard_feasibility"]["post_bdp"]["rate"] == 1.0
+    assert report["summary"]["topology_vs_analytic_weighted_gain"] == {
+        "post_bdp": 0.0,
+        "raw": 0.0,
+    }
+    assert report["summary"]["selected_vs_analytic"] == {
+        "analytic_better_cases": 0,
+        "comparable_cases": 1,
+        "mean_selected_gain": 0.0,
+        "selected_better_cases": 0,
+        "tied_cases": 1,
+        "weighted_mean_selected_gain": 0.0,
+    }
+    assert report["command"] == ["scripts/audit_hcfp_topology_heldout.py", *argv]

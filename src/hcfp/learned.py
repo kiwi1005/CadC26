@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,22 @@ from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
 from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
 from hcfp.geometry import xywh_from_state
-from hcfp.verify import bbox_area, soft_violation_normalized, total_hpwl, verify_feasible
+from hcfp.model import soft_sequence_pair_relation_logits
+from hcfp.topology import (
+    adapt_preplaced_topology,
+    anchor_safe_order_variants,
+    copy_preplaced_targets,
+    decode_sequence_pair,
+    hard_permutation,
+    pack_sequence_pair_with_anchors,
+    relation_mask_from_rectangles,
+)
+from hcfp.verify import (
+    bbox_area,
+    soft_violation_normalized,
+    total_hpwl,
+    verify_feasible,
+)
 
 
 Tensor = torch.Tensor
@@ -39,6 +55,9 @@ class LearnedResult:
     failure_reason: str | None
     flow_steps: int = 0
     candidate_count: int = 0
+    topology_seed_attempted: bool = False
+    topology_seed_accepted: bool = False
+    topology_seed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -57,6 +76,7 @@ class LearnedConfig:
     max_aspect_residual: float = 1.0
     tail_topk: int | None = None
     seed: int | None = None
+    topology_seeds: int = 0
 
     def __post_init__(self) -> None:
         if self.flow_steps < 0:
@@ -69,6 +89,8 @@ class LearnedConfig:
             raise ValueError("flow residual limits must be positive")
         if self.tail_topk is not None and self.tail_topk <= 0:
             raise ValueError("tail_topk must be positive")
+        if self.topology_seeds < 0:
+            raise ValueError("topology_seeds must be non-negative")
 
 
 def solve_case_with_checkpoint(
@@ -97,6 +119,7 @@ def analyze_case_with_checkpoint(
             map_location="cpu",
         )
         model = model.to(device=case.area.device).eval()
+        topology_provenance: dict[str, object] = {}
         learned_population = _learned_population(
             case,
             model,
@@ -106,6 +129,7 @@ def analyze_case_with_checkpoint(
                 if learned_cfg.seed is None
                 else learned_cfg.seed
             ),
+            provenance=topology_provenance,
         )
         analytic_analysis = solve_case_with_telemetry(case, cfg)
         learned_tail_cfg = replace(
@@ -117,7 +141,12 @@ def analyze_case_with_checkpoint(
             learned_population,
             learned_tail_cfg,
         )
-        analysis = _merge_tail_analyses(case, analytic_analysis, learned_analysis)
+        analysis = _merge_tail_analyses(
+            case,
+            analytic_analysis,
+            learned_analysis,
+            topology_provenance=topology_provenance,
+        )
         candidate_count = cfg.dynamics.population + int(learned_population.shape[0])
         return LearnedAnalysis(
             LearnedResult(
@@ -127,6 +156,9 @@ def analyze_case_with_checkpoint(
                 None,
                 learned_cfg.flow_steps,
                 candidate_count,
+                bool(topology_provenance.get("topology_seed_attempted", False)),
+                bool(topology_provenance.get("topology_seed_accepted", False)),
+                int(topology_provenance.get("topology_seed_count", 0)),
             ),
             analysis,
         )
@@ -201,10 +233,18 @@ def select_official_from_analysis(
             placements,
         )
     telemetry = analysis.analytic.telemetry
-    candidates = analysis.analytic.projected_candidates.detach().to(device="cpu", dtype=torch.float32)
+    candidates = analysis.analytic.projected_candidates.detach().to(
+        device="cpu", dtype=torch.float32
+    )
     hard_feasible = telemetry.hard_feasible.detach().to(device="cpu", dtype=torch.bool)
-    soft_violation = telemetry.soft_violation.detach().to(device="cpu", dtype=torch.float32)
-    quality = (telemetry.bbox_area + 0.05 * telemetry.hpwl).detach().to(device="cpu", dtype=torch.float32)
+    soft_violation = telemetry.soft_violation.detach().to(
+        device="cpu", dtype=torch.float32
+    )
+    quality = (
+        (telemetry.bbox_area + 0.05 * telemetry.hpwl)
+        .detach()
+        .to(device="cpu", dtype=torch.float32)
+    )
     order = sorted(
         (index for index in range(len(candidates)) if bool(hard_feasible[index])),
         key=lambda index: (float(soft_violation[index]), float(quality[index]), index),
@@ -236,6 +276,7 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             flow_steps=int(os.environ.get("HCFP_FLOW_STEPS", "6")),
             tail_topk=int(tail) if tail else None,
             seed=int(seed) if seed is not None else None,
+            topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
         )
     if isinstance(config, AnalyticConfig):
         return LearnedConfig(analytic=config)
@@ -246,6 +287,8 @@ def _merge_tail_analyses(
     case: FloorplanCase,
     analytic: AnalyticResult,
     learned: AnalyticResult,
+    *,
+    topology_provenance: dict[str, object] | None = None,
 ) -> AnalyticResult:
     analytic_count = (analytic.projected_candidates.shape[0] - 1) // 2
     learned_count = (learned.projected_candidates.shape[0] - 1) // 2
@@ -271,7 +314,9 @@ def _merge_tail_analyses(
             + second[1 + learned_count :]
         )
 
-    projected = merge_tensor(analytic.projected_candidates, learned.projected_candidates)
+    projected = merge_tensor(
+        analytic.projected_candidates, learned.projected_candidates
+    )
     telemetry_values = {}
     for field in fields(CandidateTelemetry):
         first = getattr(analytic.telemetry, field.name)
@@ -333,6 +378,40 @@ def _merge_tail_analyses(
         ),
         "rejections": rejections,
     }
+    if topology_provenance and bool(
+        topology_provenance.get("topology_seed_attempted", False)
+    ):
+        topology_count = min(
+            int(topology_provenance.get("topology_seed_count", 0)),
+            learned_count,
+        )
+        topology_offset = learned_count - topology_count
+        initial_start = 1 + analytic_count
+        final_start = 1 + analytic_count + learned_count + analytic_count
+        seed_orders = tuple(topology_provenance.get("topology_seed_orders", ()))
+        if len(seed_orders) != topology_count:
+            seed_orders = tuple({} for _ in range(topology_count))
+        candidates = tuple(
+            {
+                **dict(seed_orders[index]),
+                "source": f"candidate_{start + topology_offset + index}",
+                "candidate_type": "topology",
+                "stage": stage,
+            }
+            for stage, start in (
+                ("initial", initial_start),
+                ("post_relax", final_start),
+            )
+            for index in range(topology_count)
+        )
+        snapshot.update(topology_provenance)
+        snapshot["topology_seed_sources"] = tuple(
+            str(candidate["source"]) for candidate in candidates
+        )
+        snapshot["topology_seed_source_types"] = tuple(
+            str(candidate["stage"]) for candidate in candidates
+        )
+        snapshot["topology_seed_provenance"] = candidates
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -345,7 +424,9 @@ def _merge_tail_analyses(
         raw_candidates=merge_tensor(analytic.raw_candidates, learned.raw_candidates),
         projected_candidates=projected,
         telemetry=telemetry,
-        energy_history=torch.cat((analytic.energy_history, learned.energy_history), dim=0),
+        energy_history=torch.cat(
+            (analytic.energy_history, learned.energy_history), dim=0
+        ),
         projection_status=status,
         incumbent_snapshot=snapshot,
     )
@@ -374,7 +455,9 @@ def _raw_analytic_pareto_guard(
     )
     if selected_index is None or not 0 <= selected_index < projected.shape[0]:
         return current
-    analytic_indices = tuple(index for index in analytic_indices if 0 <= index < projected.shape[0])
+    analytic_indices = tuple(
+        index for index in analytic_indices if 0 <= index < projected.shape[0]
+    )
     if not analytic_indices:
         return current
     try:
@@ -384,7 +467,9 @@ def _raw_analytic_pareto_guard(
 
     admitted = []
     for index in analytic_indices:
-        protected = analysis.analytic.raw_candidates[0] if index == 0 else projected[index]
+        protected = (
+            analysis.analytic.raw_candidates[0] if index == 0 else projected[index]
+        )
         try:
             placement = to_official_placements(
                 source,
@@ -438,7 +523,9 @@ def _candidate_index(source: object) -> int | None:
         return None
 
 
-def _merged_analytic_source(source: object, analytic_count: int, learned_count: int) -> str | None:
+def _merged_analytic_source(
+    source: object, analytic_count: int, learned_count: int
+) -> str | None:
     index = _candidate_index(source)
     if index is None:
         return None
@@ -465,12 +552,15 @@ def _learned_population(
     config: LearnedConfig,
     *,
     seed: int,
+    provenance: dict[str, object] | None = None,
 ) -> Tensor:
     population = config.analytic.dynamics.population
     fallback = safe_shelf(case).to(device=case.area.device, dtype=torch.float32)
     base = initialize_population(case, config.analytic.dynamics, fallback)
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    noise = torch.randn((population, case.n, 3), generator=generator, dtype=torch.float32)
+    noise = torch.randn(
+        (population, case.n, 3), generator=generator, dtype=torch.float32
+    )
     residual = noise.to(device=case.area.device) * config.flow_noise_scale
     residual[:, case.preplaced_mask, :2] = 0.0
     residual[:, case.fixed_mask | case.preplaced_mask, 2] = 0.0
@@ -487,7 +577,9 @@ def _learned_population(
                     dtype=torch.bfloat16,
                     enabled=model.config.compute_dtype == "bfloat16",
                 ):
-                    velocity = model.flow(case, output.embedding, population, residual, time)
+                    velocity = model.flow(
+                        case, output.embedding, population, residual, time
+                    )
                 residual = residual + velocity.float() / config.flow_steps
                 residual[..., :2].clamp_(
                     -config.max_position_residual,
@@ -505,10 +597,340 @@ def _learned_population(
     center = base.center + output.center_residual
     log_aspect = (base.log_aspect + output.log_aspect_residual).clamp(-4.0, 4.0)
     learned_boxes = xywh_from_state(case, center, log_aspect)
+    topology_sources = learned_boxes
     if config.tail_topk is not None and config.tail_topk < population:
         features = candidate_features(case, learned_boxes, fallback)
         with torch.inference_mode():
             scores = model.ranker(output.embedding, population, features)
         keep = torch.argsort(scores, stable=True)[: config.tail_topk]
         learned_boxes = learned_boxes[keep]
+    topology = learned_boxes.new_empty((0, case.n, 4))
+    failure_reason: str | None = None
+    if config.topology_seeds:
+        try:
+            topology = _topology_seed_candidates(
+                case,
+                output,
+                topology_sources,
+                count=config.topology_seeds,
+                provenance=provenance,
+            )
+        except (RuntimeError, ValueError) as exc:
+            topology = learned_boxes.new_empty((0, case.n, 4))
+            failure_reason = f"{type(exc).__name__}: {exc}"
+        if topology.numel():
+            learned_boxes = torch.cat((learned_boxes, topology), dim=0)
+    if provenance is not None:
+        topology_count = int(topology.shape[0])
+        provenance.update(
+            {
+                "topology_seed_attempted": config.topology_seeds > 0,
+                "topology_seed_accepted": topology_count > 0,
+                "topology_seed_count": topology_count,
+            }
+        )
+        if failure_reason is not None:
+            provenance["topology_seed_failure_reason"] = failure_reason
     return learned_boxes
+
+
+def _topology_seed_candidates(
+    case: FloorplanCase,
+    output,
+    source_boxes: Tensor,
+    *,
+    count: int,
+    provenance: dict[str, object] | None = None,
+) -> Tensor:
+    positive = output.positive_permutation
+    negative = output.negative_permutation
+    if count <= 0:
+        return source_boxes.new_empty((0, case.n, 4))
+    if positive is None or negative is None:
+        raise ValueError("checkpoint does not expose dual-permutation topology")
+
+    # Hard assignment and DAG packing are scalar-heavy. Transfer the complete
+    # decode inputs once, run the opt-in structure path on CPU, then return one
+    # stacked tensor to the case device.
+    soft = (
+        torch.stack((positive, negative)).detach().to(device="cpu", dtype=torch.float32)
+    )
+    precedence = output.precedence_logits.detach().to(device="cpu", dtype=torch.float32)
+    sources = source_boxes.detach().to(device="cpu", dtype=torch.float32)
+    targets = case.target.detach().to(device="cpu", dtype=torch.float32)
+    preplaced = case.preplaced_mask.detach().to(device="cpu", dtype=torch.bool)
+    active = case.block_mask.detach().to(device="cpu", dtype=torch.bool)
+
+    positive_order = hard_permutation(soft[0], active)
+    negative_order = hard_permutation(soft[1], active)
+    confidence = torch.softmax(
+        soft_sequence_pair_relation_logits(soft[0], soft[1]),
+        dim=-1,
+    )
+    positive_order, negative_order = adapt_preplaced_topology(
+        positive_order,
+        negative_order,
+        targets,
+        preplaced,
+        relation_confidence=confidence,
+    )
+    safe_variants = anchor_safe_order_variants(
+        positive_order,
+        negative_order,
+        preplaced,
+    )
+    order_variants = (
+        ("adapted", positive_order, negative_order),
+        *(
+            (variant.name, variant.positive, variant.negative)
+            for variant in safe_variants
+        ),
+    )
+    order_catalog: dict[str, dict[str, object]] = {}
+    order_definitions = []
+    for variant_name, variant_positive, variant_negative in order_variants:
+        variant_topology = decode_sequence_pair(
+            variant_positive,
+            variant_negative,
+            n=case.n,
+        )
+        positive_values = tuple(int(value) for value in variant_positive)
+        negative_values = tuple(int(value) for value in variant_negative)
+        horizontal_edges = tuple(
+            tuple(int(value) for value in edge)
+            for edge in variant_topology.horizontal_edges.tolist()
+        )
+        vertical_edges = tuple(
+            tuple(int(value) for value in edge)
+            for edge in variant_topology.vertical_edges.tolist()
+        )
+        order_hash = _tensor_sha256(torch.stack((variant_positive, variant_negative)))
+        if order_hash in order_catalog:
+            continue
+        edge_hash = hashlib.sha256(
+            repr((horizontal_edges, vertical_edges)).encode("ascii")
+        ).hexdigest()
+        order_catalog[order_hash] = {
+            "order_variant": variant_name,
+            "positive_order": positive_values,
+            "negative_order": negative_values,
+            "horizontal_edges": horizontal_edges,
+            "vertical_edges": vertical_edges,
+            "topology_edge_sha256": edge_hash,
+        }
+        order_definitions.append(
+            (
+                variant_name,
+                variant_positive,
+                variant_negative,
+                variant_topology,
+                order_hash,
+                edge_hash,
+            )
+        )
+    adapted_order_hash = str(order_definitions[0][4])
+    adapted_edge_hash = str(order_definitions[0][5])
+    if provenance is not None:
+        provenance.update(
+            {
+                "topology_soft_permutation_sha256": _tensor_sha256(soft),
+                "topology_precedence_logits_sha256": _tensor_sha256(precedence),
+                "topology_order_sha256": adapted_order_hash,
+                "topology_edge_sha256": adapted_edge_hash,
+                "topology_order_catalog": {
+                    order_hash: dict(record)
+                    for order_hash, record in order_catalog.items()
+                },
+                "topology_safe_order_variants": tuple(
+                    {
+                        "order_variant": variant_name,
+                        "topology_order_sha256": order_hash,
+                        "topology_edge_sha256": edge_hash,
+                    }
+                    for (
+                        variant_name,
+                        _,
+                        _,
+                        _,
+                        order_hash,
+                        edge_hash,
+                    ) in order_definitions[1:]
+                ),
+            }
+        )
+    origin = sources[..., :2].amin(dim=(0, 1))
+
+    pool: list[Tensor] = []
+    pool_records: list[dict[str, object]] = []
+    pool_attempt_indices: list[int] = []
+    attempts: list[dict[str, object]] = []
+    last_error: RuntimeError | ValueError | None = None
+    for aspect_source, source in enumerate(sources):
+        for (
+            variant_name,
+            variant_positive,
+            variant_negative,
+            variant_topology,
+            order_hash,
+            edge_hash,
+        ) in order_definitions:
+            attempt = {
+                "order_variant": variant_name,
+                "aspect_source_index": aspect_source,
+            }
+            try:
+                candidate = pack_sequence_pair_with_anchors(
+                    source[:, 2:4],
+                    variant_positive,
+                    variant_negative,
+                    targets,
+                    preplaced,
+                    origin=origin,
+                    spacing=1.0e-5,
+                )
+                candidate = copy_preplaced_targets(candidate, targets, preplaced)
+                realized = relation_mask_from_rectangles(candidate)
+                pair = (
+                    variant_topology.active_mask[:, None]
+                    & variant_topology.active_mask[None, :]
+                )
+                pair.fill_diagonal_(False)
+                selected = realized.gather(
+                    -1,
+                    variant_topology.relation.clamp_min(0).unsqueeze(-1),
+                ).squeeze(-1)
+                if not bool(selected[pair].all()):
+                    raise ValueError(
+                        "packed geometry does not realize its sequence-pair order"
+                    )
+                if not verify_feasible(case, candidate):
+                    raise ValueError("packed geometry is not exact-feasible")
+            except (RuntimeError, ValueError) as exc:
+                last_error = exc
+                attempts.append(
+                    {
+                        **attempt,
+                        "status": "rejected",
+                        "failure_reason": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                continue
+            if torch.allclose(candidate, source, rtol=1.0e-6, atol=1.0e-7):
+                attempts.append(
+                    {
+                        **attempt,
+                        "status": "rejected",
+                        "failure_reason": "unchanged_geometry",
+                    }
+                )
+                continue
+            if any(torch.allclose(candidate, prior) for prior in pool):
+                attempts.append(
+                    {
+                        **attempt,
+                        "status": "rejected",
+                        "failure_reason": "duplicate_geometry",
+                    }
+                )
+                continue
+            pool_index = len(pool)
+            pool.append(candidate)
+            pool_records.append(
+                {
+                    **attempt,
+                    "pool_index": pool_index,
+                    "topology_order_sha256": order_hash,
+                    "topology_edge_sha256": edge_hash,
+                    "candidate_sha256": _tensor_sha256(candidate),
+                }
+            )
+            pool_attempt_indices.append(len(attempts))
+            attempts.append({**attempt, "pool_index": pool_index, "status": "pooled"})
+
+    if not pool:
+        if last_error is not None:
+            raise last_error
+        raise ValueError("no changed topology seed was accepted")
+
+    reference = safe_shelf(case).detach().to(device="cpu", dtype=torch.float32)
+    reference_hpwl = total_hpwl(case, reference)
+    reference_bbox = bbox_area(reference)
+    hpwl_denominator = max(reference_hpwl, torch.finfo(torch.float64).eps)
+    bbox_denominator = max(reference_bbox, torch.finfo(torch.float64).eps)
+    for candidate, record in zip(pool, pool_records, strict=True):
+        raw_soft = soft_violation_normalized(case, candidate).raw_total
+        normalized_hpwl = total_hpwl(case, candidate) / hpwl_denominator
+        normalized_bbox = bbox_area(candidate) / bbox_denominator
+        record["priority"] = {
+            "raw_soft_violation": raw_soft,
+            "normalized_quality": normalized_hpwl + normalized_bbox,
+            "normalized_hpwl": normalized_hpwl,
+            "normalized_bbox_area": normalized_bbox,
+        }
+
+    def priority_key(index: int) -> tuple[object, ...]:
+        priority = pool_records[index]["priority"]
+        assert isinstance(priority, dict)
+        return (
+            int(priority["raw_soft_violation"]),
+            float(priority["normalized_quality"]),
+            str(pool_records[index]["topology_order_sha256"]),
+            int(pool_records[index]["aspect_source_index"]),
+            str(pool_records[index]["candidate_sha256"]),
+        )
+
+    total_order = sorted(range(len(pool)), key=priority_key)
+    best_per_order: dict[str, int] = {}
+    for index in total_order:
+        order_hash = str(pool_records[index]["topology_order_sha256"])
+        best_per_order.setdefault(order_hash, index)
+    selected_indices = list(best_per_order.values())[:count]
+    if len(selected_indices) < count:
+        selected_set = set(selected_indices)
+        selected_indices.extend(
+            index for index in total_order if index not in selected_set
+        )
+        selected_indices = selected_indices[:count]
+
+    selection_rank = {index: rank for rank, index in enumerate(selected_indices)}
+    priority_rank = {index: rank for rank, index in enumerate(total_order)}
+    for index, (record, attempt_index) in enumerate(
+        zip(pool_records, pool_attempt_indices, strict=True)
+    ):
+        selected = index in selection_rank
+        record["priority_rank"] = priority_rank[index]
+        record["status"] = "selected" if selected else "rejected_by_budget"
+        record["selection_rank"] = selection_rank.get(index)
+        attempts[attempt_index].update(
+            {
+                "priority_rank": priority_rank[index],
+                "status": record["status"],
+                "selection_rank": record["selection_rank"],
+            }
+        )
+
+    selected_orders = [dict(pool_records[index]) for index in selected_indices]
+    if provenance is not None:
+        provenance["topology_order_attempts"] = tuple(attempts)
+        provenance["topology_seed_pool_size"] = len(pool)
+        provenance["topology_seed_pool"] = tuple(
+            dict(record) for record in pool_records
+        )
+        provenance["topology_selection_reference"] = {
+            "source": "safe_shelf",
+            "hpwl": reference_hpwl,
+            "bbox_area": reference_bbox,
+        }
+        provenance["topology_seed_orders"] = tuple(selected_orders)
+        provenance["topology_seed_aspect_source_indices"] = tuple(
+            int(record["aspect_source_index"]) for record in selected_orders
+        )
+    return torch.stack([pool[index] for index in selected_indices]).to(
+        device=source_boxes.device,
+        dtype=source_boxes.dtype,
+    )
+
+
+def _tensor_sha256(value: Tensor) -> str:
+    raw = value.detach().to(device="cpu").contiguous().view(torch.uint8).reshape(-1)
+    return hashlib.sha256(bytes(raw.tolist())).hexdigest()

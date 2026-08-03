@@ -11,7 +11,8 @@ from torch.nn import functional as F
 from hcfp.data import DataSample, SolutionLabels
 from hcfp.dynamics import DynamicsConfig, initialize_population
 from hcfp.fallback import safe_shelf
-from hcfp.model import HCFPModel
+from hcfp.model import HCFPModel, soft_sequence_pair_relation_logits
+from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_from_rectangles
 
 
 Tensor = torch.Tensor
@@ -110,10 +111,20 @@ def supervised_loss(
 
     structure = zero
     if stage in {"structure", "all"}:
-        n = case.n
-        valid = ~labels.precedence_tie_mask
-        valid &= ~torch.eye(n, dtype=torch.bool, device=device)
-        precedence = F.cross_entropy(output.precedence_logits[valid], labels.pairwise_precedence[valid])
+        allowed = relation_mask_from_rectangles(
+            labels.rectangles,
+            valid_mask=case.block_mask,
+        )
+        valid = allowed.any(dim=-1)
+        relation_logits = output.precedence_logits[..., :4]
+        precedence = partial_label_nll(relation_logits, allowed, pair_mask=valid)
+        precedence += antisymmetry_loss(relation_logits, pair_mask=valid)
+        if output.positive_permutation is not None and output.negative_permutation is not None:
+            topology_logits = soft_sequence_pair_relation_logits(
+                output.positive_permutation,
+                output.negative_permutation,
+            )
+            precedence += partial_label_nll(topology_logits, allowed, pair_mask=valid)
         outline = F.smooth_l1_loss(output.outline, labels.outline)
         structure = precedence + outline
 

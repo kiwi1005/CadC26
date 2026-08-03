@@ -14,20 +14,34 @@ A later stage does not start when its required promotion gate is blocked.
 - [x] Add deterministic JSON/Markdown reporting CLI.
 - [x] Match pinned official evaluator on unit fixtures.
 - [x] Run 100-case attribution and preserve its report artifact.
-- [ ] Commit Q0 with no runtime-selection diff.
+- [x] Commit Q0 with no runtime-selection diff (`54c763d`).
 
 ## Q1 — cycle-free structured topology
 
-- [~] Extract set-valued relation masks from gold rectangles.
-- [~] Add partial-label NLL and relation antisymmetry loss.
-- [~] Implement dependency-free Sinkhorn and deterministic hard permutation.
-- [~] Decode dual permutations into cycle-free H/V constraints.
-- [~] Add preplaced compatibility/adaptation and longest-path packing.
-- [ ] Add group/MIB identity and same-group/same-MIB pair features.
-- [ ] Connect topology output to learned runtime candidates behind an opt-in flag.
-- [ ] Record topology provenance through post-BDP candidates.
-- [ ] Run shelf-vs-topology oracle@16 on internal held-out cases.
-- [ ] Stop and diagnose if the 106--120 weighted oracle does not improve.
+- [x] Extract set-valued relation masks from gold rectangles.
+- [x] Add partial-label NLL and relation antisymmetry loss.
+- [x] Implement dependency-free Sinkhorn and deterministic hard permutation.
+- [x] Decode dual permutations into cycle-free H/V constraints.
+- [x] Add preplaced compatibility/adaptation and exact anchored longest-path packing.
+- [x] Add group/MIB identity through separate same-membership message channels.
+- [x] Connect topology output to learned runtime candidates behind an opt-in flag.
+- [x] Record topology provenance through raw and post-BDP candidates.
+- [x] Add deterministic anchor-safe order variants for movable-mediated anchor paths.
+- [x] Rechoose low-confidence ambiguous anchor relations with bounded cycle-free repair.
+- [x] Compact topology provenance into one reconstructable order catalog.
+- [x] Add a fail-closed training-only held-out audit with exact sample exclusion.
+- [x] Record and hash the actual consumed training stream in a schema-v2 sidecar.
+- [x] Reconstruct the consumed stream and reject checkpoint/config/split mismatch.
+- [x] Run shelf-vs-topology oracle@16 on internal held-out cases.
+- [x] Stop and diagnose if the 106--120 weighted oracle does not improve.
+
+Current gate: **PASS**. The promotion run reconstructs and excludes the exact
+1,000 samples consumed from a source stream configured with limit 2,048,
+evaluates 16 different FloorSet-Lite source files spanning 107--120 blocks,
+and produces all 16 requested topology seeds for every case.
+All 512 raw/post-BDP topology-stage records are hard feasible. The post-BDP
+topology oracle beats analytic on 16/16 cases with `+24.3934` score-weighted
+uncapped-objective gain. Q2 is unblocked after the Q1 integration commit.
 
 ## Q2 — constraint construction
 

@@ -7,13 +7,21 @@ import pytest
 from hcfp.benchmark import (
     candidate_oracles,
     candidate_source_layout,
+    summarize_candidate_types,
     summarize_attribution_cases,
     uncapped_objective,
 )
 
 
-def _candidate(index: int, source: str, objective: float, *, feasible: bool = True):
-    return {
+def _candidate(
+    index: int,
+    source: str,
+    objective: float,
+    *,
+    feasible: bool = True,
+    candidate_type: str | None = None,
+):
+    result = {
         "candidate_index": index,
         "source": source,
         "hard_feasible": feasible,
@@ -23,6 +31,9 @@ def _candidate(index: int, source: str, objective: float, *, feasible: bool = Tr
         "official_capped_cost": min(objective, 9.999999) if feasible else 10.0,
         "uncapped_objective": objective,
     }
+    if candidate_type is not None:
+        result["candidate_type"] = candidate_type
+    return result
 
 
 def test_candidate_source_layout_tracks_pruned_learned_population() -> None:
@@ -37,8 +48,15 @@ def test_candidate_source_layout_tracks_pruned_learned_population() -> None:
     )
     with pytest.raises(ValueError, match="population"):
         candidate_source_layout(0, 1)
-    with pytest.raises(ValueError, match="cannot exceed"):
-        candidate_source_layout(2, 3)
+    assert candidate_source_layout(1, 2) == (
+        "fallback",
+        "analytic_initial",
+        "learned_initial",
+        "learned_initial",
+        "analytic_relaxed",
+        "learned_relaxed",
+        "learned_relaxed",
+    )
 
 
 def test_uncapped_objective_matches_v10_quality_without_runtime_or_cap() -> None:
@@ -129,4 +147,40 @@ def test_attribution_summary_is_deterministic_and_counts_incumbent_misses() -> N
         "learned_initial": 2,
         "analytic_relaxed": 0,
         "learned_relaxed": 0,
+    }
+
+
+def test_candidate_type_summary_separates_topology_from_residuals() -> None:
+    candidates = [
+        _candidate(0, "fallback", 3.0, candidate_type="fallback"),
+        _candidate(1, "analytic_initial", 2.0, candidate_type="analytic"),
+        _candidate(
+            2,
+            "learned_initial",
+            1.8,
+            candidate_type="learned_residual",
+        ),
+        _candidate(3, "learned_initial", 1.0, candidate_type="topology"),
+    ]
+    cases = [
+        {
+            "test_id": 0,
+            "block_count": 120,
+            "raw": {"candidates": candidates},
+            "post_bdp": {"candidates": candidates},
+        }
+    ]
+
+    summary = summarize_candidate_types(cases)
+
+    assert summary["raw"]["candidate_count_by_type"]["topology"] == 1
+    assert summary["raw"]["oracle_available_cases"]["learned_residual"] == 1
+    assert summary["raw"]["mean_oracle_objective"]["topology"] == 1.0
+    assert summary["raw"]["topology_vs_analytic"] == {
+        "comparable_cases": 1,
+        "topology_better_cases": 1,
+        "analytic_better_cases": 0,
+        "tied_cases": 0,
+        "mean_topology_oracle_gain": 1.0,
+        "weighted_mean_topology_oracle_gain": 1.0,
     }

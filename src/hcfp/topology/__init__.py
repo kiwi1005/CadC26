@@ -1,9 +1,11 @@
 """Topology learning and hard sequence-pair packing primitives."""
 
 from hcfp.topology.longest_path_pack import (
+    anchored_longest_path_coordinates,
     longest_path_coordinates,
     longest_path_pack,
     pack_sequence_pair,
+    pack_sequence_pair_with_anchors,
 )
 from hcfp.topology.permutation_head import (
     DualPermutationHead,
@@ -12,9 +14,11 @@ from hcfp.topology.permutation_head import (
     sinkhorn,
 )
 from hcfp.topology.preplaced_adaptation import (
+    AnchorSafeOrderVariant,
     PreplacedCompatibility,
     PreplacedConflict,
     adapt_preplaced_topology,
+    anchor_safe_order_variants,
     check_preplaced_compatibility,
     copy_preplaced_targets,
 )
@@ -46,11 +50,14 @@ __all__ = [
     "REL_NONE",
     "REL_RIGHT",
     "REL_UP",
+    "AnchorSafeOrderVariant",
     "DualPermutationHead",
     "PreplacedCompatibility",
     "PreplacedConflict",
     "SequencePairTopology",
     "adapt_preplaced_topology",
+    "anchor_safe_order_variants",
+    "anchored_longest_path_coordinates",
     "antisymmetry_loss",
     "check_preplaced_compatibility",
     "copy_preplaced_targets",
@@ -60,6 +67,7 @@ __all__ = [
     "longest_path_coordinates",
     "longest_path_pack",
     "pack_sequence_pair",
+    "pack_sequence_pair_with_anchors",
     "partial_label_nll",
     "relation_mask_from_rectangles",
     "sinkhorn",
