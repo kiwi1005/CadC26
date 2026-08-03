@@ -1,5 +1,10 @@
 # HCFP-5090 階段性執行路線圖
 
+> QoR-first continuation: see
+> [`hcfp5090_qor_first_implementation_plan_2026-08-03.md`](hcfp5090_qor_first_implementation_plan_2026-08-03.md).
+> It supersedes learned-lane scaling and activation work until structured
+> topology and constraint construction pass their promotion gates.
+
 > 狀態基準：2026-08-01，分支 `feat/hcfp5090-greenfield`
 
 本文件把 [`HCFP5090_完整技術報告.md`](../../HCFP5090_完整技術報告.md)
