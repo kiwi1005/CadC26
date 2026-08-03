@@ -296,10 +296,13 @@ def test_audit_runner_writes_atomic_report_and_preserves_returned_placement(
     assert row["seed"] == 7
     assert row["selected_positions"][0][0] == 0.0
     assert row["ranker_selection_counterfactual"]["would_accept"] is True
+    assert row["ranker_shadow_available"] is True
     assert len(row["selected_sha256"]) == 64
     assert report["summary"]["all_hard_feasible"] is True
     assert report["summary"]["rows"] == 1
     assert report["summary"]["would_accept"] == 1
+    assert report["summary"]["counterfactual_audit_gate_passed"] is True
+    assert report["summary"]["ranker_shadow_missing"] == 0
     assert report["summary"]["unique_selected_hashes"] == 1
     assert report["summary"]["output_hashes_by_case"]["case/a"] == [
         row["selected_sha256"]
@@ -359,6 +362,48 @@ def test_audit_fails_closed_on_checkpoint_fallback(
                 str(tmp_path / "audit.json"),
             ]
         )
+
+
+def test_audit_records_missing_ranker_shadow_as_a_failed_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    checkpoint = _install_fixture(monkeypatch, tmp_path)
+    analysis = _analysis()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = ()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_eligible_count"] = 0
+    analysis.analytic.incumbent_snapshot["ranker_selection_counterfactual"] = {
+        "would_accept": False,
+        "rejection_reason": "missing_shadow_top4",
+    }
+    monkeypatch.setattr(
+        audit,
+        "analyze_case_with_checkpoint",
+        lambda *_args, **_kwargs: analysis,
+    )
+    case_path = tmp_path / "case.json"
+    case_path.write_text(json.dumps(_case_payload()), encoding="utf-8")
+    output = tmp_path / "audit.json"
+
+    assert audit.main(
+        [
+            "--checkpoint",
+            str(checkpoint),
+            "--data-path",
+            str(tmp_path / "data"),
+            "--case-json",
+            str(case_path),
+            "--seed",
+            "7",
+            "--output",
+            str(output),
+        ]
+    ) == 0
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["cases"][0]["ranker_shadow_available"] is False
+    assert report["summary"]["ranker_shadow_missing"] == 1
+    assert report["summary"]["counterfactual_audit_gate_passed"] is False
 
 
 def test_audit_fails_closed_on_duplicate_cases_or_seeds(

@@ -373,8 +373,7 @@ def _audit_one(
     )
     snapshot = analysis.analytic.incumbent_snapshot
     shadow = tuple(snapshot.get("ranker_shadow_top4", ()))
-    if not shadow:
-        raise RuntimeError(f"{sample.sample_id}/{seed}: missing ranker shadow")
+    shadow_available = bool(shadow)
     metrics = _evaluate_positions(evaluator, sample, source, selected)
     if not metrics["hard_feasible"]:
         raise RuntimeError(f"{sample.sample_id}/{seed}: returned placement is infeasible")
@@ -391,6 +390,12 @@ def _audit_one(
         "selected_positions": selected,
         "hard_feasible": metrics["hard_feasible"],
         "selected_metrics": metrics,
+        "ranker_shadow_available": shadow_available,
+        "ranker_shadow_eligible_count": int(
+            snapshot.get("ranker_shadow_eligible_count", 0)
+        ),
+        "ranker_shadow_skipped_reason": snapshot.get("ranker_shadow_skipped_reason"),
+        "ranker_shadow_failure_reason": snapshot.get("ranker_shadow_failure_reason"),
         "shadow_top4": shadow,
         "ranker_selection_counterfactual": counterfactual,
         "ranker_selection_evaluated_top4": tuple(
@@ -490,6 +495,7 @@ def _config_payload(
         "collective_steps": args.collective_steps,
         "tail_topk": args.tail_topk,
         "device": args.device,
+        "audit_script_sha256": file_sha256(Path(__file__)),
     }
 
 
@@ -602,10 +608,20 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         if isinstance(row.get("ranker_selection_counterfactual"), dict)
         and row["ranker_selection_counterfactual"].get("would_accept") is True
     ]
+    missing_shadow = [row for row in rows if not _row_has_ranker_shadow(row)]
+    all_hard_feasible = all(bool(row["hard_feasible"]) for row in rows)
     return {
         "rows": len(rows),
         "would_accept": len(accept),
-        "all_hard_feasible": all(bool(row["hard_feasible"]) for row in rows),
+        "all_hard_feasible": all_hard_feasible,
+        "ranker_shadow_available": len(rows) - len(missing_shadow),
+        "ranker_shadow_missing": len(missing_shadow),
+        "all_ranker_shadows_available": not missing_shadow,
+        "counterfactual_audit_gate_passed": all_hard_feasible and not missing_shadow,
+        "missing_ranker_shadow_rows": [
+            {"case_id": row["case_id"], "seed": row["seed"]}
+            for row in missing_shadow
+        ],
         "unique_selected_hashes": len({row["selected_sha256"] for row in rows}),
         "output_hashes_by_case": {
             case_id: sorted(
@@ -614,6 +630,12 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             for case_id in sorted({str(row["case_id"]) for row in rows})
         },
     }
+
+
+def _row_has_ranker_shadow(row: dict[str, Any]) -> bool:
+    if "ranker_shadow_available" in row:
+        return bool(row["ranker_shadow_available"])
+    return bool(row.get("shadow_top4"))
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
