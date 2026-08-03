@@ -92,18 +92,30 @@ projection success and proves the learned-versus-analytic runtime gate.
 - [x] Branch independently on uncertain component directions and reject cycles.
 - [x] Add repeated-signature reset within the same construction-safe stratum.
 - [x] Add exact FP64 commit, active-contact latching, and preserve-original routing.
+- [x] Retain changed, uncommitted component proposals behind raw replay, exact
+  verification, and the existing Pareto guard.
+- [x] Add exact raw/projected/proposal portfolio telemetry and schema-v7 runtime
+  separation.
 - [~] Compare feasibility, displacement, HPWL, bbox, and p95 runtime from one clean commit.
-- [ ] Embed solver commit and clean-tree proof in legacy/component/analytic artifacts.
-- [ ] Rerun a pure analytic runtime comparator on the identical case list.
+- [~] Embed solver commit and clean-tree proof in component/analytic artifacts.
+- [~] Rerun a pure analytic runtime comparator on the identical case list.
+- [~] Skip component work for already exact-feasible guided rows and profile the
+  remaining solver-core hot path.
 
-Current gate: **EXACT-SAFE PARTIAL CHECKPOINT; promotion blocked**. The
-historical diagnostic shows zero constraint hard regressions and preserves the
-raw constraint oracle, but constraint projected coverage falls from 338/512 to
-322/512. The 87.65% all-row movement reduction is dominated by 506 no-commits;
-hard-feasible-conditioned movement rises from `0.01845` to `0.24761`. The p95
-ratio of 1.150 is learned/component versus learned/legacy, not learned versus
-pure analytic. The two artifacts lack solver commit/dirty-patch provenance and
-predate neutral-clearance isolation. Full evidence and limitations are in
+Current gate: **EXACT-SAFE QoR CHECKPOINT; runtime promotion blocked**. A dirty
+large16 retained-proposal diagnostic reaches 364/512 exact hard-feasible
+constraint candidates, above the legacy control's 338/512 and component
+primary's 322/512. Weighted constraint-oracle `J` improves to `2.276194`, and
+case 14 improves from `J=3.052426`/45 soft violations to
+`J=2.415978`/27 soft violations. Original geometry remains recoverable and the
+exact verifier plus Pareto guard remain authoritative.
+
+Schema-v7 timing exposes the remaining blocker: a paired one-case smoke is
+22.765 seconds learned versus 0.243 seconds analytic (93.6x), with 22.004
+seconds in solver core and 0.761 seconds in runtime-final selection. Offline
+candidate audit is reported separately and does not pollute solver runtime.
+The full large16 comparator still needs a clean commit, but this gap already
+prevents promotion. Full evidence and limitations are in
 [`hcfp5090_q4_component_bdp_results_2026-08-03.md`](hcfp5090_q4_component_bdp_results_2026-08-03.md).
 
 Explicit pre-projection HPWL perturbation remains deferred. Q4 uses

@@ -18,6 +18,18 @@ BDP_RIGHT = 1
 BDP_BELOW = 2
 BDP_ABOVE = 3
 TOPOLOGY_TO_BDP = (BDP_LEFT, BDP_RIGHT, BDP_ABOVE, BDP_BELOW)
+_PROPOSAL_REASONS = (
+    "not_component",
+    "already_feasible",
+    "projector_incomplete",
+    "construction_regression",
+    "committed",
+)
+_PROPOSAL_NOT_COMPONENT = 0
+_PROPOSAL_ALREADY_FEASIBLE = 1
+_PROPOSAL_PROJECTOR_INCOMPLETE = 2
+_PROPOSAL_CONSTRUCTION_REGRESSION = 3
+_PROPOSAL_COMMITTED = 4
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,13 @@ class ProjectionResult:
     reset_count: Tensor
     beam_states_evaluated: Tensor
     max_component_size: Tensor
+    component_proposal_available: Tensor
+    component_proposal_xywh: Tensor
+    component_proposal_hard_ok: Tensor
+    component_proposal_structure_ok: Tensor
+    component_proposal_final_pair_count: Tensor
+    component_proposal_displacement: Tensor
+    component_proposal_rollback_reason: tuple[str, ...]
 
 
 def _get_field(source: Any, names: tuple[str, ...], default: Any = None) -> Any:
@@ -270,6 +289,15 @@ def _merge_projection_results(
         reasons[index] = reason
     for index, reason in zip(neutral_indices, neutral.failure_reasons, strict=True):
         reasons[index] = reason
+    proposal_reasons = [""] * count
+    for index, reason in zip(
+        guided_indices, guided.component_proposal_rollback_reason, strict=True
+    ):
+        proposal_reasons[index] = reason
+    for index, reason in zip(
+        neutral_indices, neutral.component_proposal_rollback_reason, strict=True
+    ):
+        proposal_reasons[index] = reason
     status = (
         "ok"
         if bool(ok_mask.all().item())
@@ -308,6 +336,31 @@ def _merge_projection_results(
         max_component_size=merge(
             guided.max_component_size, neutral.max_component_size
         ),
+        component_proposal_available=merge(
+            guided.component_proposal_available,
+            neutral.component_proposal_available,
+        ),
+        component_proposal_xywh=merge(
+            guided.component_proposal_xywh,
+            neutral.component_proposal_xywh,
+        ),
+        component_proposal_hard_ok=merge(
+            guided.component_proposal_hard_ok,
+            neutral.component_proposal_hard_ok,
+        ),
+        component_proposal_structure_ok=merge(
+            guided.component_proposal_structure_ok,
+            neutral.component_proposal_structure_ok,
+        ),
+        component_proposal_final_pair_count=merge(
+            guided.component_proposal_final_pair_count,
+            neutral.component_proposal_final_pair_count,
+        ),
+        component_proposal_displacement=merge(
+            guided.component_proposal_displacement,
+            neutral.component_proposal_displacement,
+        ),
+        component_proposal_rollback_reason=tuple(proposal_reasons),
     )
 
 
@@ -1502,6 +1555,18 @@ def project_disjunctive(
     new_pairs_detected = torch.zeros(work.shape[0], dtype=torch.long, device=work.device)
     reset_count = torch.zeros(work.shape[0], dtype=torch.long, device=work.device)
     beam_states_evaluated = torch.zeros(work.shape[0], dtype=torch.long, device=work.device)
+    proposal_available = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
+    proposal_xywh = work.clone()
+    proposal_hard_ok = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
+    proposal_structure_ok = torch.zeros(work.shape[0], dtype=torch.bool, device=work.device)
+    proposal_final_pair_count = torch.zeros(work.shape[0], dtype=torch.long, device=work.device)
+    proposal_displacement = torch.zeros(work.shape[0], dtype=work.dtype, device=work.device)
+    proposal_rollback_reason = torch.full(
+        (work.shape[0],),
+        _PROPOSAL_NOT_COMPONENT,
+        dtype=torch.long,
+        device=work.device,
+    )
     if component_enabled:
         (
             candidate,
@@ -1541,6 +1606,11 @@ def project_disjunctive(
             problem,
             tolerance,
         )[:, 0]
+        proposal_available = torch.ones(work.shape[0], dtype=torch.bool, device=work.device)
+        proposal_xywh = candidate
+        proposal_hard_ok = candidate_hard_ok
+        proposal_structure_ok = structure_ok
+        proposal_displacement = torch.linalg.vector_norm(candidate[..., :2] - work[..., :2], dim=-1).sum(dim=1)
         candidate_admissible = candidate_hard_ok & structure_ok
         candidate_active = _active_overlap_matrix_exact(candidate, tolerance)
         original_active = _active_overlap_matrix_exact(work, tolerance)
@@ -1553,12 +1623,11 @@ def project_disjunctive(
                 exempt.unsqueeze(0), torch.zeros_like(original_active), original_active
             )
         candidate_conflicts = candidate_active.sum(dim=(1, 2))
+        proposal_final_pair_count = candidate_active[:, pairs[:, 0], pairs[:, 1]].sum(dim=1)
         original_conflicts = original_active.sum(dim=(1, 2))
         if component_config.preserve_feasible:
-            # A partial projection has no downstream value: exact selection will
-            # reject it, while its displacement can destroy raw contact repair.
-            # Commit component motion only when it crosses the hard-feasibility
-            # boundary; otherwise retain the original candidate byte-for-byte.
+            # Preserve the primary candidate unless the component proposal
+            # crosses the hard-feasibility boundary without structural rollback.
             better = candidate_admissible & ~original_ok
         else:
             same_feasibility = candidate_hard_ok == original_ok
@@ -1592,6 +1661,39 @@ def project_disjunctive(
         )
         best_active_count = torch.where(
             better, candidate_active_count, initial_pair_count
+        )
+        proposal_rollback_reason = torch.where(
+            better,
+            torch.full_like(proposal_rollback_reason, _PROPOSAL_COMMITTED),
+            torch.where(
+                original_ok,
+                torch.full_like(
+                    proposal_rollback_reason,
+                    _PROPOSAL_ALREADY_FEASIBLE,
+                ),
+                torch.where(
+                    ~candidate_hard_ok,
+                    torch.full_like(
+                        proposal_rollback_reason,
+                        _PROPOSAL_PROJECTOR_INCOMPLETE,
+                    ),
+                    torch.where(
+                        ~structure_ok,
+                        torch.full_like(
+                            proposal_rollback_reason,
+                            _PROPOSAL_CONSTRUCTION_REGRESSION,
+                        ),
+                        torch.full_like(
+                            proposal_rollback_reason,
+                            _PROPOSAL_PROJECTOR_INCOMPLETE,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        proposal_available = (
+            (proposal_rollback_reason == _PROPOSAL_PROJECTOR_INCOMPLETE)
+            | (proposal_rollback_reason == _PROPOSAL_CONSTRUCTION_REGRESSION)
         )
     else:
         for variant in range(max(1, min(beam, 4))):
@@ -1669,6 +1771,10 @@ def project_disjunctive(
     final_pair_count = final_active[:, pairs[:, 0], pairs[:, 1]].sum(dim=1)
     displacement = torch.linalg.vector_norm(best_xywh[..., :2] - work[..., :2], dim=-1).sum(dim=1)
     status = "ok" if bool(ok_mask.all().item()) else ("partial" if bool(ok_mask.any().item()) else "infeasible")
+    proposal_reasons = tuple(
+        _PROPOSAL_REASONS[int(code)]
+        for code in proposal_rollback_reason.detach().cpu().tolist()
+    )
     return ProjectionResult(
         xywh=best_xywh[0] if single else best_xywh,
         ok=bool(ok_mask.all().item()),
@@ -1688,6 +1794,13 @@ def project_disjunctive(
         reset_count=reset_count[0] if single else reset_count,
         beam_states_evaluated=beam_states_evaluated[0] if single else beam_states_evaluated,
         max_component_size=max_component_size[0] if single else max_component_size,
+        component_proposal_available=proposal_available[0] if single else proposal_available,
+        component_proposal_xywh=proposal_xywh[0] if single else proposal_xywh,
+        component_proposal_hard_ok=proposal_hard_ok[0] if single else proposal_hard_ok,
+        component_proposal_structure_ok=proposal_structure_ok[0] if single else proposal_structure_ok,
+        component_proposal_final_pair_count=proposal_final_pair_count[0] if single else proposal_final_pair_count,
+        component_proposal_displacement=proposal_displacement[0] if single else proposal_displacement,
+        component_proposal_rollback_reason=(proposal_reasons[0],) if single else proposal_reasons,
     )
 
 

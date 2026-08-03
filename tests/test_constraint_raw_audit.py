@@ -124,6 +124,110 @@ def test_candidate_pairs_classify_and_repair_constraint_sources(
     )
 
 
+def test_component_proposal_records_repair_only_constraint_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = torch.tensor(
+        [
+            [[0.0, 0.0, 1.0, 1.0]],
+            [[10.0, 0.0, 1.0, 1.0]],
+            [[20.0, 0.0, 1.0, 1.0]],
+        ]
+    )
+    proposals = raw.clone()
+    proposals[2, 0, 0] += 3.0
+    telemetry = SimpleNamespace(
+        component_proposal_available=torch.tensor([False, True, True]),
+        component_proposal_xywh=proposals,
+        component_proposal_hard_ok=torch.tensor([False, False, True]),
+        component_proposal_structure_ok=torch.tensor([False, False, False]),
+        component_proposal_final_pair_count=torch.tensor([0, 2, 0]),
+        component_proposal_displacement=torch.tensor([0.0, 1.0, 3.0]),
+        component_proposal_rollback_reason=(
+            "not_component",
+            "projector_incomplete",
+            "construction_regression",
+        ),
+    )
+    repair_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        audit,
+        "to_official_placements",
+        lambda _source, _case, boxes: boxes.tolist(),
+    )
+
+    def repair(_source, placements, record):
+        repair_calls.append(record)
+        return RawConstraintRepair(
+            tuple(tuple(float(value) for value in row) for row in placements),
+            group_edges_applied=1,
+            group_edges_rejected=0,
+            boundary_blocks_applied=0,
+            boundary_blocks_rejected=0,
+        )
+
+    monkeypatch.setattr(audit, "repair_raw_constraints", repair)
+    record = {"source": "candidate_2", "kind": "combined"}
+
+    rows = audit._component_proposal_records(
+        _Evaluator,
+        {},
+        object(),
+        raw,
+        ("fallback", "learned_initial", "learned_initial"),
+        frozenset((2,)),
+        {2: record},
+        telemetry,
+        (),
+    )
+
+    assert len(rows) == 1
+    assert repair_calls == [record, record]
+    assert rows[0]["stage"] == "component_proposal"
+    assert rows[0]["candidate_type"] == "constraint"
+    assert rows[0]["proposal"] == {
+        "normalized_hard_ok": True,
+        "structure_ok": False,
+        "normalized_fp64_final_pairs": 0,
+        "normalized_displacement": 3.0,
+        "rollback_reason": "construction_regression",
+    }
+    assert rows[0]["projection_displacement"] == pytest.approx(3.0)
+
+
+def test_exact_candidate_portfolio_keeps_best_feasible_stage_per_index() -> None:
+    raw = _candidate(1, "constraint", 2.0, 0.0)
+    raw.update(
+        stage="raw",
+        hard_feasible=True,
+        total_soft_violations=2,
+        bbox_area=20.0,
+        hpwl_total=10.0,
+        overlap_violations=0,
+        area_violations=0,
+        dimension_violations=0,
+        fixed_violations=0,
+        preplaced_violations=0,
+    )
+    projected = dict(raw, stage="post_bdp", log_uncapped_cost=1.5)
+    proposal = dict(
+        raw,
+        stage="component_proposal",
+        log_uncapped_cost=1.0,
+    )
+
+    portfolio = audit._exact_candidate_portfolio(
+        [raw],
+        [projected],
+        [proposal],
+    )
+
+    assert len(portfolio) == 1
+    assert portfolio[0]["stage"] == "exact_portfolio"
+    assert portfolio[0]["portfolio_source_stage"] == "component_proposal"
+    assert portfolio[0]["log_uncapped_cost"] == 1.0
+
+
 def test_projection_displacement_is_sum_of_raw_xy_l2_norms() -> None:
     raw = [(0.0, 0.0, 2.0, 2.0), (5.0, 5.0, 1.0, 1.0)]
     projected = [(3.0, 4.0, 2.0, 2.0), (5.0, 7.0, 1.0, 1.0)]
@@ -315,4 +419,63 @@ def test_summary_reports_q2_weighted_gates_and_selected_gain() -> None:
         "p50": 1.5,
         "p95": pytest.approx(1.95),
         "maximum": 2.0,
+    }
+
+
+def test_summary_separates_solver_audit_and_paired_analytic_runtime() -> None:
+    cases = [
+        {
+            **_case(
+                index,
+                106 + index,
+                analytic=3.0,
+                topology=2.0,
+                constraint=1.0,
+                selected=0.5,
+                topology_displacement=1.0,
+                constraint_displacement=1.0,
+            ),
+            "solver_runtime_seconds": solver,
+            "analytic_runtime_seconds": analytic,
+            "audit_runtime_seconds": audit_seconds,
+            "offline_candidate_audit_seconds": audit_seconds - solver - analytic,
+            "runtime_breakdown": {
+                "learned_solver_core_seconds": solver - 0.5,
+                "runtime_final_selection_seconds": 0.5,
+            },
+            "runtime_order": (
+                "learned_then_analytic"
+                if index % 2 == 0
+                else "analytic_then_learned"
+            ),
+            "analytic_comparator": {"hard_feasible": True},
+        }
+        for index, (solver, analytic, audit_seconds) in enumerate(
+            ((2.0, 1.0, 5.0), (4.0, 2.0, 7.0))
+        )
+    ]
+
+    summary = audit._summary(cases)
+
+    assert summary["runtime"]["p50"] == pytest.approx(3.0)
+    assert summary["analytic_runtime"]["p50"] == pytest.approx(1.5)
+    assert summary["audit_wall_runtime"]["p50"] == pytest.approx(6.0)
+    assert summary["offline_candidate_audit_runtime"]["p50"] == pytest.approx(1.5)
+    assert summary["runtime_breakdown"][
+        "learned_solver_core_seconds"
+    ]["p50"] == pytest.approx(2.5)
+    assert summary["analytic_comparator"] == {
+        "case_count": 2,
+        "hard_feasible_count": 2,
+        "execution_order_count": {
+            "learned_then_analytic": 1,
+            "analytic_then_learned": 1,
+        },
+    }
+    assert summary["runtime_vs_analytic"] == {
+        "p50_ratio": pytest.approx(2.0),
+        "p95_ratio": pytest.approx(2.0),
+        "per_case_ratio_p50": pytest.approx(2.0),
+        "per_case_ratio_p95": pytest.approx(2.0),
+        "per_case_ratio_maximum": pytest.approx(2.0),
     }

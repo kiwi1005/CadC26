@@ -279,6 +279,11 @@ def test_guided_partial_projection_preserves_original_instead_of_legacy_fallback
     assert torch.equal(result.xywh[0], boxes[0])
     assert float(result.displacement[0]) == 0.0
     assert int(result.initial_pair_count[0]) == int(result.final_pair_count[0])
+    assert bool(result.component_proposal_available[0])
+    assert not bool(result.component_proposal_hard_ok[0])
+    assert result.component_proposal_rollback_reason[0] == "projector_incomplete"
+    assert torch.equal(result.component_proposal_xywh[1], boxes[1])
+    assert result.component_proposal_rollback_reason[1] == "not_component"
     assert torch.equal(result.xywh[1], legacy.xywh)
 
 
@@ -388,7 +393,74 @@ def test_component_commit_rejects_structure_regression_when_conflicts_drop(
     ).item()
     assert torch.equal(guarded.xywh, boxes)
     assert guarded.final_pair_count.item() == 3
-    assert guarded.displacement.item() == 0.0
+    assert bool(guarded.component_proposal_available)
+    assert not bool(guarded.component_proposal_hard_ok)
+    assert guarded.component_proposal_rollback_reason == ("projector_incomplete",)
+
+
+def test_component_hard_proposal_rejected_by_structure_is_inspectable(monkeypatch: pytest.MonkeyPatch) -> None:
+    boxes = _repeated_signature_boxes()
+    guidance = projection.ProjectionGuidance(
+        torch.full((1, 5, 5), -1, dtype=torch.long),
+        torch.ones((1, 5, 5)),
+        torch.full((1, 5, 5), -1, dtype=torch.long),
+        torch.zeros((1, 5, 5)),
+        torch.zeros((1, 5, 2), dtype=torch.bool),
+    )
+
+    def reject_structure(branch_boxes, *_args):
+        return torch.zeros(
+            branch_boxes.shape[:2],
+            dtype=torch.bool,
+            device=branch_boxes.device,
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(projection, "_structure_nonregression", reject_structure)
+        result = projection.project_disjunctive(
+            boxes,
+            iterations=1,
+            guidance=guidance,
+            component_config=projection.ComponentBDPConfig(
+                enabled=True,
+                beam_width=4,
+                outer_sweeps=8,
+                preserve_feasible=True,
+            ),
+        )
+
+    assert torch.equal(result.xywh, boxes)
+    assert not result.ok
+    assert bool(result.component_proposal_available)
+    assert bool(result.component_proposal_hard_ok)
+    assert not bool(result.component_proposal_structure_ok)
+    assert result.component_proposal_final_pair_count.item() == 0
+    assert result.component_proposal_rollback_reason == ("construction_regression",)
+    assert result.displacement.item() == 0.0
+
+
+def test_component_proposal_excludes_unchanged_feasible_geometry() -> None:
+    boxes = torch.tensor(
+        [[0.0, 0.0, 1.0, 1.0], [2.0, 0.0, 1.0, 1.0]]
+    )
+    guidance = projection.ProjectionGuidance(
+        torch.full((1, 2, 2), -1, dtype=torch.long),
+        torch.zeros((1, 2, 2)),
+        torch.full((1, 2, 2), -1, dtype=torch.long),
+        torch.zeros((1, 2, 2)),
+        torch.tensor([[[True, False], [False, False]]]),
+    )
+
+    result = projection.project_disjunctive(
+        boxes,
+        guidance=guidance,
+        component_config=projection.ComponentBDPConfig(enabled=True),
+    )
+
+    assert result.ok
+    assert torch.equal(result.xywh, boxes)
+    assert not bool(result.component_proposal_available)
+    assert result.component_proposal_rollback_reason == ("already_feasible",)
 
 
 @pytest.mark.parametrize(
@@ -614,8 +686,15 @@ def test_disabled_component_mode_matches_legacy_projection(device) -> None:
         "reset_count",
         "beam_states_evaluated",
         "max_component_size",
+        "component_proposal_available",
+        "component_proposal_xywh",
+        "component_proposal_hard_ok",
+        "component_proposal_structure_ok",
+        "component_proposal_final_pair_count",
+        "component_proposal_displacement",
     ):
         assert torch.equal(getattr(disabled, field), getattr(legacy, field))
+    assert disabled.component_proposal_rollback_reason == legacy.component_proposal_rollback_reason
     assert disabled.iterations == legacy.iterations
 
 

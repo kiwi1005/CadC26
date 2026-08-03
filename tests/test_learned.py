@@ -549,6 +549,156 @@ def test_raw_constraint_branch_survives_a_worse_projected_branch(
     assert selected[0][0] == 5.0
 
 
+def test_raw_constraint_guard_can_admit_exact_dominating_component_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hcfp.learned as learned
+
+    analysis = _pareto_analysis(
+        analytic_source="candidate_2",
+        analytic_exact_source=None,
+        analytic_fast_source=None,
+    )
+    proposal = analysis.analytic.projected_candidates.clone()
+    proposal[3, :, 0] = torch.tensor([5.0, 8.0])
+    analysis.analytic.telemetry.component_proposal_xywh = proposal
+    analysis.analytic.telemetry.component_proposal_available = torch.tensor(
+        [False, False, False, True, False]
+    )
+    analysis.analytic.incumbent_snapshot["constraint_seed_provenance"] = (
+        {"source": "candidate_3", "details": {"moves": ()}},
+    )
+
+    monkeypatch.setattr(
+        learned,
+        "to_official_placements",
+        lambda _source, _case, candidate: [
+            tuple(float(value) for value in row) for row in candidate.tolist()
+        ],
+    )
+    monkeypatch.setattr(
+        learned,
+        "repair_raw_constraints",
+        lambda _source, rows, _record: SimpleNamespace(placements=tuple(rows)),
+    )
+    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] == 5.0)
+    monkeypatch.setattr(
+        learned,
+        "_raw_quality",
+        lambda _source, _case, rows: {
+            5.0: (1.0, 10.0, 10.0),
+            20.0: (2.0, 20.0, 20.0),
+            30.0: (3.0, 30.0, 30.0),
+        }[rows[0][0]],
+    )
+
+    selected = learned._raw_constraint_pareto_guard(
+        _source(),
+        object(),
+        analysis,
+        [(20.0, 0.0, 2.0, 2.0), (23.0, 0.0, 2.0, 2.0)],
+    )
+
+    assert selected[0][0] == 5.0
+
+
+def test_raw_constraint_guard_ignores_proposal_without_constraint_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hcfp.learned as learned
+
+    analysis = _pareto_analysis(
+        analytic_source="candidate_2",
+        analytic_exact_source=None,
+        analytic_fast_source=None,
+    )
+    proposal = analysis.analytic.projected_candidates.clone()
+    proposal[3, :, 0] = torch.tensor([5.0, 8.0])
+    analysis.analytic.telemetry.component_proposal_xywh = proposal
+    analysis.analytic.telemetry.component_proposal_available = torch.tensor(
+        [False, False, False, True, False]
+    )
+
+    monkeypatch.setattr(
+        learned,
+        "to_official_placements",
+        lambda _source, _case, candidate: [
+            tuple(float(value) for value in row) for row in candidate.tolist()
+        ],
+    )
+    monkeypatch.setattr(learned, "verify_feasible", lambda *_args: True)
+    monkeypatch.setattr(
+        learned,
+        "_raw_quality",
+        lambda _source, _case, rows: {
+            5.0: (1.0, 10.0, 10.0),
+            20.0: (2.0, 20.0, 20.0),
+        }[rows[0][0]],
+    )
+
+    selected = learned._raw_constraint_pareto_guard(
+        _source(),
+        object(),
+        analysis,
+        [(20.0, 0.0, 2.0, 2.0), (23.0, 0.0, 2.0, 2.0)],
+    )
+
+    assert selected[0][0] == 20.0
+
+
+def test_raw_constraint_guard_rejects_infeasible_component_proposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hcfp.learned as learned
+
+    analysis = _pareto_analysis(
+        analytic_source="candidate_2",
+        analytic_exact_source=None,
+        analytic_fast_source=None,
+    )
+    proposal = analysis.analytic.projected_candidates.clone()
+    proposal[3, :, 0] = torch.tensor([5.0, 8.0])
+    analysis.analytic.telemetry.component_proposal_xywh = proposal
+    analysis.analytic.telemetry.component_proposal_available = torch.tensor(
+        [False, False, False, True, False]
+    )
+    analysis.analytic.incumbent_snapshot["constraint_seed_provenance"] = (
+        {"source": "candidate_3", "details": {"moves": ()}},
+    )
+
+    monkeypatch.setattr(
+        learned,
+        "to_official_placements",
+        lambda _source, _case, candidate: [
+            tuple(float(value) for value in row) for row in candidate.tolist()
+        ],
+    )
+    monkeypatch.setattr(
+        learned,
+        "repair_raw_constraints",
+        lambda _source, rows, _record: SimpleNamespace(placements=tuple(rows)),
+    )
+    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] != 5.0)
+    monkeypatch.setattr(
+        learned,
+        "_raw_quality",
+        lambda _source, _case, rows: {
+            5.0: (1.0, 10.0, 10.0),
+            20.0: (2.0, 20.0, 20.0),
+            30.0: (3.0, 30.0, 30.0),
+        }[rows[0][0]],
+    )
+
+    selected = learned._raw_constraint_pareto_guard(
+        _source(),
+        object(),
+        analysis,
+        [(20.0, 0.0, 2.0, 2.0), (23.0, 0.0, 2.0, 2.0)],
+    )
+
+    assert selected[0][0] == 20.0
+
+
 def test_raw_infeasible_or_tradeoff_candidate_cannot_trigger_pareto_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

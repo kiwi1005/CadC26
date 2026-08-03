@@ -3,7 +3,7 @@
 Date: 2026-08-03
 Branch: `feat/hcfp5090-qor-first`
 Base: `origin/main` at `2ddc494`
-Status: **exact-safe opt-in checkpoint; promotion gate not yet passed**
+Status: **exact-safe QoR checkpoint; runtime promotion gate remains blocked**
 
 ## Decision
 
@@ -13,19 +13,31 @@ motion, exact FP64 commit checks, construction-nonregression gates, and
 post-projection HPWL/bbox-aware branch ordering. Guided rows either cross the
 hard-feasibility boundary or retain their original geometry; they no longer
 fall back to a legacy partial projection that can destroy a raw-repairable
-candidate.
+candidate. An uncommitted component proposal is now retained separately from
+the primary candidate and can enter the runtime only after raw constraint
+replay, exact hard verification, and the existing dominance guard.
 
-The existing 16-case 106--120-block audit is useful diagnostic evidence, but it
-does not pass the original Q4 promotion gate. Constraint hard-feasible coverage
-falls from 338/512 to 322/512, 506/512 constraint rows make no commit, and
-hard-feasible-conditioned movement rises from `0.01845` to `0.24761`. The
-reported p95 ratio compares two learned pipelines rather than learned versus
-pure analytic. The two artifacts also do not record a solver commit or dirty
-patch hash and were not generated from one frozen code state.
+The retained-proposal diagnostic closes the earlier feasibility/QoR gap:
+the exact per-candidate raw/projected/proposal portfolio reaches 364/512
+hard-feasible constraint candidates, above the legacy control's 338/512, and
+improves constraint-oracle weighted `J` to `2.276194`. It also changes the
+runtime-selected result on held-out case 14 from `J=3.052426` with 45 soft
+violations to `J=2.415978` with 27 soft violations. The original candidate
+remains recoverable and no proposal can bypass exact verification or Pareto
+dominance.
+
+This is not default-promotion proof. The large16 result was generated from a
+dirty worktree, and a schema-v7 one-case comparator measures 22.765 seconds for
+the learned solver versus 0.243 seconds for the exact-safe analytic comparator.
+That 93.6x ratio is a smoke measurement, not a stable large16 p95, but it is
+already a decisive runtime blocker. Schema v7 now separates solver runtime,
+runtime-final selection, offline candidate audit, and full audit wall time so
+the next clean rerun cannot mistake evaluator overhead for solver time.
 
 The implementation therefore remains opt-in. Q2 still has a 77.3% group
 connectivity result rather than the 95% target, and Q3 remains deferred until a
-clean-commit legacy/component/pure-analytic rerun resolves the Q4 gate. The
+clean-commit component/pure-analytic rerun and runtime reduction resolve the Q4
+gate. The
 analytic incumbent, exact verifier, fallback, and dominance safety invariant
 remain mandatory.
 
@@ -96,6 +108,57 @@ another motion source before exact Q4 evidence exists is not justified.
 7. Mixed routing applied FP32-safe component clearance to neutral learned rows.
    Neutral rows now retain legacy clearance so component and neutral effects can
    be attributed separately in the clean rerun.
+8. A component proposal that did not pass the normalized commit gate could
+   still become exact-feasible after raw group/boundary replay. `ProjectionResult`
+   now retains only changed, uncommitted proposals. Already-feasible no-ops and
+   already-committed geometry are not duplicated in the runtime portfolio.
+9. Audit wall time previously included hundreds of official evaluator calls per
+   case. Schema v7 records solver core, runtime-final selection, offline
+   candidate audit, and full audit wall time separately. The compatibility
+   `runtime_seconds` field is the solver total, not the audit wall clock.
+
+## Retained-proposal diagnostic
+
+The following artifact is a dirty-worktree diagnostic. It records the solver
+commit and dirty fingerprint, but cannot serve as clean promotion evidence:
+
+```text
+artifacts/benchmarks/hcfp5090-q4-proposal-portfolio-diagnostic-large16.json
+SHA-256: 4d5eb6487da3e165bd452f6caf433bc28875fe3c51c6bd6ab2cf07a9eda39693
+sample-list SHA-256:
+e79491726efed65ebb6c55f7e63564e4896cc7d345bca18da725660de7d8fab9
+```
+
+| Constraint candidate gate | Hard feasible / 512 | Weighted oracle `J` |
+|---|---:|---:|
+| raw exact replay | 316 | 2.279428 |
+| component primary | 322 | 2.279428 |
+| legacy control | 338 | 2.281423 |
+| exact raw/projected/proposal portfolio | 364 | 2.276194 |
+
+The proposal stage repairs 326/512 rows in the diagnostic before unchanged and
+committed duplicates are pruned. The exact portfolio selects proposal geometry
+for 186 candidate indices; 48 of those selections are hard feasible, while the
+remaining selections are diagnostic least-violation representatives when no
+stage for that index is feasible. Case-level runtime selection changes only
+when the proposal is exact feasible and dominates the incumbent. Case 14 is the
+material win: `J` improves by `0.636448` and soft violations fall by 18. Other
+selected-placement differences against the legacy artifact are numerical noise.
+
+The latest schema-v7 smoke is:
+
+```text
+artifacts/benchmarks/hcfp5090-q4-schema7-smoke-case2.json
+SHA-256: 9fb5201e1b23bfef222c90fd3015ee425bafc974eca2ea557d5e4f199e913a67
+```
+
+It runs the analytic comparator first, then the learned lane, on held-out index
+1. Learned core plus exact selection is 22.765 seconds; analytic solve plus raw
+replay and exact check is 0.243 seconds. Offline candidate audit is another
+10.185 seconds and is explicitly excluded from both solver measurements. The
+learned runtime is dominated by the 22.004-second solver core, not the
+0.761-second exact selection. This makes guided-row/component projection
+runtime the next direct engineering target.
 
 ## Provisional historical paired audit
 
@@ -187,16 +250,21 @@ stays off by default.
 
 ## Promotion and next stage
 
-Q4 is an exact-safe opt-in checkpoint, not a promoted stage. Default learned
-activation remains shadow-only. Before Q3 starts, rerun from the clean Q4
-commit:
+Q4 is an exact-safe QoR checkpoint, not a promoted stage. Default learned
+activation remains shadow-only. The feasibility/QoR portfolio target is met in
+the dirty large16 diagnostic, but the learned-versus-analytic runtime target is
+not close. The immediate sequence is:
 
-1. legacy learned pipeline with legacy clearance;
-2. component learned pipeline with structured-only routing;
-3. pure analytic comparator;
-4. identical case list, checkpoint, seed, and cold-start policy;
-5. embedded solver commit and clean-tree proof in every artifact.
+1. commit the retained-proposal and schema-v7 timing boundary;
+2. skip component work for rows already exact feasible and profile remaining
+   infeasible conflict components;
+3. rerun component and pure-analytic lanes from the same clean commit with the
+   identical sample list, checkpoint, seed, and alternating execution order;
+4. require exact portfolio coverage of at least 338/512, zero selected hard
+   regressions, no weighted-`J` regression, and learned p95 at most 1.20 times
+   analytic p95;
+5. use `scripts/benchmark_hcfp.py` for final official-wrapper wall-time proof.
 
-Only a rerun that preserves projection success, demonstrates the analytic p95
-gate, and retains the dominance safety invariant can unblock Q3. Exact
+Q3 collective dynamics remains deferred while the current solver core is one
+to two orders of magnitude slower than the analytic comparator. Exact
 verification and Pareto-safe fallback remain non-negotiable.

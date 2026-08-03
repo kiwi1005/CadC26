@@ -393,7 +393,7 @@ def _merge_tail_analyses(
         second = getattr(learned.telemetry, field.name)
         telemetry_values[field.name] = (
             merge_tuple(first, second)
-            if field.name == "projection_failure_reasons"
+            if field.name in {"projection_failure_reasons", "component_proposal_rollback_reason"}
             else merge_tensor(first, second)
         )
     telemetry = CandidateTelemetry(**telemetry_values)
@@ -630,14 +630,36 @@ def _raw_constraint_pareto_guard(
         "raw_candidates",
         projected_candidates,
     )
+    proposal_candidates = getattr(
+        analysis.analytic.telemetry,
+        "component_proposal_xywh",
+        None,
+    )
+    proposal_available = getattr(
+        analysis.analytic.telemetry,
+        "component_proposal_available",
+        None,
+    )
+    if proposal_available is not None:
+        proposal_available = proposal_available.detach().to(
+            device="cpu", dtype=torch.bool
+        )
     for candidate_source, record in records.items():
         index = _candidate_index(candidate_source)
         if index is None:
             continue
-        for stage, candidates in (
+        stages: list[tuple[str, Tensor]] = [
             ("raw", raw_candidates),
             ("projected", projected_candidates),
+        ]
+        if (
+            proposal_candidates is not None
+            and proposal_available is not None
+            and 0 <= index < proposal_available.numel()
+            and bool(proposal_available[index])
         ):
+            stages.append(("proposal", proposal_candidates))
+        for stage, candidates in stages:
             if not 0 <= index < candidates.shape[0]:
                 continue
             placement = to_official_placements(
@@ -656,6 +678,7 @@ def _raw_constraint_pareto_guard(
                 continue
             if _dominates(metrics, current_metrics):
                 admitted.append((metrics, index, stage, placement))
+    stage_rank = {"raw": 0, "projected": 1, "proposal": 2}
     return (
         min(
             admitted,
@@ -663,7 +686,7 @@ def _raw_constraint_pareto_guard(
                 item[0][0],
                 item[0][1] + 0.05 * item[0][2],
                 item[1],
-                item[2],
+                stage_rank[item[2]],
             ),
         )[3]
         if admitted

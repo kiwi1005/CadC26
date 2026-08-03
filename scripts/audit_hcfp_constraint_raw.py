@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import hashlib
 import json
 import math
@@ -31,6 +32,7 @@ from benchmark_hcfp import _load_evaluator  # noqa: E402
 from hcfp.analytic import (  # noqa: E402
     AnalyticConfig,
     select_device,
+    solve_case,
     to_official_placements,
 )
 from hcfp.benchmark import candidate_source_layout, percentile  # noqa: E402
@@ -39,6 +41,7 @@ from hcfp.constraints.raw_repair import repair_raw_constraints  # noqa: E402
 from hcfp.data import DataSample, file_sha256  # noqa: E402
 from hcfp.dynamics import DynamicsConfig  # noqa: E402
 from hcfp.learned import (  # noqa: E402
+    LearnedAnalysis,
     LearnedConfig,
     analyze_case_with_checkpoint,
     select_official_from_analysis,
@@ -46,7 +49,7 @@ from hcfp.learned import (  # noqa: E402
 from hcfp.projection import ComponentBDPConfig  # noqa: E402
 from hcfp.reference import OFFICIAL_FLOORSET_V10  # noqa: E402
 from hcfp.score_attribution import attribute_score  # noqa: E402
-from hcfp.verify import overlap_pairs  # noqa: E402
+from hcfp.verify import overlap_pairs, verify_feasible  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,8 +111,7 @@ def main(argv: list[str] | None = None) -> int:
     for index, (sample, source) in enumerate(
         heldout, start=args.heldout_start
     ):
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
+        _synchronize(device)
         started = time.perf_counter()
         case = _audit_sample(
             evaluator_module,
@@ -123,15 +125,16 @@ def main(argv: list[str] | None = None) -> int:
             args.population,
             args.topology_seeds,
             args.constraint_seeds,
+            args.analytic_runtime_comparator,
         )
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        case["runtime_seconds"] = time.perf_counter() - started
+        _synchronize(device)
+        case["audit_runtime_seconds"] = time.perf_counter() - started
+        case["runtime_seconds"] = case["solver_runtime_seconds"]
         cases.append(case)
     sample_ids = [sample.sample_id for sample, _source in heldout]
     evaluator_path = data_path / OFFICIAL_FLOORSET_V10.evaluator_path
     report = {
-        "schema_version": 5,
+        "schema_version": 7,
         "command": ["scripts/audit_hcfp_constraint_raw.py", *command_args],
         "solver": solver,
         "config": {
@@ -165,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
             "flow_steps": args.flow_steps,
             "flow_seed": args.flow_seed,
             "tail_topk": args.tail_topk,
+            "analytic_runtime_comparator": args.analytic_runtime_comparator,
         },
         "checkpoint": {
             "path": str(checkpoint),
@@ -175,6 +179,22 @@ def main(argv: list[str] | None = None) -> int:
         "evaluation": {
             "mode": "pinned official-v10 evaluator on exact raw coordinates",
             "official_raw_replay": True,
+            "runtime_semantics": {
+                "runtime_seconds": (
+                    "learned solver core plus exact runtime-final selection; "
+                    "normalized case materialization is excluded"
+                ),
+                "offline_candidate_audit_seconds": (
+                    "checkpoint/provenance validation plus exact replay and every "
+                    "offline candidate evaluation"
+                ),
+                "audit_runtime_seconds": (
+                    "full per-case audit wall time including runtime comparators"
+                ),
+                "official_wrapper_wall_time": (
+                    "must be measured separately with scripts/benchmark_hcfp.py"
+                ),
+            },
             "evaluator_path": str(evaluator_path),
             "evaluator_sha256": file_sha256(evaluator_path),
             "evaluator_commit": OFFICIAL_FLOORSET_V10.commit,
@@ -249,6 +269,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
+    parser.add_argument(
+        "--analytic-runtime-comparator",
+        action="store_true",
+        help=(
+            "measure the exact-safe analytic comparator on the same heldout cases; "
+            "execution order alternates by case"
+        ),
+    )
     return parser
 
 
@@ -278,6 +306,11 @@ def _git_bytes(*args: str) -> bytes:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     ).stdout
+
+
+def _synchronize(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -316,6 +349,80 @@ def _learned_config(args: argparse.Namespace) -> LearnedConfig:
     )
 
 
+def _time_learned_solver(
+    source: dict[str, Any],
+    sample_id: str,
+    case: Any,
+    checkpoint: Path,
+    checkpoint_hash: str,
+    config: LearnedConfig,
+    device: torch.device,
+    topology_seeds: int,
+    constraint_seeds: int,
+) -> tuple[LearnedAnalysis, Any, dict[str, float], float]:
+    _synchronize(device)
+    analysis_started = time.perf_counter()
+    analysis = analyze_case_with_checkpoint(case, checkpoint, config)
+    _synchronize(device)
+    analysis_seconds = time.perf_counter() - analysis_started
+    validation_started = time.perf_counter()
+    _validate_analysis(
+        sample_id,
+        analysis,
+        checkpoint_hash,
+        topology_seeds,
+        constraint_seeds,
+    )
+    validation_seconds = time.perf_counter() - validation_started
+    _synchronize(device)
+    selection_started = time.perf_counter()
+    selected_positions = select_official_from_analysis(
+        source,
+        case,
+        analysis,
+        config=config,
+        device=device,
+    )
+    _synchronize(device)
+    selection_seconds = time.perf_counter() - selection_started
+    return analysis, selected_positions, {
+        "learned_solver_core_seconds": analysis_seconds,
+        "runtime_final_selection_seconds": selection_seconds,
+        "total_seconds": analysis_seconds + selection_seconds,
+    }, validation_seconds
+
+
+def _time_analytic_solver(
+    source: dict[str, Any],
+    case: Any,
+    config: LearnedConfig,
+    device: torch.device,
+) -> dict[str, Any]:
+    analytic_config = replace(
+        config.analytic,
+        component_bdp=ComponentBDPConfig(),
+    )
+    _synchronize(device)
+    started = time.perf_counter()
+    normalized_solution = solve_case(case, analytic_config)
+    placements = to_official_placements(
+        source,
+        case,
+        normalized_solution,
+    )
+    hard_feasible = verify_feasible(source, placements)
+    _synchronize(device)
+    solver_seconds = time.perf_counter() - started
+    if not hard_feasible:
+        raise RuntimeError("analytic runtime comparator returned an infeasible result")
+    return {
+        "solver_seconds": solver_seconds,
+        "total_seconds": solver_seconds,
+        "hard_feasible": hard_feasible,
+        "placement_sha256": _placement_sha256(placements),
+    }
+
+
 def _audit_sample(
     evaluator_module: Any,
     index: int,
@@ -328,16 +435,45 @@ def _audit_sample(
     population: int,
     topology_seeds: int,
     constraint_seeds: int,
+    analytic_runtime_comparator: bool,
 ) -> dict[str, Any]:
     case = sample.case.to(device=device, dtype=torch.float32)
-    analysis = analyze_case_with_checkpoint(case, checkpoint, config)
-    _validate_analysis(
-        sample.sample_id,
+    analytic_timing = None
+    runtime_order = "learned_only"
+    if analytic_runtime_comparator and index % 2:
+        runtime_order = "analytic_then_learned"
+        analytic_timing = _time_analytic_solver(
+            source,
+            case,
+            config,
+            device,
+        )
+    (
         analysis,
+        selected_positions,
+        learned_timing,
+        validation_seconds,
+    ) = _time_learned_solver(
+        source,
+        sample.sample_id,
+        case,
+        checkpoint,
         checkpoint_hash,
+        config,
+        device,
         topology_seeds,
         constraint_seeds,
     )
+    if analytic_runtime_comparator and analytic_timing is None:
+        runtime_order = "learned_then_analytic"
+        analytic_timing = _time_analytic_solver(
+            source,
+            case,
+            config,
+            device,
+        )
+    _synchronize(device)
+    offline_started = time.perf_counter()
     learned_count = int(analysis.result.candidate_count) - population
     sources = candidate_source_layout(population, learned_count)
     raw = analysis.analytic.raw_candidates
@@ -389,6 +525,17 @@ def _audit_sample(
         metric_args,
     )
     telemetry = analysis.analytic.telemetry
+    proposal_records = _component_proposal_records(
+        evaluator_module,
+        source,
+        case,
+        raw,
+        sources,
+        constraint_indices,
+        records,
+        telemetry,
+        metric_args,
+    )
     false_fast_gate = telemetry.projection_ok & ~telemetry.hard_feasible
     if bool(false_fast_gate.any().item()):
         indices = torch.nonzero(
@@ -415,13 +562,6 @@ def _audit_sample(
         row["projection"]["normalized_fp64_final_pairs"] = row[
             "projection"
         ]["final_pair_count"]
-    selected_positions = select_official_from_analysis(
-        source,
-        case,
-        analysis,
-        config=config,
-        device=device,
-    )
     selected = _evaluate_positions(
         evaluator_module,
         selected_positions,
@@ -449,13 +589,38 @@ def _audit_sample(
                 "stage",
             )
         }
-        for row in (*raw_records, *projected_records)
+        for row in (*raw_records, *projected_records, *proposal_records)
         if row["placement_sha256"] == selected["placement_sha256"]
     ]
+    exact_portfolio = _exact_candidate_portfolio(
+        raw_records,
+        projected_records,
+        proposal_records,
+    )
+    _synchronize(device)
+    offline_candidate_audit_seconds = (
+        validation_seconds + time.perf_counter() - offline_started
+    )
     return {
         "test_id": index,
         "sample_id": sample.sample_id,
         "block_count": case.n,
+        "solver_runtime_seconds": learned_timing["total_seconds"],
+        "runtime_breakdown": learned_timing,
+        "offline_candidate_audit_seconds": offline_candidate_audit_seconds,
+        "runtime_order": runtime_order,
+        **(
+            {
+                "analytic_runtime_seconds": analytic_timing["total_seconds"],
+                "analytic_runtime_breakdown": analytic_timing,
+                "analytic_comparator": {
+                    **analytic_timing,
+                    "execution_order": runtime_order,
+                },
+            }
+            if analytic_timing is not None
+            else {}
+        ),
         "baseline": {
             "hpwl": float(sample.labels.baseline_hpwl),
             "area": float(sample.labels.baseline_area),
@@ -489,6 +654,14 @@ def _audit_sample(
         "post_bdp": {
             "candidates": projected_records,
             "oracles": _oracles(projected_records),
+        },
+        "component_proposal": {
+            "candidates": proposal_records,
+            "oracles": _oracles(proposal_records),
+        },
+        "exact_portfolio": {
+            "candidates": exact_portfolio,
+            "oracles": _oracles(exact_portfolio),
         },
         "selected": selected,
     }
@@ -711,6 +884,132 @@ def _candidate_type(
     return "analytic"
 
 
+def _component_proposal_records(
+    evaluator_module: Any,
+    source: dict[str, Any],
+    case: Any,
+    raw: torch.Tensor,
+    sources: tuple[str, ...],
+    constraint_indices: frozenset[int],
+    constraint_records: dict[int, dict[str, object]],
+    telemetry: Any,
+    metric_args: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    available = telemetry.component_proposal_available.detach().to(
+        device="cpu", dtype=torch.bool
+    )
+    proposals = telemetry.component_proposal_xywh.detach().to(device="cpu")
+    hard_ok = telemetry.component_proposal_hard_ok.detach().to(
+        device="cpu", dtype=torch.bool
+    )
+    structure_ok = telemetry.component_proposal_structure_ok.detach().to(
+        device="cpu", dtype=torch.bool
+    )
+    final_pairs = telemetry.component_proposal_final_pair_count.detach().to(
+        device="cpu", dtype=torch.long
+    )
+    normalized_displacement = (
+        telemetry.component_proposal_displacement.detach().to(
+            device="cpu", dtype=torch.float64
+        )
+    )
+    rollback_reasons = telemetry.component_proposal_rollback_reason
+    rows: list[dict[str, Any]] = []
+    for index in sorted(constraint_indices):
+        if not bool(available[index]):
+            continue
+        record = constraint_records[index]
+        raw_positions = to_official_placements(
+            source, case, raw[index].detach().cpu()
+        )
+        proposal_positions = to_official_placements(
+            source, case, proposals[index]
+        )
+        post_denormal_pairs = len(overlap_pairs(proposal_positions))
+        raw_repair = repair_raw_constraints(source, raw_positions, record)
+        proposal_repair = repair_raw_constraints(
+            source, proposal_positions, record
+        )
+        raw_positions = raw_repair.placements
+        proposal_positions = proposal_repair.placements
+        row = _evaluate_positions(
+            evaluator_module,
+            proposal_positions,
+            candidate_index=index,
+            source_name=sources[index],
+            candidate_type="constraint",
+            constraint_kind=str(record.get("kind", "unknown")),
+            stage="component_proposal",
+            projection_displacement=_projection_displacement(
+                raw_positions, proposal_positions
+            ),
+            repair=proposal_repair,
+            metric_args=metric_args,
+        )
+        row["post_denormal_exact_pairs"] = post_denormal_pairs
+        row["post_repair_exact_pairs"] = len(
+            overlap_pairs(proposal_positions)
+        )
+        row["proposal"] = {
+            "normalized_hard_ok": bool(hard_ok[index]),
+            "structure_ok": bool(structure_ok[index]),
+            "normalized_fp64_final_pairs": int(final_pairs[index]),
+            "normalized_displacement": float(
+                normalized_displacement[index]
+            ),
+            "rollback_reason": rollback_reasons[index],
+        }
+        if row["overlap_violations"] != row["post_repair_exact_pairs"]:
+            raise RuntimeError(
+                "component proposal exact overlap count disagrees with official evaluator"
+            )
+        rows.append(row)
+    return rows
+
+
+def _exact_candidate_portfolio(
+    raw_rows: list[dict[str, Any]],
+    projected_rows: list[dict[str, Any]],
+    proposal_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    stage_rank = {"raw": 0, "post_bdp": 1, "component_proposal": 2}
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in (*raw_rows, *projected_rows, *proposal_rows):
+        grouped.setdefault(int(row["candidate_index"]), []).append(row)
+    portfolio = []
+    for index in sorted(grouped):
+        candidates = grouped[index]
+        feasible = [row for row in candidates if bool(row["hard_feasible"])]
+        if feasible:
+            selected = min(
+                feasible,
+                key=lambda row: (
+                    float(row["log_uncapped_cost"]),
+                    int(row["total_soft_violations"]),
+                    float(row["bbox_area"]),
+                    float(row["hpwl_total"]),
+                    stage_rank[str(row["stage"])],
+                ),
+            )
+        else:
+            selected = min(
+                candidates,
+                key=lambda row: (
+                    int(row["overlap_violations"]),
+                    int(row["area_violations"]),
+                    int(row["dimension_violations"]),
+                    int(row["fixed_violations"]),
+                    int(row["preplaced_violations"]),
+                    stage_rank[str(row["stage"])],
+                ),
+            )
+        portfolio_row = dict(selected)
+        portfolio_row["portfolio_source_stage"] = selected["stage"]
+        portfolio_row["stage"] = "exact_portfolio"
+        portfolio.append(portfolio_row)
+    return portfolio
+
+
 def _projection_displacement(raw: Any, projected: Any) -> float:
     raw_boxes = torch.as_tensor(raw, dtype=torch.float64, device="cpu")
     projected_boxes = torch.as_tensor(projected, dtype=torch.float64, device="cpu")
@@ -849,30 +1148,171 @@ def _oracle(
 
 
 def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
+    optional_stages = tuple(
+        stage
+        for stage in ("component_proposal", "exact_portfolio")
+        if cases and all(stage in case for case in cases)
+    )
+    stages = ("raw", "post_bdp", *optional_stages)
+    comparison_stages = ("raw", "post_bdp") + (
+        ("exact_portfolio",) if "exact_portfolio" in stages else ()
+    )
+    learned_runtime = _runtime_summary(
+        cases,
+        primary_key="solver_runtime_seconds",
+        fallback_key="runtime_seconds",
+    )
+    summary = {
         "cases": len(cases),
         "hard_feasibility": {
-            stage: _hard_feasibility(cases, stage) for stage in ("raw", "post_bdp")
+            stage: _hard_feasibility(cases, stage) for stage in stages
         },
         "oracle": {
             stage: {
                 candidate_type: _oracle_aggregate(cases, stage, candidate_type)
                 for candidate_type in ("analytic", "topology", "constraint")
             }
-            for stage in ("raw", "post_bdp")
+            for stage in stages
         },
         "topology_vs_constraint": {
             stage: _oracle_gain(cases, stage, "topology", "constraint")
-            for stage in ("raw", "post_bdp")
+            for stage in comparison_stages
         },
         "selected_vs_analytic": _selected_vs_analytic(cases),
         "projection_displacement": _displacement_summary(cases),
-        "runtime": _runtime_summary(cases),
+        "component_proposal": _component_proposal_summary(cases),
+        "runtime": learned_runtime,
+        "runtime_breakdown": {
+            field: _nested_runtime_summary(
+                cases,
+                container_key="runtime_breakdown",
+                value_key=field,
+            )
+            for field in (
+                "learned_solver_core_seconds",
+                "runtime_final_selection_seconds",
+            )
+            if cases
+            and all(
+                field in case.get("runtime_breakdown", {}) for case in cases
+            )
+        },
+    }
+    if cases and all("audit_runtime_seconds" in case for case in cases):
+        summary["audit_wall_runtime"] = _runtime_summary(
+            cases,
+            primary_key="audit_runtime_seconds",
+        )
+    if cases and all(
+        "offline_candidate_audit_seconds" in case for case in cases
+    ):
+        summary["offline_candidate_audit_runtime"] = _runtime_summary(
+            cases,
+            primary_key="offline_candidate_audit_seconds",
+        )
+    if cases and all("analytic_runtime_seconds" in case for case in cases):
+        analytic_runtime = _runtime_summary(
+            cases,
+            primary_key="analytic_runtime_seconds",
+        )
+        ratios = sorted(
+            _runtime_value(
+                case,
+                "solver_runtime_seconds",
+                fallback_key="runtime_seconds",
+            )
+            / float(case["analytic_runtime_seconds"])
+            for case in cases
+        )
+        summary["analytic_runtime"] = analytic_runtime
+        summary["analytic_comparator"] = {
+            "case_count": len(cases),
+            "hard_feasible_count": sum(
+                bool(case["analytic_comparator"]["hard_feasible"])
+                for case in cases
+            ),
+            "execution_order_count": {
+                order: sum(case["runtime_order"] == order for case in cases)
+                for order in (
+                    "learned_then_analytic",
+                    "analytic_then_learned",
+                )
+            },
+        }
+        summary["runtime_vs_analytic"] = {
+            "p50_ratio": _ratio(
+                learned_runtime["p50"],
+                analytic_runtime["p50"],
+            ),
+            "p95_ratio": _ratio(
+                learned_runtime["p95"],
+                analytic_runtime["p95"],
+            ),
+            "per_case_ratio_p50": percentile(ratios, 0.50),
+            "per_case_ratio_p95": percentile(ratios, 0.95),
+            "per_case_ratio_maximum": ratios[-1] if ratios else None,
+        }
+    return summary
+
+
+def _component_proposal_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
+    rows = [
+        row
+        for case in cases
+        for row in case.get("component_proposal", {}).get("candidates", ())
+    ]
+    reasons = (
+        "already_feasible",
+        "projector_incomplete",
+        "construction_regression",
+        "committed",
+    )
+    return {
+        "candidate_count": len(rows),
+        "post_repair_hard_feasible_count": sum(
+            bool(row["hard_feasible"]) for row in rows
+        ),
+        "normalized_hard_ok_count": sum(
+            bool(row["proposal"]["normalized_hard_ok"]) for row in rows
+        ),
+        "normalized_structure_ok_count": sum(
+            bool(row["proposal"]["structure_ok"]) for row in rows
+        ),
+        "rollback_reason_count": {
+            reason: sum(
+                row["proposal"]["rollback_reason"] == reason for row in rows
+            )
+            for reason in reasons
+        },
     }
 
 
-def _runtime_summary(cases: list[dict[str, Any]]) -> dict[str, float | int | None]:
-    values = sorted(float(case["runtime_seconds"]) for case in cases)
+def _runtime_summary(
+    cases: list[dict[str, Any]],
+    *,
+    primary_key: str,
+    fallback_key: str | None = None,
+) -> dict[str, float | int | None]:
+    values = sorted(
+        _runtime_value(case, primary_key, fallback_key=fallback_key)
+        for case in cases
+    )
+    return _summarize_runtime_values(values)
+
+
+def _nested_runtime_summary(
+    cases: list[dict[str, Any]],
+    *,
+    container_key: str,
+    value_key: str,
+) -> dict[str, float | int | None]:
+    values = sorted(float(case[container_key][value_key]) for case in cases)
+    return _summarize_runtime_values(values)
+
+
+def _summarize_runtime_values(
+    values: list[float],
+) -> dict[str, float | int | None]:
     return {
         "case_count": len(values),
         "total": sum(values),
@@ -881,6 +1321,28 @@ def _runtime_summary(cases: list[dict[str, Any]]) -> dict[str, float | int | Non
         "p95": percentile(values, 0.95),
         "maximum": values[-1] if values else None,
     }
+
+
+def _runtime_value(
+    case: dict[str, Any],
+    primary_key: str,
+    *,
+    fallback_key: str | None = None,
+) -> float:
+    if primary_key in case:
+        return float(case[primary_key])
+    if fallback_key is None:
+        raise KeyError(primary_key)
+    return float(case[fallback_key])
+
+
+def _ratio(
+    numerator: float | int | None,
+    denominator: float | int | None,
+) -> float | None:
+    if numerator is None or denominator is None or float(denominator) <= 0.0:
+        return None
+    return float(numerator) / float(denominator)
 
 
 def _hard_feasibility(cases: list[dict[str, Any]], stage: str) -> dict[str, Any]:

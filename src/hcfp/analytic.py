@@ -55,6 +55,13 @@ class CandidateTelemetry:
     projection_resets: Tensor
     projection_beam_states: Tensor
     projection_max_component_size: Tensor
+    component_proposal_available: Tensor
+    component_proposal_xywh: Tensor
+    component_proposal_hard_ok: Tensor
+    component_proposal_structure_ok: Tensor
+    component_proposal_final_pair_count: Tensor
+    component_proposal_displacement: Tensor
+    component_proposal_rollback_reason: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -294,6 +301,13 @@ def _telemetry(case: FloorplanCase, raw: Tensor, projection: ProjectionResult) -
         projection_resets=projection.reset_count.detach(),
         projection_beam_states=projection.beam_states_evaluated.detach(),
         projection_max_component_size=projection.max_component_size.detach(),
+        component_proposal_available=projection.component_proposal_available.detach(),
+        component_proposal_xywh=projection.component_proposal_xywh.detach(),
+        component_proposal_hard_ok=projection.component_proposal_hard_ok.detach(),
+        component_proposal_structure_ok=projection.component_proposal_structure_ok.detach(),
+        component_proposal_final_pair_count=projection.component_proposal_final_pair_count.detach(),
+        component_proposal_displacement=projection.component_proposal_displacement.detach(),
+        component_proposal_rollback_reason=projection.component_proposal_rollback_reason,
     )
 
 

@@ -113,6 +113,13 @@ def test_solve_case_with_telemetry_reports_every_candidate_after_projection(monk
     assert telemetry.projection_resets.shape == (9,)
     assert telemetry.projection_beam_states.shape == (9,)
     assert telemetry.projection_max_component_size.shape == (9,)
+    assert telemetry.component_proposal_available.shape == (9,)
+    assert telemetry.component_proposal_xywh.shape == (9, normalized_case.n, 4)
+    assert telemetry.component_proposal_hard_ok.shape == (9,)
+    assert telemetry.component_proposal_structure_ok.shape == (9,)
+    assert telemetry.component_proposal_final_pair_count.shape == (9,)
+    assert telemetry.component_proposal_displacement.shape == (9,)
+    assert len(telemetry.component_proposal_rollback_reason) == 9
     assert len(telemetry.projection_failure_reasons) == 9
     assert bool(telemetry.hard_feasible[0])
     assert torch.all(telemetry.projected_overlap <= telemetry.raw_overlap + 1.0e-5)
