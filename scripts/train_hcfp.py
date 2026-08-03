@@ -58,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--amp", choices=("off", "bf16"), default="bf16")
     parser.add_argument("--ema-decay", type=float, default=0.999)
+    parser.add_argument(
+        "--no-ema-warmup",
+        action="store_true",
+        help="use the target EMA decay from the first update",
+    )
     parser.add_argument("--init-checkpoint", help="warm-start model weights from a runtime checkpoint")
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
@@ -177,7 +182,11 @@ def main(argv: list[str] | None = None) -> int:
         (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=args.learning_rate,
     )
-    ema = ExponentialMovingAverage(model, args.ema_decay) if args.ema_decay > 0.0 else None
+    ema = (
+        ExponentialMovingAverage(model, args.ema_decay, warmup=not args.no_ema_warmup)
+        if args.ema_decay > 0.0
+        else None
+    )
 
     def checkpoint_step(step: int, _report) -> None:
         if args.checkpoint_every > 0 and step % args.checkpoint_every == 0:
@@ -244,7 +253,10 @@ def main(argv: list[str] | None = None) -> int:
         "constraint_enabled": model.config.constraint_enabled,
         "collective_enabled": model.config.collective_enabled,
         "trainable_parameter_names": trainable_parameter_names,
-        "ema_decay": args.ema_decay if ema is not None else None,
+        "ema_target_decay": ema.target_decay if ema is not None else None,
+        "ema_warmup_enabled": ema.warmup if ema is not None else False,
+        "ema_update_count": ema.update_count if ema is not None else 0,
+        "ema_final_effective_decay": ema.effective_decay if ema is not None else None,
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,
         "sampling": args.sampling,

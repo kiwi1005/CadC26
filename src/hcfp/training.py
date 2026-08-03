@@ -48,21 +48,38 @@ class LossReport:
 class ExponentialMovingAverage:
     """Small in-device EMA used only while training."""
 
-    def __init__(self, model: HCFPModel, decay: float = 0.999) -> None:
+    def __init__(
+        self,
+        model: HCFPModel,
+        decay: float = 0.999,
+        *,
+        warmup: bool = True,
+    ) -> None:
         if not 0.0 < decay < 1.0:
             raise ValueError("EMA decay must be in (0, 1)")
-        self.decay = float(decay)
+        self.target_decay = float(decay)
+        self.decay = self.target_decay
+        self.warmup = bool(warmup)
+        self.update_count = 0
         self.shadow = {
             name: value.detach().clone()
             for name, value in model.state_dict().items()
             if torch.is_floating_point(value)
         }
 
+    @property
+    def effective_decay(self) -> float:
+        if not self.warmup:
+            return self.target_decay
+        return min(self.target_decay, (1.0 + self.update_count) / (10.0 + self.update_count))
+
     @torch.no_grad()
     def update(self, model: HCFPModel) -> None:
+        self.update_count += 1
+        decay = self.effective_decay
         for name, value in model.state_dict().items():
             if name in self.shadow:
-                self.shadow[name].lerp_(value.detach(), 1.0 - self.decay)
+                self.shadow[name].lerp_(value.detach(), 1.0 - decay)
 
     @torch.no_grad()
     def copy_to(self, model: HCFPModel) -> None:

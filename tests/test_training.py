@@ -232,6 +232,44 @@ def test_all_stage_uses_one_model_forward_and_updates_ema() -> None:
 
     assert calls == 1
     assert ema.shadow
+    assert ema.update_count == 1
+
+
+def test_ema_warmup_follows_early_parameters_more_than_fixed_decay() -> None:
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+    warmed = ExponentialMovingAverage(model, decay=0.999)
+    fixed = ExponentialMovingAverage(model, decay=0.999, warmup=False)
+    key = next(iter(warmed.shadow))
+
+    with torch.no_grad():
+        model.state_dict()[key].add_(1.0)
+    warmed.update(model)
+    fixed.update(model)
+
+    target = model.state_dict()[key]
+    warmed_gap = (warmed.shadow[key] - target).abs().mean()
+    fixed_gap = (fixed.shadow[key] - target).abs().mean()
+    assert warmed.effective_decay == pytest.approx(2.0 / 11.0)
+    assert fixed.effective_decay == pytest.approx(0.999)
+    assert warmed_gap < fixed_gap
+
+
+def test_ema_warmup_never_exceeds_target_decay() -> None:
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+    ema = ExponentialMovingAverage(model, decay=0.5)
+
+    for _ in range(100):
+        ema.update(model)
+
+    assert ema.update_count == 100
+    assert ema.effective_decay == pytest.approx(0.5)
+
+
+def test_ema_disabled_decay_semantics_are_left_to_training_cli() -> None:
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+
+    with pytest.raises(ValueError, match="EMA decay"):
+        ExponentialMovingAverage(model, decay=0.0)
 
 
 def test_vectorized_precedence_preserves_unique_relation_semantics() -> None:
@@ -327,6 +365,11 @@ def test_training_cli_emits_checkpoint_and_audit_report(tmp_path: Path) -> None:
     assert report["steps"] == 1
     assert report["constraint_enabled"] is False
     assert len(report["checkpoint_hash"]) == 64
+    assert "ema_decay" not in report
+    assert report["ema_target_decay"] == pytest.approx(0.999)
+    assert report["ema_warmup_enabled"] is True
+    assert report["ema_update_count"] == 1
+    assert report["ema_final_effective_decay"] == pytest.approx(2.0 / 11.0)
     assert metadata["capabilities"] == {"flow": True}
     assert metadata["trained_heads"] == ["encoder", "flow", "initializer", "structure"]
     assert metadata["training_objective_version"] == "supervised_loss_v1"
@@ -371,6 +414,8 @@ def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path)
             "--constraints",
             "--init-checkpoint",
             str(legacy),
+            "--ema-decay",
+            "0",
         ],
         cwd=Path(__file__).resolve().parents[1],
         check=True,
@@ -382,6 +427,10 @@ def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path)
     loaded, metadata = load_checkpoint(checkpoint, expected_normalization=RUNTIME_NORMALIZATION)
     assert report["constraint_enabled"] is True
     assert report["model_config"]["constraint_enabled"] is True
+    assert report["ema_target_decay"] is None
+    assert report["ema_warmup_enabled"] is False
+    assert report["ema_update_count"] == 0
+    assert report["ema_final_effective_decay"] is None
     assert loaded.config.constraint_enabled is True
     assert metadata["capabilities"] == {"flow": True}
     assert metadata["trained_heads"] == [
@@ -447,6 +496,7 @@ def test_training_cli_warm_starts_collective_head_and_declares_capability(
             "cpu",
             "--amp",
             "off",
+            "--no-ema-warmup",
         ],
         cwd=Path(__file__).resolve().parents[1],
         check=True,
@@ -472,6 +522,9 @@ def test_training_cli_warm_starts_collective_head_and_declares_capability(
         name.startswith("collective.")
         for name in report["trainable_parameter_names"]
     )
+    assert report["ema_warmup_enabled"] is False
+    assert report["ema_update_count"] == 1
+    assert report["ema_final_effective_decay"] == pytest.approx(0.999)
 
 
 def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path: Path) -> None:
