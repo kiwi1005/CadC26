@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="opt in to learned Q2 constraint heads and supervision",
     )
+    parser.add_argument(
+        "--collective",
+        action="store_true",
+        default=None,
+        help="opt in to Q3 dynamic pair messages and collective rollout supervision",
+    )
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--amp", choices=("off", "bf16"), default="bf16")
     parser.add_argument("--ema-decay", type=float, default=0.999)
@@ -122,6 +128,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.constraints is None
                 else args.constraints
             ),
+            collective_enabled=(
+                loaded.config.collective_enabled
+                if args.collective is None
+                else args.collective
+            ),
         )
         model = HCFPModel(config)
         incompatible = model.load_state_dict(loaded.state_dict(), strict=False)
@@ -130,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             "encoder.group_message.",
             "encoder.mib_message.",
             "constraints.",
+            "collective.",
         )
         invalid_missing = [
             name
@@ -149,8 +161,11 @@ def main(argv: list[str] | None = None) -> int:
                 compute_dtype=compute_dtype,
                 topology_enabled=bool(args.topology),
                 constraint_enabled=bool(args.constraints),
+                collective_enabled=bool(args.collective),
             )
         )
+    if args.stage == "collective" and not model.config.collective_enabled:
+        raise ValueError("--stage collective requires --collective or a collective checkpoint")
     checkpoint_metadata = _training_checkpoint_metadata(
         args.stage,
         model.config,
@@ -223,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         "compute_dtype": compute_dtype,
         "topology_enabled": model.config.topology_enabled,
         "constraint_enabled": model.config.constraint_enabled,
+        "collective_enabled": model.config.collective_enabled,
         "ema_decay": args.ema_decay if ema is not None else None,
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,
@@ -260,15 +276,28 @@ def _training_checkpoint_metadata(
         trained_heads.add("initializer")
     if stage in {"flow", "all"}:
         trained_heads.add("flow")
+    if stage in {"collective", "all"} and config.collective_enabled:
+        trained_heads.add("collective")
     capabilities = (
         dict(source.get("capabilities", {})) if source is not None else {"flow": False}
     )
     if stage in {"flow", "all"}:
         capabilities["flow"] = True
+    if stage in {"collective", "all"} and config.collective_enabled:
+        capabilities["collective"] = True
+    objective = (
+        "collective_rollout_v1"
+        if stage == "collective"
+        else (
+            "supervised_collective_v1"
+            if stage == "all" and config.collective_enabled
+            else "supervised_loss_v1"
+        )
+    )
     return {
         "capabilities": capabilities,
         "trained_heads": sorted(trained_heads),
-        "training_objective_version": "supervised_loss_v1",
+        "training_objective_version": objective,
         "parent_state_hash": source.get("state_hash") if source is not None else None,
     }
 

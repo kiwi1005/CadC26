@@ -137,6 +137,68 @@ def test_constraint_supervision_handles_empty_constraint_sets() -> None:
     assert float(report.constraint.detach()) == 0.0
 
 
+def test_collective_stage_requires_enabled_head() -> None:
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+
+    with pytest.raises(ValueError, match="collective_enabled"):
+        supervised_loss(
+            model,
+            _constraint_sample(),
+            population=2,
+            stage="collective",
+            seed=12,
+        )
+
+
+def test_collective_rollout_overfits_one_corruption_with_finite_gradients() -> None:
+    torch.manual_seed(12)
+    sample = _constraint_sample()
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=16,
+            encoder_layers=1,
+            topology_enabled=True,
+            constraint_enabled=True,
+            collective_enabled=True,
+            collective_message_dim=12,
+            collective_passes=2,
+        )
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-2)
+    initial = supervised_loss(
+        model,
+        sample,
+        population=2,
+        stage="collective",
+        seed=13,
+    )
+
+    report = initial
+    for _ in range(20):
+        optimizer.zero_grad(set_to_none=True)
+        report = supervised_loss(
+            model,
+            sample,
+            population=2,
+            stage="collective",
+            seed=13,
+        )
+        report.total.backward()
+        optimizer.step()
+
+    assert torch.isfinite(report.collective)
+    assert float(report.collective.detach()) < float(initial.collective.detach())
+    gradients = {
+        name: parameter.grad
+        for name, parameter in model.named_parameters()
+        if name.startswith("collective.")
+    }
+    assert gradients
+    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients.values())
+    assert gradients["collective.pair.weight"].abs().sum() > 0.0
+    assert gradients["collective.force_gates.3.weight"].abs().sum() > 0.0
+
+
 def test_train_steps_restarts_stream_factory_without_materializing() -> None:
     model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
     optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-3)
@@ -329,6 +391,78 @@ def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path)
         "initializer",
         "structure",
     ]
+
+
+def test_training_cli_warm_starts_collective_head_and_declares_capability(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pt"
+    source_hash = save_checkpoint(
+        HCFPModel(
+            ModelConfig(
+                hidden_dim=16,
+                encoder_layers=1,
+                topology_enabled=True,
+                constraint_enabled=True,
+            )
+        ),
+        source,
+        RUNTIME_NORMALIZATION,
+        metadata={
+            "capabilities": {"flow": False},
+            "trained_heads": ["encoder", "structure", "topology", "constraints"],
+            "training_objective_version": "structure_q2_v1",
+        },
+    )
+    shard = tmp_path / "collective.tar"
+    output = tmp_path / "collective.pt"
+    write_shard(
+        [_constraint_sample()],
+        shard,
+        provenance={
+            "source": "FloorSet-train",
+            "source_version": "fixture-v1",
+            "split": "train",
+            "denylist_sha256": "fixture-denylist",
+        },
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp.py",
+            str(shard),
+            "--output",
+            str(output),
+            "--steps",
+            "1",
+            "--population",
+            "2",
+            "--stage",
+            "collective",
+            "--collective",
+            "--init-checkpoint",
+            str(source),
+            "--device",
+            "cpu",
+            "--amp",
+            "off",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    loaded, metadata = load_checkpoint(
+        output,
+        expected_normalization=RUNTIME_NORMALIZATION,
+    )
+    assert loaded.config.collective_enabled is True
+    assert metadata["capabilities"] == {"collective": True, "flow": False}
+    assert "collective" in metadata["trained_heads"]
+    assert metadata["training_objective_version"] == "collective_rollout_v1"
+    assert metadata["parent_state_hash"] == source_hash
 
 
 def test_training_cli_preserves_checkpoint_constraints_when_unspecified(tmp_path: Path) -> None:

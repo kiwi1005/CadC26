@@ -8,16 +8,21 @@ from collections.abc import Callable, Iterable, Iterator
 import torch
 from torch.nn import functional as F
 
+from hcfp.collective import PAIR_FEATURES, dynamic_pair_features
 from hcfp.data import DataSample, SolutionLabels
 from hcfp.dynamics import DynamicsConfig, initialize_population
 from hcfp.fallback import safe_shelf
+from hcfp.geometry import exact_shape_projection
 from hcfp.model import HCFPModel, soft_sequence_pair_relation_logits
 from hcfp.constraints.contact_tree import BOTTOM, LEFT, RIGHT, TOP, extract_contacts
 from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_from_rectangles
 
 
 Tensor = torch.Tensor
-TRAINING_STAGES = ("structure", "initializer", "flow", "all")
+TRAINING_STAGES = ("structure", "initializer", "flow", "collective", "all")
+_COLLECTIVE_ROLLOUT_STEPS = 2
+_OVERLAP_X = PAIR_FEATURES.index("overlap_x")
+_OVERLAP_Y = PAIR_FEATURES.index("overlap_y")
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,7 @@ class LossReport:
     initializer: Tensor
     flow: Tensor
     constraint: Tensor
+    collective: Tensor
 
     def scalars(self) -> dict[str, float]:
         return {
@@ -35,6 +41,7 @@ class LossReport:
             "initializer": float(self.initializer.detach()),
             "flow": float(self.flow.detach()),
             "constraint": float(self.constraint.detach()),
+            "collective": float(self.collective.detach()),
         }
 
 
@@ -162,7 +169,168 @@ def supervised_loss(
     if flow_target is not None:
         flow = F.mse_loss(output.flow_velocity, flow_target)
 
-    return LossReport(structure + initializer + flow, structure, initializer, flow, constraint)
+    collective = zero
+    if stage in {"collective", "all"} and model.config.collective_enabled:
+        collective = _collective_supervision(
+            model,
+            case,
+            labels,
+            output.embedding,
+            population=population,
+            seed=seed,
+        )
+    elif stage == "collective":
+        raise ValueError("collective stage requires collective_enabled model")
+
+    return LossReport(
+        structure + initializer + flow + collective,
+        structure,
+        initializer,
+        flow,
+        constraint,
+        collective,
+    )
+
+
+def _collective_supervision(
+    model: HCFPModel,
+    case,
+    labels: SolutionLabels,
+    embedding: Tensor,
+    *,
+    population: int,
+    seed: int,
+) -> Tensor:
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    center_noise = torch.randn(
+        (population, case.n, 2),
+        generator=generator,
+        dtype=torch.float32,
+    ).to(device=embedding.device)
+    aspect_noise = torch.randn(
+        (population, case.n),
+        generator=generator,
+        dtype=torch.float32,
+    ).to(device=embedding.device)
+    target_center = labels.centers.unsqueeze(0).expand(population, -1, -1)
+    target_aspect = labels.log_aspect.unsqueeze(0).expand(population, -1)
+    center = target_center + 0.12 * center_noise
+    log_aspect = (target_aspect + 0.20 * aspect_noise).clamp(-4.0, 4.0)
+    movable_position = (~case.preplaced_mask).view(1, case.n, 1)
+    movable_shape = (~(case.fixed_mask | case.preplaced_mask)).view(1, case.n)
+    center = torch.where(movable_position, center, target_center)
+    log_aspect = torch.where(movable_shape, log_aspect, target_aspect)
+
+    allowed = relation_mask_from_rectangles(
+        labels.rectangles,
+        valid_mask=case.block_mask,
+    )
+    relation = torch.where(
+        allowed.any(dim=-1),
+        allowed.to(dtype=torch.long).argmax(dim=-1),
+        torch.full((case.n, case.n), -1, dtype=torch.long, device=embedding.device),
+    )
+    topology = relation.unsqueeze(0).expand(population, -1, -1)
+    contact_target, _ = _contact_targets(case, labels)
+    latch = torch.where(
+        contact_target > 0,
+        contact_target - 1,
+        torch.full_like(contact_target, -1),
+    ).unsqueeze(0).expand(population, -1, -1)
+
+    loss = embedding.sum() * 0.0
+    for step_index in range(_COLLECTIVE_ROLLOUT_STEPS):
+        dimensions = exact_shape_projection(case, log_aspect)
+        pair_batch = dynamic_pair_features(
+            case,
+            center,
+            dimensions,
+            topology_relation=topology,
+            active_latch=latch,
+        )
+        node_geometry = torch.cat((log_aspect.unsqueeze(-1), dimensions), dim=-1)
+        result = model.collective(
+            case,
+            embedding,
+            node_geometry,
+            pair_batch.features,
+            pair_batch.pair_mask,
+            step_index / _COLLECTIVE_ROLLOUT_STEPS,
+        )
+        teacher_center = (target_center - center).clamp(
+            -model.config.collective_position_bound,
+            model.config.collective_position_bound,
+        )
+        teacher_aspect = (target_aspect - log_aspect).clamp(
+            -model.config.collective_aspect_bound,
+            model.config.collective_aspect_bound,
+        )
+        teacher_center = torch.where(
+            movable_position,
+            teacher_center,
+            torch.zeros_like(teacher_center),
+        )
+        teacher_aspect = torch.where(
+            movable_shape,
+            teacher_aspect,
+            torch.zeros_like(teacher_aspect),
+        )
+        teacher_velocity = torch.cat(
+            (teacher_center, teacher_aspect.unsqueeze(-1)),
+            dim=-1,
+        )
+        gate_target = _collective_gate_targets(case, pair_batch.features)
+        loss = loss + F.smooth_l1_loss(result.velocity, teacher_velocity)
+        loss = loss + 0.25 * F.smooth_l1_loss(result.force_gates, gate_target)
+        center = torch.where(
+            movable_position,
+            center + result.velocity[..., :2],
+            target_center,
+        )
+        log_aspect = torch.where(
+            movable_shape,
+            (log_aspect + result.velocity[..., 2]).clamp(-4.0, 4.0),
+            target_aspect,
+        )
+
+    terminal = F.smooth_l1_loss(center, target_center)
+    terminal = terminal + F.smooth_l1_loss(log_aspect, target_aspect)
+    return loss / _COLLECTIVE_ROLLOUT_STEPS + 0.50 * terminal
+
+
+def _collective_gate_targets(case, pair_features: Tensor) -> Tensor:
+    population = pair_features.shape[0]
+    gates = torch.ones(
+        (population, case.n, 7),
+        dtype=torch.float32,
+        device=pair_features.device,
+    )
+    degree = case.b2b_weight.to(device=pair_features.device).sum(dim=1) > 0.0
+    pin = torch.zeros(case.n, dtype=torch.bool, device=pair_features.device)
+    if case.p2b_edges.numel():
+        pin[case.p2b_edges[:, 1].to(device=pair_features.device, dtype=torch.long)] = True
+    overlap = (
+        (pair_features[..., _OVERLAP_X] > 0.0)
+        & (pair_features[..., _OVERLAP_Y] > 0.0)
+    ).any(dim=2)
+    boundary = case.boundary_bits.to(device=pair_features.device).any(dim=1)
+    group = (
+        case.group_membership.to(device=pair_features.device).any(dim=0)
+        if case.group_membership.numel()
+        else torch.zeros(case.n, dtype=torch.bool, device=pair_features.device)
+    )
+    mib = (
+        case.mib_membership.to(device=pair_features.device).any(dim=0)
+        if case.mib_membership.numel()
+        else torch.zeros(case.n, dtype=torch.bool, device=pair_features.device)
+    )
+    gates[..., 0] += 0.10 * degree.to(dtype=torch.float32)
+    gates[..., 1] += 0.10 * pin.to(dtype=torch.float32)
+    gates[..., 2] += 0.40 * overlap.to(dtype=torch.float32)
+    gates[..., 3] += 0.30 * boundary.to(dtype=torch.float32)
+    gates[..., 4] += 0.30 * group.to(dtype=torch.float32)
+    gates[..., 6] += 0.30 * mib.to(dtype=torch.float32)
+    return gates
 
 
 def train_steps(

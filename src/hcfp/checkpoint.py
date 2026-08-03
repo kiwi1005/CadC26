@@ -135,8 +135,14 @@ def _normalize_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     ):
         raise ValueError("checkpoint trained_heads must be a sequence of non-empty names")
     trained_heads = sorted(set(raw_heads))
-    if capabilities["flow"] and "flow" not in trained_heads:
-        raise ValueError("flow capability requires a trained flow head")
+    missing_capability_heads = sorted(
+        name for name, enabled in capabilities.items() if enabled and name not in trained_heads
+    )
+    if missing_capability_heads:
+        raise ValueError(
+            "enabled capabilities require matching trained heads: "
+            f"{missing_capability_heads}"
+        )
 
     objective = supplied.get("training_objective_version")
     if objective is not None and (not isinstance(objective, str) or not objective):
