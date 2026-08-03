@@ -401,6 +401,7 @@ def _audit_one(
         ),
         "ranker_shadow_skipped_reason": snapshot.get("ranker_shadow_skipped_reason"),
         "ranker_shadow_failure_reason": snapshot.get("ranker_shadow_failure_reason"),
+        "ranker_shadow_empty_reason": snapshot.get("ranker_shadow_empty_reason"),
         "shadow_top4": shadow,
         "ranker_selection_counterfactual": counterfactual,
         "ranker_selection_evaluated_top4": tuple(
@@ -617,7 +618,15 @@ def _summary(
         if isinstance(row.get("ranker_selection_counterfactual"), dict)
         and row["ranker_selection_counterfactual"].get("would_accept") is True
     ]
-    missing_shadow = [row for row in rows if not _row_has_ranker_shadow(row)]
+    zero_eligible_shadow = [
+        row for row in rows if _row_has_zero_eligible_shadow_coverage_failure(row)
+    ]
+    missing_shadow = [
+        row
+        for row in rows
+        if not _row_has_ranker_shadow(row)
+        and not _row_has_zero_eligible_shadow_coverage_failure(row)
+    ]
     all_hard_feasible = all(bool(row["hard_feasible"]) for row in rows)
     coverage_complete = len(rows) == expected_rows
     return {
@@ -626,15 +635,23 @@ def _summary(
         "coverage_complete": coverage_complete,
         "would_accept": len(accept),
         "all_hard_feasible": all_hard_feasible,
-        "ranker_shadow_available": len(rows) - len(missing_shadow),
+        "ranker_shadow_available": len(rows) - len(missing_shadow) - len(zero_eligible_shadow),
         "ranker_shadow_missing": len(missing_shadow),
-        "all_ranker_shadows_available": not missing_shadow,
+        "ranker_shadow_zero_eligible": len(zero_eligible_shadow),
+        "all_ranker_shadows_available": not missing_shadow and not zero_eligible_shadow,
         "counterfactual_audit_gate_passed": (
-            coverage_complete and all_hard_feasible and not missing_shadow
+            coverage_complete
+            and all_hard_feasible
+            and not missing_shadow
+            and not zero_eligible_shadow
         ),
         "missing_ranker_shadow_rows": [
             {"case_id": row["case_id"], "seed": row["seed"]}
             for row in missing_shadow
+        ],
+        "zero_eligible_ranker_shadow_rows": [
+            {"case_id": row["case_id"], "seed": row["seed"]}
+            for row in zero_eligible_shadow
         ],
         "unique_selected_hashes": len({row["selected_sha256"] for row in rows}),
         "output_hashes_by_case": {
@@ -650,6 +667,13 @@ def _row_has_ranker_shadow(row: dict[str, Any]) -> bool:
     if "ranker_shadow_available" in row:
         return bool(row["ranker_shadow_available"])
     return bool(row.get("shadow_top4"))
+
+
+def _row_has_zero_eligible_shadow_coverage_failure(row: dict[str, Any]) -> bool:
+    return (
+        int(row.get("ranker_shadow_eligible_count", -1)) == 0
+        and row.get("ranker_shadow_empty_reason") == "no_exact_eligible_candidates"
+    )
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:

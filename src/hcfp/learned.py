@@ -799,6 +799,7 @@ def _attach_ranker_shadow_snapshot(
             ),
             key=lambda item: (item[0], item[1]),
         )
+        empty_reason = "no_exact_eligible_candidates" if not ranked else None
         snapshot.update(
             {
                 "ranker_shadow_stage": "initial",
@@ -807,6 +808,7 @@ def _attach_ranker_shadow_snapshot(
                 "ranker_shadow_feature_dim": RANKER_FEATURE_DIM,
                 "ranker_shadow_candidate_count": learned_count,
                 "ranker_shadow_eligible_count": len(ranked),
+                "ranker_shadow_empty_reason": empty_reason,
                 "ranker_shadow_candidate_kinds": kinds,
                 "ranker_shadow_top4": tuple(
                     {
@@ -902,9 +904,16 @@ def _record_ranker_selection_counterfactual(
     snapshot["ranker_selection_experiment_mode"] = "counterfactual_only"
     top4 = snapshot.get("ranker_shadow_top4", ())
     if not isinstance(top4, tuple) or not top4:
+        rejection = (
+            "no_exact_eligible_ranker_candidates"
+            if int(snapshot.get("ranker_shadow_eligible_count", -1)) == 0
+            and snapshot.get("ranker_shadow_empty_reason")
+            == "no_exact_eligible_candidates"
+            else "missing_shadow_top4"
+        )
         snapshot["ranker_selection_counterfactual"] = {
             "would_accept": False,
-            "rejection_reason": "missing_shadow_top4",
+            "rejection_reason": rejection,
         }
         return
     try:

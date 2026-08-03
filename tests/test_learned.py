@@ -726,6 +726,29 @@ def test_ranker_shadow_ignores_ineligible_best_score() -> None:
     assert snapshot["ranker_shadow_top4"][0]["source"] == "candidate_5"
 
 
+def test_ranker_shadow_records_empty_reason_for_zero_eligible_candidates() -> None:
+    analysis = _shadow_analysis(eligible=(False, False, False, False))
+
+    shadowed = _attach_ranker_shadow_snapshot(
+        _case(),
+        analysis,
+        model=_shadow_model((0.1, 0.2, 0.3, 0.4)),
+        metadata=_shadow_metadata(),
+        analytic_count=2,
+        learned_count=4,
+        residual_count=2,
+        constraint_count=1,
+        topology_count=1,
+    )
+
+    snapshot = shadowed.incumbent_snapshot
+    assert torch.equal(shadowed.selected, analysis.selected)
+    assert snapshot["exact_source"] == "candidate_5"
+    assert snapshot["ranker_shadow_eligible_count"] == 0
+    assert snapshot["ranker_shadow_empty_reason"] == "no_exact_eligible_candidates"
+    assert snapshot["ranker_shadow_top4"] == ()
+
+
 def test_ranker_shadow_untrained_or_incompatible_checkpoint_is_neutral() -> None:
     analysis = _shadow_analysis()
     untrained = _attach_ranker_shadow_snapshot(
@@ -886,6 +909,33 @@ def test_ranker_selection_experiment_rejects_hard_infeasible_shadow_candidate(
         snapshot["ranker_selection_evaluated_top4"][0]["rejection_reason"]
         == "hard_infeasible"
     )
+
+
+def test_ranker_counterfactual_rejects_zero_eligible_without_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    analysis = _pareto_analysis()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = ()
+    analysis.analytic.incumbent_snapshot["ranker_shadow_eligible_count"] = 0
+    analysis.analytic.incumbent_snapshot["ranker_shadow_empty_reason"] = (
+        "no_exact_eligible_candidates"
+    )
+
+    result = _select_with_ranker_counterfactual(
+        monkeypatch,
+        analysis,
+        feasible_x={20.0},
+        quality={20.0: (2.0, 20.0, 20.0)},
+        experiment=True,
+    )
+
+    snapshot = analysis.analytic.incumbent_snapshot
+    assert result[0][0] == 20.0
+    assert snapshot["exact_source"] == "candidate_2"
+    assert snapshot["ranker_selection_counterfactual"] == {
+        "would_accept": False,
+        "rejection_reason": "no_exact_eligible_ranker_candidates",
+    }
 
 
 def test_ranker_selection_experiment_rejects_non_dominating_shadow_candidate(

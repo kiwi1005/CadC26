@@ -366,7 +366,7 @@ def test_audit_fails_closed_on_checkpoint_fallback(
         )
 
 
-def test_audit_records_missing_ranker_shadow_as_a_failed_gate(
+def test_audit_records_zero_eligible_ranker_shadow_as_coverage_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -374,9 +374,12 @@ def test_audit_records_missing_ranker_shadow_as_a_failed_gate(
     analysis = _analysis()
     analysis.analytic.incumbent_snapshot["ranker_shadow_top4"] = ()
     analysis.analytic.incumbent_snapshot["ranker_shadow_eligible_count"] = 0
+    analysis.analytic.incumbent_snapshot["ranker_shadow_empty_reason"] = (
+        "no_exact_eligible_candidates"
+    )
     analysis.analytic.incumbent_snapshot["ranker_selection_counterfactual"] = {
         "would_accept": False,
-        "rejection_reason": "missing_shadow_top4",
+        "rejection_reason": "no_exact_eligible_ranker_candidates",
     }
     monkeypatch.setattr(
         audit,
@@ -404,8 +407,35 @@ def test_audit_records_missing_ranker_shadow_as_a_failed_gate(
 
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["cases"][0]["ranker_shadow_available"] is False
-    assert report["summary"]["ranker_shadow_missing"] == 1
+    assert report["cases"][0]["ranker_shadow_empty_reason"] == "no_exact_eligible_candidates"
+    assert report["summary"]["ranker_shadow_missing"] == 0
+    assert report["summary"]["ranker_shadow_zero_eligible"] == 1
+    assert report["summary"]["zero_eligible_ranker_shadow_rows"] == [
+        {"case_id": "case/a", "seed": 7}
+    ]
     assert report["summary"]["counterfactual_audit_gate_passed"] is False
+
+
+def test_audit_records_missing_ranker_shadow_telemetry_separately() -> None:
+    row = {
+        "case_id": "case/a",
+        "seed": 7,
+        "hard_feasible": True,
+        "ranker_shadow_available": False,
+        "ranker_shadow_eligible_count": 0,
+        "selected_sha256": "a" * 64,
+        "ranker_selection_counterfactual": {
+            "would_accept": False,
+            "rejection_reason": "missing_shadow_top4",
+        },
+    }
+
+    summary = audit._summary([row], expected_rows=1)
+
+    assert summary["ranker_shadow_missing"] == 1
+    assert summary["ranker_shadow_zero_eligible"] == 0
+    assert summary["missing_ranker_shadow_rows"] == [{"case_id": "case/a", "seed": 7}]
+    assert summary["counterfactual_audit_gate_passed"] is False
 
 
 def test_partial_counterfactual_summary_never_passes_gate() -> None:
