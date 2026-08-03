@@ -14,6 +14,7 @@ from hcfp.analytic import AnalyticConfig, select_device, solve_case, solve_case_
 from hcfp.benchmark import percentile
 from hcfp.case import FloorplanCase, from_official
 from hcfp.dynamics import DynamicsConfig
+from hcfp.projection import ComponentBDPConfig
 from hcfp.verify import verify_feasible
 
 
@@ -29,6 +30,7 @@ class ProfileConfig:
     warmups: int = 1
     projection_iterations: int = 8
     direction_beam: int = 2
+    component_bdp: bool = False
     device: str = "auto"
 
     def __post_init__(self) -> None:
@@ -91,6 +93,7 @@ def run_profile(config: ProfileConfig) -> dict[str, Any]:
         dynamics=DynamicsConfig(population=config.candidates, steps=config.steps),
         projection_iterations=config.projection_iterations,
         direction_beam=config.direction_beam,
+        component_bdp=ComponentBDPConfig(enabled=config.component_bdp),
     )
     for _ in range(config.warmups):
         _profile_once(case, analytic_config, device)
@@ -119,6 +122,7 @@ def run_profile(config: ProfileConfig) -> dict[str, Any]:
             "warmups": config.warmups,
             "projection_iterations": config.projection_iterations,
             "direction_beam": config.direction_beam,
+            "component_bdp": config.component_bdp,
             "requested_device": config.device,
             "actual_device": str(device),
         },
@@ -151,6 +155,17 @@ def run_profile(config: ProfileConfig) -> dict[str, Any]:
             "max_active_pairs": int(telemetry.projection_active_pairs.max().item()),
             "max_raw_overlap": float(telemetry.raw_overlap.max().item()),
             "max_projected_overlap": float(telemetry.projected_overlap.max().item()),
+            "component_rebuilds": int(
+                telemetry.projection_component_rebuilds.sum().item()
+            ),
+            "new_pairs_detected": int(telemetry.projection_new_pairs.sum().item()),
+            "resets": int(telemetry.projection_resets.sum().item()),
+            "beam_states_evaluated": int(
+                telemetry.projection_beam_states.sum().item()
+            ),
+            "max_component_size": int(
+                telemetry.projection_max_component_size.max().item()
+            ),
         },
         "incumbent": {
             "feasible": bool(feasible),

@@ -9,6 +9,7 @@ from hcfp.analytic import AnalyticConfig, select_device, solve
 from hcfp.case import from_official
 from hcfp.dynamics import DynamicsConfig
 from hcfp.geometry import normalize_xywh
+from hcfp.projection import ComponentBDPConfig
 from hcfp.runtime import SolveCase
 from hcfp.verify import soft_violation_normalized, verify
 
@@ -41,6 +42,7 @@ def _demo(args: argparse.Namespace) -> dict[str, object]:
         dynamics=DynamicsConfig(population=args.candidates, steps=args.steps),
         projection_iterations=args.projection_steps,
         direction_beam=args.beam,
+        component_bdp=ComponentBDPConfig(enabled=args.component_bdp),
     )
     placements = solve(runtime_case, config, device=args.device)
     case = from_official(
@@ -74,6 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--steps", type=int, default=12)
     demo.add_argument("--projection-steps", type=int, default=24)
     demo.add_argument("--beam", type=int, default=4)
+    demo.add_argument("--component-bdp", action="store_true")
     demo.add_argument("--json", action="store_true")
     return parser
 

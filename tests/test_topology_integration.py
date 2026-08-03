@@ -314,6 +314,40 @@ def test_opt_in_constraint_seeds_follow_topology_and_keep_source_provenance(
     assert snapshot["constraint_seed_kind_counts"]
 
 
+def test_post_relax_constraint_provenance_fails_closed_after_geometry_changes(
+    tmp_path: Path,
+) -> None:
+    torch.manual_seed(29)
+    case = _case()
+    checkpoint = tmp_path / "topology-constraints-relaxed.pt"
+    save_checkpoint(
+        HCFPModel(
+            ModelConfig(hidden_dim=16, encoder_layers=1, topology_enabled=True)
+        ),
+        checkpoint,
+        RUNTIME_NORMALIZATION,
+    )
+    config = LearnedConfig(
+        analytic=replace(
+            LearnedConfig().analytic,
+            dynamics=DynamicsConfig(population=2, steps=1),
+            projection_iterations=4,
+            direction_beam=1,
+        ),
+        flow_steps=0,
+        topology_seeds=1,
+        constraint_seeds=1,
+        seed=31,
+    )
+
+    analysis = analyze_case_with_checkpoint(case, checkpoint, config)
+    snapshot = analysis.analytic.incumbent_snapshot
+
+    assert len(snapshot["constraint_seed_sources"]) == 1
+    assert len(snapshot["constraint_seed_provenance"]) == 1
+    assert len(snapshot["constraint_seed_stale_sources"]) == 1
+
+
 def test_constraint_seeds_require_topology_seeds() -> None:
     with pytest.raises(ValueError, match="require topology"):
         LearnedConfig(constraint_seeds=1)

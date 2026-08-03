@@ -74,3 +74,4 @@ def test_full_supplied_population_is_retained_as_initial_candidates() -> None:
     )
 
     assert torch.equal(result.initial_boxes, population)
+    assert torch.equal(result.boxes, population)

@@ -3,7 +3,7 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: Q0/Q1 verified; Q2 QoR gate passed but full promotion is held for Q4
+Status: Q0--Q2 verified; Q4 is an exact-safe opt-in checkpoint pending a clean rerun
 
 ## Execution checkpoint
 
@@ -19,11 +19,15 @@ Status: Q0/Q1 verified; Q2 QoR gate passed but full promotion is held for Q4
 - Q2 contact, boundary, and MIB construction now controls runtime geometry.
   The disjoint official-raw audit records 16/16 constraint-oracle wins over
   topology, `+0.5753` score-weighted post-BDP `J` gain, and 10/16 cap crosses.
-- Q2 is not default-promoted: group connectivity is 77.3% rather than 95%,
-  the one area-compatible MIB construction still overlaps before a stronger
-  projector, and displacement reduction is not demonstrated.
-- Q4 component-aware BDP is the active remediation boundary. Q3 collective
-  dynamics remains deferred until Q4 preserves Q2's useful-candidate gain.
+- Q2 is not default-promoted: group connectivity is 77.3% rather than 95% and
+  the one area-compatible MIB candidate is legalizable but not oracle quality.
+- Q4 component-aware BDP passes exact-safety tests, but not its promotion gate.
+  Historical diagnostics show zero hard regressions and raw-oracle
+  preservation, while constraint projected coverage falls from 338/512 to
+  322/512 and feasible-conditioned movement rises about 13.4x.
+- The historical Q4 artifacts are not same-code proof, do not include a pure
+  analytic runtime comparator, and predate neutral-clearance isolation. Q3
+  remains deferred until a clean-commit three-way rerun resolves those gaps.
 
 ## Decision
 
@@ -264,9 +268,10 @@ density. Model size and rollout depth are not first-line remedies.
 
 ## Q4: topology-aware component BDP
 
-Direction cost combines movement, estimated HPWL delta, topology confidence,
-latch breakage, and boundary disruption. Conflict connected components are
-solved independently with a bounded beam:
+Direction cost combines movement, topology confidence, active-contact latch
+cost, and boundary disruption. Complete projected branches are then compared
+with construction and HPWL/bbox Pareto tiers. Conflict connected components
+are solved independently with a bounded beam:
 
 1. fix high-confidence directions;
 2. branch only on uncertain pairs;
@@ -274,7 +279,7 @@ solved independently with a bounded beam:
 4. project fixed-direction linear constraints;
 5. rebuild all conflicts after movement;
 6. reset low-confidence directions when a component signature repeats;
-7. interleave small HPWL/bbox superiorization steps.
+7. select objective-preserving projected geometry with HPWL/bbox Pareto tiers.
 
 Full differentiable QP/linear-constraint layers are deferred. The existing
 projector is retained until the objective-aware beam proves a QoR gain.
@@ -285,6 +290,19 @@ projector is retained until the objective-aware beam proves a QoR gain.
 - Repair displacement falls another 20%.
 - HPWL and bbox show no systematic regression.
 - Learned p95 is at most 1.20 times analytic p95.
+
+Q4 currently passes exact-safety but not this promotion gate. The historical
+component diagnostic has zero constraint hard regressions versus four and
+preserves the raw constraint oracle, but constraint projected coverage falls
+from 338/512 to 322/512 and feasible-conditioned movement rises from `0.01845`
+to `0.24761`. Its p95 ratio of 1.150 compares learned/component against
+learned/legacy, not learned against analytic. The artifacts were not generated
+from one frozen solver commit and predate neutral-clearance isolation.
+
+The component lane therefore remains opt-in. A clean-commit rerun of legacy,
+component, and pure analytic comparators must embed solver provenance and meet
+all four acceptance criteria before Q3 is unblocked. Explicit pre-projection
+HPWL perturbation remains deferred.
 
 ## Q5: post-repair DAgger and listwise ranker
 
@@ -330,8 +348,8 @@ not ordinary binary accuracy.
 | Q1c | preplaced adaptation and longest-path seeds | Q1b | opt-in | oracle@16 gain |
 | Q2a | contact labels and MST decoder | Q1c | opt-in | connected ratio |
 | Q2b | latch/boundary/MIB construction | Q2a | opt-in | soft QoR gain |
-| Q3 | dynamic messages and live force gates | Q4 | opt-in | oracle gain |
-| Q4 | component beam, reset, superiorization | Q1/Q2 | opt-in, active | displacement/runtime |
+| Q3 | dynamic messages and live force gates | promoted Q4 gate | deferred | oracle gain |
+| Q4 | component beam, reset, superiorization | Q1/Q2 | opt-in checkpoint | displacement/runtime |
 | Q5 | replay v2 and listwise ranker | Q0--Q4 | training/selection | rank gates |
 | Q6 | A100 profile and submission freeze | all promoted gates | packaging | final smoke |
 

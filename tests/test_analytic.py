@@ -6,9 +6,9 @@ from hcfp import analytic
 from hcfp.analytic import AnalyticConfig, solve, solve_case, solve_case_with_telemetry
 from hcfp.case import from_official
 from hcfp.dynamics import DynamicsConfig
-from hcfp.geometry import normalize_xywh
+from hcfp.geometry import denormalize_xywh, normalize_xywh
 from hcfp.runtime import SolveCase
-from hcfp.verify import verify_feasible
+from hcfp.verify import overlap_pairs, verify_feasible
 
 
 def test_analytic_solver_returns_verified_geometry_and_exact_hard_targets() -> None:
@@ -36,6 +36,30 @@ def test_analytic_solver_returns_verified_geometry_and_exact_hard_targets() -> N
     assert placements[0] == (-2.0, 3.0, 2.0, 2.0)
     assert placements[1][2:] == (3.0, 3.0)
     assert verify_feasible(normalized_case, normalize_xywh(normalized_case, placements))
+
+
+def test_official_conversion_promotes_coordinates_before_denormalizing() -> None:
+    case = from_official(
+        2,
+        [17101.0, 17101.0],
+        [],
+        [],
+        [],
+        [[0, 0, 0, 0, 0], [0, 0, 0, 0, 0]],
+        [[-1.0] * 4, [-1.0] * 4],
+    )
+    normalized = torch.tensor(
+        [
+            [0.26265946, 0.0, 0.40214726, 1.0],
+            [0.66480672, 0.0, 0.2, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    old_order = denormalize_xywh(case, normalized)
+    converted = analytic.to_official_placements({}, case, normalized)
+
+    assert overlap_pairs(old_order) == ((0, 1),)
+    assert overlap_pairs(converted) == ()
 
 
 def test_solve_case_with_telemetry_reports_every_candidate_after_projection(monkeypatch) -> None:
@@ -82,6 +106,13 @@ def test_solve_case_with_telemetry_reports_every_candidate_after_projection(monk
     assert telemetry.bbox_area.shape == (9,)
     assert telemetry.soft_violation.shape == (9,)
     assert telemetry.projection_displacement.shape == (9,)
+    assert telemetry.projection_initial_pairs.shape == (9,)
+    assert telemetry.projection_final_pairs.shape == (9,)
+    assert telemetry.projection_component_rebuilds.shape == (9,)
+    assert telemetry.projection_new_pairs.shape == (9,)
+    assert telemetry.projection_resets.shape == (9,)
+    assert telemetry.projection_beam_states.shape == (9,)
+    assert telemetry.projection_max_component_size.shape == (9,)
     assert len(telemetry.projection_failure_reasons) == 9
     assert bool(telemetry.hard_feasible[0])
     assert torch.all(telemetry.projected_overlap <= telemetry.raw_overlap + 1.0e-5)

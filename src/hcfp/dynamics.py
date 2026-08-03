@@ -296,5 +296,9 @@ def relax(
         state, diagnostics = step(case, state, cfg)
         if not bool(torch.isfinite(state.center).all() and torch.isfinite(state.log_aspect).all()):
             raise FloatingPointError("collective dynamics produced non-finite geometry")
-    boxes = xywh_from_state(case, state.center, state.log_aspect)
+    boxes = (
+        initial_boxes.clone()
+        if cfg.steps == 0
+        else xywh_from_state(case, state.center, state.log_aspect)
+    )
     return DynamicsResult(initial_boxes=initial_boxes, boxes=boxes, state=state, diagnostics=diagnostics)

@@ -13,7 +13,8 @@ from hcfp.dynamics import DynamicsConfig, relax
 from hcfp.fallback import safe_shelf
 from hcfp.geometry import bbox_area_tensor, centers_from_xywh, denormalize_xywh, hpwl_tensor
 from hcfp.incumbent import IncumbentManager
-from hcfp.projection import ProjectionResult, project_disjunctive
+from hcfp.projection import ComponentBDPConfig, ProjectionResult, project_disjunctive
+from hcfp.projection_guidance import ProjectionGuidance
 from hcfp.verify import soft_violation_normalized, verify_feasible
 
 
@@ -25,6 +26,7 @@ class AnalyticConfig:
     dynamics: DynamicsConfig = DynamicsConfig()
     projection_iterations: int = 24
     direction_beam: int = 4
+    component_bdp: ComponentBDPConfig = ComponentBDPConfig()
 
     def __post_init__(self) -> None:
         if self.projection_iterations <= 0:
@@ -46,6 +48,13 @@ class CandidateTelemetry:
     soft_violation: Tensor
     projection_displacement: Tensor
     projection_failure_reasons: tuple[str, ...]
+    projection_initial_pairs: Tensor
+    projection_final_pairs: Tensor
+    projection_component_rebuilds: Tensor
+    projection_new_pairs: Tensor
+    projection_resets: Tensor
+    projection_beam_states: Tensor
+    projection_max_component_size: Tensor
 
 
 @dataclass(frozen=True)
@@ -78,20 +87,34 @@ def solve_case_from_population(
     case: FloorplanCase,
     initial_xywh: Tensor,
     config: AnalyticConfig | None = None,
+    *,
+    projection_guidance: ProjectionGuidance | None = None,
 ) -> Tensor:
     """Run the verified analytic tail from an explicit ``[K,N,4]`` population."""
 
-    return _solve_candidates(case, config, initial_population=initial_xywh)[0]
+    return _solve_candidates(
+        case,
+        config,
+        initial_population=initial_xywh,
+        projection_guidance=projection_guidance,
+    )[0]
 
 
 def solve_case_from_population_with_telemetry(
     case: FloorplanCase,
     initial_xywh: Tensor,
     config: AnalyticConfig | None = None,
+    *,
+    projection_guidance: ProjectionGuidance | None = None,
 ) -> AnalyticResult:
     """Run the verified tail from explicit candidates and retain exact telemetry."""
 
-    result = _solve_candidates(case, config, initial_population=initial_xywh)
+    result = _solve_candidates(
+        case,
+        config,
+        initial_population=initial_xywh,
+        projection_guidance=projection_guidance,
+    )
     return _analytic_result(result)
 
 
@@ -121,6 +144,7 @@ def _solve_candidates(
     config: AnalyticConfig | None,
     *,
     initial_population: Tensor | None = None,
+    projection_guidance: ProjectionGuidance | None = None,
 ) -> tuple[Tensor, FloorplanCase, Tensor, ProjectionResult, Tensor, dict[str, object]]:
     cfg = config or AnalyticConfig()
     cpu_case = case.to(device="cpu", dtype=torch.float32)
@@ -133,11 +157,20 @@ def _solve_candidates(
         (fallback.to(case.area.device).unsqueeze(0), result.initial_boxes, result.boxes),
         dim=0,
     )
+    tail_guidance = _tail_projection_guidance(
+        projection_guidance,
+        population=int(result.initial_boxes.shape[0]),
+        n=case.n,
+        device=case.area.device,
+        reuse_post_relax=cfg.dynamics.steps == 0,
+    )
     projection = project_disjunctive(
         candidates,
         problem=case,
         iterations=cfg.projection_iterations,
         beam=cfg.direction_beam,
+        component_config=cfg.component_bdp,
+        guidance=tail_guidance,
     )
     projected = projection.xywh
 
@@ -145,6 +178,48 @@ def _solve_candidates(
     for idx, candidate in enumerate(projected.detach().to(device="cpu", dtype=torch.float32)):
         manager.consider(candidate, source=f"candidate_{idx}", fast_feasible=bool(ok_mask[idx]))
     return manager.best_exact.xywh, cpu_case, candidates, projection, result.state.energy_history, manager.snapshot()
+
+
+def _tail_projection_guidance(
+    guidance: ProjectionGuidance | None,
+    *,
+    population: int,
+    n: int,
+    device: torch.device,
+    reuse_post_relax: bool,
+) -> ProjectionGuidance | None:
+    if guidance is None:
+        return None
+    if guidance.preferred_direction.shape != (population, n, n):
+        raise ValueError("population projection guidance shape mismatch")
+    neutral_direction = torch.full(
+        (1, n, n), -1, dtype=torch.long, device=device
+    )
+    neutral_confidence = torch.zeros(
+        (1, n, n), dtype=torch.float32, device=device
+    )
+    neutral_lock = torch.zeros((1, n, 2), dtype=torch.bool, device=device)
+
+    def doubled(value: Tensor, neutral: Tensor) -> Tensor:
+        value = value.to(device=device)
+        post_relax = value if reuse_post_relax else torch.zeros_like(value)
+        if value.dtype == torch.long and not reuse_post_relax:
+            post_relax.fill_(-1)
+        return torch.cat((neutral, value, post_relax), dim=0)
+
+    return ProjectionGuidance(
+        preferred_direction=doubled(
+            guidance.preferred_direction, neutral_direction
+        ),
+        preferred_confidence=doubled(
+            guidance.preferred_confidence, neutral_confidence
+        ),
+        contact_direction=doubled(guidance.contact_direction, neutral_direction),
+        contact_confidence=doubled(
+            guidance.contact_confidence, neutral_confidence
+        ),
+        boundary_axis_lock=doubled(guidance.boundary_axis_lock, neutral_lock),
+    )
 
 
 def solve(
@@ -177,7 +252,10 @@ def to_official_placements(
 ) -> list[tuple[float, float, float, float]]:
     """Denormalize a verified candidate and replay raw hard targets exactly."""
 
-    raw = denormalize_xywh(normalized_case.to(device="cpu"), normalized_solution).to(torch.float64)
+    raw = denormalize_xywh(
+        normalized_case.to(device="cpu", dtype=torch.float64),
+        normalized_solution.to(device="cpu", dtype=torch.float64),
+    )
     _copy_raw_hard_targets(source, normalized_case.to(device="cpu"), raw)
     return [tuple(float(value) for value in row) for row in raw.tolist()]
 
@@ -209,6 +287,13 @@ def _telemetry(case: FloorplanCase, raw: Tensor, projection: ProjectionResult) -
         soft_violation=soft.to(device=projected.device),
         projection_displacement=displacement,
         projection_failure_reasons=projection.failure_reasons,
+        projection_initial_pairs=projection.initial_pair_count.detach(),
+        projection_final_pairs=projection.final_pair_count.detach(),
+        projection_component_rebuilds=projection.component_rebuilds.detach(),
+        projection_new_pairs=projection.new_pairs_detected.detach(),
+        projection_resets=projection.reset_count.detach(),
+        projection_beam_states=projection.beam_states_evaluated.detach(),
+        projection_max_component_size=projection.max_component_size.detach(),
     )
 
 

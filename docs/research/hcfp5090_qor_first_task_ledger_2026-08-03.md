@@ -81,16 +81,34 @@ remediation stage; Q3 remains deferred until Q4 preserves the Q2 QoR gain.
 - [ ] Connect learned force gates to active typed-force channels.
 - [ ] Run rollout stability and CPU/CUDA differential tests.
 
-Q3 starts only when Q4 preserves the Q2 useful-candidate gain without creating
-a runtime or displacement regression.
+Q3 remains deferred. It starts only after a clean-commit Q4 rerun preserves
+projection success and proves the learned-versus-analytic runtime gate.
 
 ## Q4 — component-aware BDP
 
-- [~] Build and refresh conflict connected components every outer sweep.
-- [ ] Score directions with movement, HPWL, topology, latch, and boundary terms.
-- [ ] Branch only uncertain directions and reject cycles.
-- [ ] Add repeated-signature reset and bounded HPWL superiorization.
-- [ ] Compare feasibility, displacement, HPWL, bbox, and p95 runtime.
+- [x] Build and refresh conflict connected components every outer sweep.
+- [x] Score directions with movement, topology, latch, and boundary terms.
+- [x] Rank complete projected branches with HPWL/bbox and construction Pareto tiers.
+- [x] Branch independently on uncertain component directions and reject cycles.
+- [x] Add repeated-signature reset within the same construction-safe stratum.
+- [x] Add exact FP64 commit, active-contact latching, and preserve-original routing.
+- [~] Compare feasibility, displacement, HPWL, bbox, and p95 runtime from one clean commit.
+- [ ] Embed solver commit and clean-tree proof in legacy/component/analytic artifacts.
+- [ ] Rerun a pure analytic runtime comparator on the identical case list.
+
+Current gate: **EXACT-SAFE PARTIAL CHECKPOINT; promotion blocked**. The
+historical diagnostic shows zero constraint hard regressions and preserves the
+raw constraint oracle, but constraint projected coverage falls from 338/512 to
+322/512. The 87.65% all-row movement reduction is dominated by 506 no-commits;
+hard-feasible-conditioned movement rises from `0.01845` to `0.24761`. The p95
+ratio of 1.150 is learned/component versus learned/legacy, not learned versus
+pure analytic. The two artifacts lack solver commit/dirty-patch provenance and
+predate neutral-clearance isolation. Full evidence and limitations are in
+[`hcfp5090_q4_component_bdp_results_2026-08-03.md`](hcfp5090_q4_component_bdp_results_2026-08-03.md).
+
+Explicit pre-projection HPWL perturbation remains deferred. Q4 uses
+objective-aware selection among already projected branches, but this does not
+substitute for the pending promotion rerun.
 
 ## Q5 — DAgger replay and ranker v2
 
@@ -99,7 +117,7 @@ a runtime or displacement regression.
 - [ ] Build 5,000-record training-only replay with required composition.
 - [ ] Add post-repair multi-task targets and listwise loss.
 - [ ] Validate top-1, top-4 recall, false promotions, and weighted regret.
-- [ ] Run full validation through unchanged Pareto guard.
+- [ ] Run full validation through the preserved dominance safety invariant.
 
 ## Q6 — release verification
 

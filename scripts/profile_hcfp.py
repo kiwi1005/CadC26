@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--projection-steps", type=int, default=8)
     parser.add_argument("--beam", type=int, default=2)
+    parser.add_argument("--component-bdp", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
@@ -36,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
             warmups=args.warmups,
             projection_iterations=args.projection_steps,
             direction_beam=args.beam,
+            component_bdp=args.component_bdp,
             device=args.device,
         )
     )

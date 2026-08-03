@@ -139,6 +139,31 @@ def test_placement_hash_is_stable_and_geometry_sensitive() -> None:
     assert audit._placement_sha256(first) != audit._placement_sha256(second)
 
 
+def test_solver_provenance_records_commit_and_dirty_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = {
+        ("rev-parse", "HEAD"): b"abc123\n",
+        (
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ): b" M src/hcfp/projection.py\n",
+        ("diff", "--binary", "HEAD", "--", "."): b"patch bytes\n",
+    }
+    monkeypatch.setattr(audit, "_git_bytes", lambda *args: responses[args])
+
+    first = audit._solver_provenance()
+    second = audit._solver_provenance()
+
+    assert first == second
+    assert first["commit"] == "abc123"
+    assert first["clean"] is False
+    assert len(first["status_sha256"]) == 64
+    assert len(first["tracked_diff_sha256"]) == 64
+    assert len(first["workspace_fingerprint"]) == 64
+
+
 def test_analysis_and_constraint_provenance_fail_closed() -> None:
     analysis = SimpleNamespace(
         result=SimpleNamespace(
@@ -212,6 +237,7 @@ def _case(
     return {
         "test_id": test_id,
         "block_count": blocks,
+        "runtime_seconds": float(test_id + 1),
         "raw": stage,
         "post_bdp": stage,
         "selected": {
@@ -267,6 +293,13 @@ def test_summary_reports_q2_weighted_gates_and_selected_gain() -> None:
     assert displacement["constraint"]["weighted_mean"] == pytest.approx(
         (2.0 * weight + 5.0) / (weight + 1.0)
     )
+    assert displacement["constraint"]["post_bdp_hard_feasible_count"] == 2
+    assert displacement["constraint"][
+        "post_bdp_hard_feasible_weighted_mean"
+    ] == pytest.approx((2.0 * weight + 5.0) / (weight + 1.0))
+    assert displacement["constraint"]["newly_hard_feasible_count"] == 0
+    assert displacement["constraint"]["hard_feasible_regression_count"] == 0
+    assert displacement["constraint"]["no_commit_count"] == 0
     assert summary["oracle"]["post_bdp"]["constraint"]["total_boundary_violations"] == 6
     assert summary["hard_feasibility"]["raw"]["hard_feasible_by_type"] == {
         "fallback": 0,
@@ -274,4 +307,12 @@ def test_summary_reports_q2_weighted_gates_and_selected_gain() -> None:
         "learned_residual": 0,
         "topology": 2,
         "constraint": 2,
+    }
+    assert summary["runtime"] == {
+        "case_count": 2,
+        "total": 3.0,
+        "mean": 1.5,
+        "p50": 1.5,
+        "p95": pytest.approx(1.95),
+        "maximum": 2.0,
     }

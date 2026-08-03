@@ -9,7 +9,9 @@ import json
 import math
 import os
 from pathlib import Path
+import subprocess
 import sys
+import time
 from typing import Any
 
 import torch
@@ -31,7 +33,7 @@ from hcfp.analytic import (  # noqa: E402
     select_device,
     to_official_placements,
 )
-from hcfp.benchmark import candidate_source_layout  # noqa: E402
+from hcfp.benchmark import candidate_source_layout, percentile  # noqa: E402
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint  # noqa: E402
 from hcfp.constraints.raw_repair import repair_raw_constraints  # noqa: E402
 from hcfp.data import DataSample, file_sha256  # noqa: E402
@@ -41,8 +43,10 @@ from hcfp.learned import (  # noqa: E402
     analyze_case_with_checkpoint,
     select_official_from_analysis,
 )
+from hcfp.projection import ComponentBDPConfig  # noqa: E402
 from hcfp.reference import OFFICIAL_FLOORSET_V10  # noqa: E402
 from hcfp.score_attribution import attribute_score  # noqa: E402
+from hcfp.verify import overlap_pairs  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(command_args)
     _validate_args(args)
+    solver = _solver_provenance()
+    if args.require_clean_solver and not solver["clean"]:
+        raise RuntimeError(
+            "--require-clean-solver requires a clean source worktree; "
+            f"status_sha256={solver['status_sha256']}"
+        )
 
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     torch.use_deterministic_algorithms(True)
@@ -83,18 +93,25 @@ def main(argv: list[str] | None = None) -> int:
         args.root,
         exclude_ids=exclude_ids,
         exclude_provenance=exclude_provenance,
-        heldout_limit=args.heldout_limit,
+        heldout_limit=args.heldout_start + args.heldout_limit,
         heldout_seed=args.heldout_seed,
         heldout_max_layouts_per_file=args.heldout_max_layouts_per_file,
         min_blocks=args.min_blocks,
         max_blocks=args.max_blocks,
         score_aware=training_sampling == "score-aware",
     )
+    heldout = heldout[args.heldout_start :]
     config = _learned_config(args)
     data_path = Path(args.data_path).resolve()
     evaluator_module = _load_evaluator(data_path)
-    cases = [
-        _audit_sample(
+    cases = []
+    for index, (sample, source) in enumerate(
+        heldout, start=args.heldout_start
+    ):
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        case = _audit_sample(
             evaluator_module,
             index,
             sample,
@@ -107,13 +124,16 @@ def main(argv: list[str] | None = None) -> int:
             args.topology_seeds,
             args.constraint_seeds,
         )
-        for index, (sample, source) in enumerate(heldout)
-    ]
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        case["runtime_seconds"] = time.perf_counter() - started
+        cases.append(case)
     sample_ids = [sample.sample_id for sample, _source in heldout]
     evaluator_path = data_path / OFFICIAL_FLOORSET_V10.evaluator_path
     report = {
-        "schema_version": 1,
+        "schema_version": 5,
         "command": ["scripts/audit_hcfp_constraint_raw.py", *command_args],
+        "solver": solver,
         "config": {
             "root": str(Path(args.root).resolve()),
             "data_path": str(data_path),
@@ -121,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             "training_report": str(training_report),
             "output": str(Path(args.output).resolve()),
             "heldout_limit": args.heldout_limit,
+            "heldout_start": args.heldout_start,
             "heldout_seed": args.heldout_seed,
             "exclude_train_limit": args.exclude_train_limit,
             "exclude_train_seed": args.exclude_train_seed,
@@ -135,6 +156,12 @@ def main(argv: list[str] | None = None) -> int:
             "dynamics_steps": args.dynamics_steps,
             "projection_steps": args.projection_steps,
             "direction_beam": args.direction_beam,
+            "component_bdp": args.component_bdp,
+            "component_beam": args.component_beam,
+            "component_limit": args.component_limit,
+            "component_uncertain_pairs": args.component_uncertain_pairs,
+            "component_sweeps": args.component_sweeps,
+            "component_reset_limit": args.component_reset_limit,
             "flow_steps": args.flow_steps,
             "flow_seed": args.flow_seed,
             "tail_topk": args.tail_topk,
@@ -162,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
             **split_provenance,
             "heldout": {
                 **split_provenance["heldout"],
+                "selection_start": args.heldout_start,
+                "requested_count": args.heldout_limit,
+                "count": len(sample_ids),
                 "sample_ids": sample_ids,
                 "sample_id_sha256": _sample_id_hash(sample_ids),
             },
@@ -189,7 +219,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--training-report")
     parser.add_argument("--output", required=True)
+    parser.add_argument(
+        "--require-clean-solver",
+        action="store_true",
+        help="fail unless the source worktree is clean before the audit",
+    )
     parser.add_argument("--heldout-limit", type=int, default=16)
+    parser.add_argument("--heldout-start", type=int, default=0)
     parser.add_argument("--heldout-seed", type=int, default=1)
     parser.add_argument("--exclude-train-limit", type=int)
     parser.add_argument("--exclude-train-seed", type=int)
@@ -204,14 +240,50 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--dynamics-steps", type=int, default=0)
     parser.add_argument("--projection-steps", type=int, default=4)
     parser.add_argument("--direction-beam", type=int, default=1)
+    parser.add_argument("--component-bdp", action="store_true")
+    parser.add_argument("--component-beam", type=int, default=4)
+    parser.add_argument("--component-limit", type=int, default=24)
+    parser.add_argument("--component-uncertain-pairs", type=int, default=6)
+    parser.add_argument("--component-sweeps", type=int, default=4)
+    parser.add_argument("--component-reset-limit", type=int, default=2)
     parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
     return parser
 
 
+def _solver_provenance() -> dict[str, Any]:
+    commit = _git_bytes("rev-parse", "HEAD").decode().strip()
+    status = _git_bytes(
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    diff = _git_bytes("diff", "--binary", "HEAD", "--", ".")
+    fingerprint = hashlib.sha256(status + b"\0" + diff).hexdigest()
+    return {
+        "repository": str(ROOT),
+        "commit": commit,
+        "clean": not status,
+        "status_sha256": hashlib.sha256(status).hexdigest(),
+        "tracked_diff_sha256": hashlib.sha256(diff).hexdigest(),
+        "workspace_fingerprint": fingerprint,
+    }
+
+
+def _git_bytes(*args: str) -> bytes:
+    return subprocess.run(
+        ("git", "-C", str(ROOT), *args),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+
+
 def _validate_args(args: argparse.Namespace) -> None:
     _validate_heldout_args(args)
+    if args.heldout_start < 0:
+        raise ValueError("--heldout-start must be non-negative")
     if args.constraint_seeds <= 0:
         raise ValueError(
             "--constraint-seeds must be positive for a raw constraint audit"
@@ -227,6 +299,14 @@ def _learned_config(args: argparse.Namespace) -> LearnedConfig:
             ),
             projection_iterations=args.projection_steps,
             direction_beam=args.direction_beam,
+            component_bdp=ComponentBDPConfig(
+                enabled=args.component_bdp,
+                beam_width=args.component_beam,
+                component_limit=args.component_limit,
+                max_uncertain_pairs=args.component_uncertain_pairs,
+                outer_sweeps=args.component_sweeps,
+                reset_limit=args.component_reset_limit,
+            ),
         ),
         flow_steps=args.flow_steps,
         tail_topk=args.tail_topk,
@@ -308,6 +388,33 @@ def _audit_sample(
         records,
         metric_args,
     )
+    telemetry = analysis.analytic.telemetry
+    false_fast_gate = telemetry.projection_ok & ~telemetry.hard_feasible
+    if bool(false_fast_gate.any().item()):
+        indices = torch.nonzero(
+            false_fast_gate, as_tuple=False
+        ).reshape(-1).tolist()
+        raise RuntimeError(
+            f"sample {sample.sample_id}: projection_ok disagrees with exact "
+            f"normalized feasibility at candidates {indices}"
+        )
+    projection_fields = {
+        "initial_pair_count": telemetry.projection_initial_pairs,
+        "final_pair_count": telemetry.projection_final_pairs,
+        "component_rebuilds": telemetry.projection_component_rebuilds,
+        "new_pairs_detected": telemetry.projection_new_pairs,
+        "reset_count": telemetry.projection_resets,
+        "beam_states_evaluated": telemetry.projection_beam_states,
+        "max_component_size": telemetry.projection_max_component_size,
+    }
+    for candidate_index, row in enumerate(projected_records):
+        row["projection"] = {
+            name: int(values[candidate_index].detach().cpu().item())
+            for name, values in projection_fields.items()
+        }
+        row["projection"]["normalized_fp64_final_pairs"] = row[
+            "projection"
+        ]["final_pair_count"]
     selected_positions = select_official_from_analysis(
         source,
         case,
@@ -342,7 +449,7 @@ def _audit_sample(
                 "stage",
             )
         }
-        for row in projected_records
+        for row in (*raw_records, *projected_records)
         if row["placement_sha256"] == selected["placement_sha256"]
     ]
     return {
@@ -531,6 +638,8 @@ def _candidate_pair_records(
         projected_positions = to_official_placements(
             source, case, projected_box.detach().cpu()
         )
+        raw_denormal_overlap = len(overlap_pairs(raw_positions))
+        projected_denormal_overlap = len(overlap_pairs(projected_positions))
         raw_repair = projected_repair = None
         constraint_kind = None
         if candidate_type == "constraint":
@@ -543,34 +652,45 @@ def _candidate_pair_records(
             raw_positions = raw_repair.placements
             projected_positions = projected_repair.placements
         displacement = _projection_displacement(raw_positions, projected_positions)
-        raw_rows.append(
-            _evaluate_positions(
-                evaluator_module,
-                raw_positions,
-                candidate_index=index,
-                source_name=source_name,
-                candidate_type=candidate_type,
-                constraint_kind=constraint_kind,
-                stage="raw",
-                projection_displacement=displacement,
-                repair=raw_repair,
-                metric_args=metric_args,
-            )
+        raw_row = _evaluate_positions(
+            evaluator_module,
+            raw_positions,
+            candidate_index=index,
+            source_name=source_name,
+            candidate_type=candidate_type,
+            constraint_kind=constraint_kind,
+            stage="raw",
+            projection_displacement=displacement,
+            repair=raw_repair,
+            metric_args=metric_args,
         )
-        projected_rows.append(
-            _evaluate_positions(
-                evaluator_module,
-                projected_positions,
-                candidate_index=index,
-                source_name=source_name,
-                candidate_type=candidate_type,
-                constraint_kind=constraint_kind,
-                stage="post_bdp",
-                projection_displacement=displacement,
-                repair=projected_repair,
-                metric_args=metric_args,
-            )
+        projected_row = _evaluate_positions(
+            evaluator_module,
+            projected_positions,
+            candidate_index=index,
+            source_name=source_name,
+            candidate_type=candidate_type,
+            constraint_kind=constraint_kind,
+            stage="post_bdp",
+            projection_displacement=displacement,
+            repair=projected_repair,
+            metric_args=metric_args,
         )
+        raw_row["post_denormal_exact_pairs"] = raw_denormal_overlap
+        raw_row["post_repair_exact_pairs"] = len(overlap_pairs(raw_positions))
+        projected_row[
+            "post_denormal_exact_pairs"
+        ] = projected_denormal_overlap
+        projected_row["post_repair_exact_pairs"] = len(
+            overlap_pairs(projected_positions)
+        )
+        for row in (raw_row, projected_row):
+            if row["overlap_violations"] != row["post_repair_exact_pairs"]:
+                raise RuntimeError(
+                    "internal exact overlap count disagrees with official evaluator"
+                )
+        raw_rows.append(raw_row)
+        projected_rows.append(projected_row)
     return raw_rows, projected_rows
 
 
@@ -747,6 +867,19 @@ def _summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
         },
         "selected_vs_analytic": _selected_vs_analytic(cases),
         "projection_displacement": _displacement_summary(cases),
+        "runtime": _runtime_summary(cases),
+    }
+
+
+def _runtime_summary(cases: list[dict[str, Any]]) -> dict[str, float | int | None]:
+    values = sorted(float(case["runtime_seconds"]) for case in cases)
+    return {
+        "case_count": len(values),
+        "total": sum(values),
+        "mean": _mean(values),
+        "p50": percentile(values, 0.50),
+        "p95": percentile(values, 0.95),
+        "maximum": values[-1] if values else None,
     }
 
 
@@ -863,16 +996,45 @@ def _selected_vs_analytic(cases: list[dict[str, Any]]) -> dict[str, Any]:
 def _displacement_summary(cases: list[dict[str, Any]]) -> dict[str, Any]:
     summaries = {}
     for candidate_type in ("topology", "constraint"):
-        values = [
-            (int(case["block_count"]), float(row["projection_displacement"]))
+        paired = [
+            (int(case["block_count"]), raw, projected)
             for case in cases
-            for row in case["raw"]["candidates"]
-            if row["candidate_type"] == candidate_type
+            for raw, projected in zip(
+                case["raw"]["candidates"],
+                case["post_bdp"]["candidates"],
+                strict=True,
+            )
+            if raw["candidate_type"] == candidate_type
+        ]
+        values = [
+            (blocks, float(projected["projection_displacement"]))
+            for blocks, _raw, projected in paired
+        ]
+        feasible = [
+            (blocks, float(projected["projection_displacement"]))
+            for blocks, _raw, projected in paired
+            if bool(projected["hard_feasible"])
         ]
         summaries[candidate_type] = {
             "candidate_count": len(values),
             "mean": _mean([value for _blocks, value in values]),
             "weighted_mean": _weighted_mean(values),
+            "post_bdp_hard_feasible_count": len(feasible),
+            "post_bdp_hard_feasible_mean": _mean(
+                [value for _blocks, value in feasible]
+            ),
+            "post_bdp_hard_feasible_weighted_mean": _weighted_mean(feasible),
+            "newly_hard_feasible_count": sum(
+                not bool(raw["hard_feasible"])
+                and bool(projected["hard_feasible"])
+                for _blocks, raw, projected in paired
+            ),
+            "hard_feasible_regression_count": sum(
+                bool(raw["hard_feasible"])
+                and not bool(projected["hard_feasible"])
+                for _blocks, raw, projected in paired
+            ),
+            "no_commit_count": sum(value == 0.0 for _blocks, value in values),
         }
     topology = summaries["topology"]
     constraint = summaries["constraint"]

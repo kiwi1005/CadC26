@@ -29,6 +29,8 @@ from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
 from hcfp.geometry import xywh_from_state
 from hcfp.model import soft_sequence_pair_relation_logits
+from hcfp.projection import ComponentBDPConfig
+from hcfp.projection_guidance import build_population_guidance
 from hcfp.topology import (
     adapt_preplaced_topology,
     anchor_safe_order_variants,
@@ -141,15 +143,46 @@ def analyze_case_with_checkpoint(
             ),
             provenance=topology_provenance,
         )
-        analytic_analysis = solve_case_with_telemetry(case, cfg)
+        topology_count = int(
+            topology_provenance.get("topology_seed_count", 0)
+        )
+        constraint_count = int(
+            topology_provenance.get("constraint_seed_count", 0)
+        )
+        residual_count = (
+            int(learned_population.shape[0]) - topology_count - constraint_count
+        )
+        projection_guidance = (
+            build_population_guidance(
+                case,
+                topology_provenance,
+                residual_count=residual_count,
+                constraint_count=constraint_count,
+                topology_count=topology_count,
+            )
+            if cfg.component_bdp.enabled and topology_count
+            else None
+        )
+        # Keep the established analytic comparator on v0. Q4 applies only to
+        # provenance-bearing learned structure and remains Pareto-guarded.
+        analytic_analysis = solve_case_with_telemetry(
+            case,
+            replace(cfg, component_bdp=ComponentBDPConfig()),
+        )
         learned_tail_cfg = replace(
             cfg,
             dynamics=replace(cfg.dynamics, population=int(learned_population.shape[0])),
+            component_bdp=(
+                cfg.component_bdp
+                if projection_guidance is not None
+                else ComponentBDPConfig()
+            ),
         )
         learned_analysis = solve_case_from_population_with_telemetry(
             case,
             learned_population,
             learned_tail_cfg,
+            projection_guidance=projection_guidance,
         )
         analysis = _merge_tail_analyses(
             case,
@@ -351,6 +384,9 @@ def _merge_tail_analyses(
     projected = merge_tensor(
         analytic.projected_candidates, learned.projected_candidates
     )
+    raw_candidates = merge_tensor(
+        analytic.raw_candidates, learned.raw_candidates
+    )
     telemetry_values = {}
     for field in fields(CandidateTelemetry):
         first = getattr(analytic.telemetry, field.name)
@@ -457,23 +493,35 @@ def _merge_tail_analyses(
             )
             if len(constraint_records) != constraint_count:
                 constraint_records = tuple({} for _ in range(constraint_count))
-            constraint_candidates = tuple(
-                {
-                    **dict(constraint_records[index]),
-                    "source": f"candidate_{start + residual_count + index}",
-                    "candidate_type": "constraint",
-                    "stage": stage,
-                }
-                for stage, start in (
-                    ("initial", initial_start),
-                    ("post_relax", final_start),
-                )
-                for index in range(constraint_count)
-            )
+            constraint_candidates = []
+            stale_sources = []
+            for stage, start in (
+                ("initial", initial_start),
+                ("post_relax", final_start),
+            ):
+                for index in range(constraint_count):
+                    candidate_index = start + residual_count + index
+                    record = dict(constraint_records[index])
+                    source = f"candidate_{candidate_index}"
+                    if record.get("candidate_sha256") != _tensor_sha256(
+                        raw_candidates[candidate_index]
+                    ):
+                        stale_sources.append(source)
+                        continue
+                    constraint_candidates.append(
+                        {
+                            **record,
+                            "source": source,
+                            "candidate_type": "constraint",
+                            "stage": stage,
+                        }
+                    )
+            constraint_candidates = tuple(constraint_candidates)
             snapshot["constraint_seed_sources"] = tuple(
                 str(candidate["source"]) for candidate in constraint_candidates
             )
             snapshot["constraint_seed_provenance"] = constraint_candidates
+            snapshot["constraint_seed_stale_sources"] = tuple(stale_sources)
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -483,7 +531,7 @@ def _merge_tail_analyses(
             if exact_index == 0
             else projected[exact_index].detach().to(device="cpu", dtype=torch.float32)
         ),
-        raw_candidates=merge_tensor(analytic.raw_candidates, learned.raw_candidates),
+        raw_candidates=raw_candidates,
         projected_candidates=projected,
         telemetry=telemetry,
         energy_history=torch.cat(
@@ -575,26 +623,39 @@ def _raw_constraint_pareto_guard(
         current_metrics = _raw_quality(source, case, current)
     except (TypeError, ValueError):
         return current
-    projected = analysis.analytic.projected_candidates
     admitted = []
+    projected_candidates = analysis.analytic.projected_candidates
+    raw_candidates = getattr(
+        analysis.analytic,
+        "raw_candidates",
+        projected_candidates,
+    )
     for candidate_source, record in records.items():
         index = _candidate_index(candidate_source)
-        if index is None or not 0 <= index < projected.shape[0]:
+        if index is None:
             continue
-        placement = to_official_placements(
-            source,
-            case,
-            projected[index].detach().to(device="cpu", dtype=torch.float32),
-        )
-        placement = list(repair_raw_constraints(source, placement, record).placements)
-        if not verify_feasible(source, placement):
-            continue
-        try:
-            metrics = _raw_quality(source, case, placement)
-        except (TypeError, ValueError):
-            continue
-        if _dominates(metrics, current_metrics):
-            admitted.append((metrics, index, placement))
+        for stage, candidates in (
+            ("raw", raw_candidates),
+            ("projected", projected_candidates),
+        ):
+            if not 0 <= index < candidates.shape[0]:
+                continue
+            placement = to_official_placements(
+                source,
+                case,
+                candidates[index].detach().to(device="cpu", dtype=torch.float32),
+            )
+            placement = list(
+                repair_raw_constraints(source, placement, record).placements
+            )
+            if not verify_feasible(source, placement):
+                continue
+            try:
+                metrics = _raw_quality(source, case, placement)
+            except (TypeError, ValueError):
+                continue
+            if _dominates(metrics, current_metrics):
+                admitted.append((metrics, index, stage, placement))
     return (
         min(
             admitted,
@@ -602,8 +663,9 @@ def _raw_constraint_pareto_guard(
                 item[0][0],
                 item[0][1] + 0.05 * item[0][2],
                 item[1],
+                item[2],
             ),
-        )[2]
+        )[3]
         if admitted
         else current
     )
