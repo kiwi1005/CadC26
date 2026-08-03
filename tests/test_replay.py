@@ -22,8 +22,10 @@ from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
 from hcfp.replay import (
     OFFICIAL_TARGET_KIND,
+    ReplayRecord,
     iter_replay,
     official_replay_scores,
+    ranker_loss_report,
     record_from_analysis,
     records_from_learned_analysis,
     train_ranker_steps,
@@ -82,6 +84,63 @@ def test_replay_roundtrip_and_ranker_update(tmp_path: Path) -> None:
     assert len(history) == 2
     assert all(torch.isfinite(torch.tensor(value)) for value in history)
     assert any(not torch.equal(before[name], value.detach()) for name, value in model.ranker.named_parameters())
+
+
+def test_v3_ranker_loss_prefers_correct_low_cost_ordering() -> None:
+    record = _feature_prediction_record(
+        torch.tensor([0.0, 1.0, 2.0]),
+        torch.tensor([0, 1, 2], dtype=torch.long),
+    )
+    reversed_record = _feature_prediction_record(
+        torch.tensor([2.0, 1.0, 0.0]),
+        torch.tensor([0, 1, 2], dtype=torch.long),
+    )
+    model = _feature_ranker_model()
+
+    correct = ranker_loss_report(model, record)
+    reversed_report = ranker_loss_report(model, reversed_record)
+
+    assert correct.combined < reversed_report.combined
+    assert correct.listwise < reversed_report.listwise
+
+
+def test_v3_ranker_loss_is_row_permutation_invariant() -> None:
+    prediction = torch.tensor([0.25, 1.0, -0.5, 2.0])
+    rank = torch.tensor([1, 2, 0, 3], dtype=torch.long)
+    cap_margin = torch.tensor([0.5, -0.2, 0.1, -0.4])
+    record = _feature_prediction_record(prediction, rank, cap_margin=cap_margin)
+    permutation = torch.tensor([2, 0, 3, 1], dtype=torch.long)
+    permuted = replace(
+        record,
+        candidate_features=record.candidate_features[permutation],
+        target_score=record.target_score[permutation],
+        target_rank=record.target_rank[permutation],
+        post_repair_cap_margin=record.post_repair_cap_margin[permutation],
+    )
+    model = _feature_ranker_model()
+
+    original = ranker_loss_report(model, record)
+    changed = ranker_loss_report(model, permuted)
+
+    assert original.combined == pytest.approx(float(changed.combined))
+    assert original.listwise == pytest.approx(float(changed.listwise))
+    assert original.listwise_weight_max == pytest.approx(1.25)
+
+
+def test_v2_ranker_loss_keeps_pointwise_fallback() -> None:
+    record = replace(
+        _feature_prediction_record(
+            torch.tensor([0.0, 1.0]),
+            torch.tensor([0, 1], dtype=torch.long),
+        ),
+        target_rank=None,
+        post_repair_cap_margin=None,
+    )
+
+    report = ranker_loss_report(_feature_ranker_model(), record)
+
+    assert report.listwise == pytest.approx(0.0)
+    assert report.combined == pytest.approx(float(report.pointwise))
 
 
 def test_v3_replay_roundtrip_adds_stable_candidate_provenance(tmp_path: Path) -> None:
@@ -653,6 +712,45 @@ def _lineage_sha256(tensor: torch.Tensor) -> str:
     return hashlib.sha256(raw.numpy().tobytes()).hexdigest()
 
 
+def _feature_prediction_record(
+    prediction: torch.Tensor,
+    target_rank: torch.Tensor,
+    *,
+    cap_margin: torch.Tensor | None = None,
+) -> ReplayRecord:
+    sample, _source, _analysis = _merged_replay_fixture()
+    count = int(prediction.numel())
+    features = torch.zeros((count, 8), dtype=torch.float32)
+    features[:, 0] = prediction
+    return ReplayRecord(
+        sample,
+        "a" * 64,
+        features,
+        target_rank.to(dtype=torch.float32),
+        candidate_row_ids=tuple(f"row-{index}" for index in range(count)),
+        candidate_source_indices=torch.arange(count, dtype=torch.long),
+        candidate_kinds=tuple("learned" for _ in range(count)),
+        candidate_source_types=tuple("learned" for _ in range(count)),
+        candidate_geometry_sha256=tuple("b" * 64 for _ in range(count)),
+        feasibility_tier=torch.zeros(count, dtype=torch.long),
+        target_rank=target_rank,
+        candidate_stage="test",
+        candidate_population=count,
+        population_seed=0,
+        post_repair_cap_margin=cap_margin,
+    )
+
+
+def _feature_ranker_model() -> HCFPModel:
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
+
+    def feature_ranker(_embedding, _population, features):
+        return features[:, 0]
+
+    model.ranker.forward = feature_ranker  # type: ignore[method-assign]
+    return model
+
+
 def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> None:
     telemetry = SimpleNamespace(
         hpwl=torch.tensor([5.0, 10.0, 5.0]),
@@ -674,8 +772,6 @@ def test_official_replay_scores_are_lexicographic_without_cost_cap_ties() -> Non
 
 
 def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Path) -> None:
-    case = synthetic_case(32, device="cpu")
-    sample = DataSample("ranker-0", case, extract_labels(case, safe_shelf(case), normalized=True))
     checkpoint = tmp_path / "source.pt"
     source_hash = save_checkpoint(
         HCFPModel(ModelConfig(hidden_dim=16)),
@@ -688,20 +784,16 @@ def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Pa
         },
     )
     replay = tmp_path / "ranker.jsonl"
-    replay.write_text(
-        json.dumps(
-            {
-                "schema_version": 2,
-                "checkpoint_hash": source_hash,
-                "target_kind": OFFICIAL_TARGET_KIND,
-                "sample": sample_to_payload(sample),
-                "candidate_features": [[0.0] * 8, [1.0] * 8],
-                "target_score": [0.0, 1.0],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+    source_record = _v3_record()
+    scores = source_record.target_rank.to(dtype=torch.float32)
+    training_record = replace(
+        source_record,
+        checkpoint_hash=source_hash,
+        target_score=scores,
+        post_repair_log_uncapped_cost=scores,
+        post_repair_cap_margin=math.log(10.0) - scores,
     )
+    write_replay_v3([training_record], replay)
     ranked = tmp_path / "ranked.pt"
 
     subprocess.run(
@@ -725,10 +817,19 @@ def test_ranker_training_preserves_capabilities_and_declares_ranker(tmp_path: Pa
     )
 
     _, metadata = load_checkpoint(ranked, expected_normalization=RUNTIME_NORMALIZATION)
-    assert metadata["capabilities"] == {"flow": True}
+    report = json.loads(Path(f"{ranked}.training.json").read_text(encoding="utf-8"))
+    assert metadata["capabilities"] == {"flow": True, "ranker": True}
     assert metadata["trained_heads"] == ["encoder", "flow", "ranker"]
-    assert metadata["training_objective_version"] == "ranker_official_v10_v1"
+    assert metadata["training_objective_version"] == "ranker_post_repair_listwise_v1"
     assert metadata["parent_state_hash"] == source_hash
+    assert report["listwise_records"] == 1
+    assert set(report["last_loss_components"]) == {
+        "combined",
+        "listwise",
+        "listwise_weight_max",
+        "listwise_weight_mean",
+        "pointwise",
+    }
 
 
 def test_ranker_clis_reject_checkpoint_mismatch_and_split_leakage(tmp_path: Path) -> None:

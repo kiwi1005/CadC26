@@ -16,6 +16,7 @@ from hcfp.candidates import candidate_features
 from hcfp.data import DataSample, sample_from_payload, sample_to_payload
 from hcfp.fallback import safe_shelf
 from hcfp.geometry import centers_from_xywh, normalize_xywh
+from hcfp.listwise import listmle_loss
 from hcfp.model import HCFPModel
 from hcfp.score_attribution import CAP_LOG, attribute_score
 from hcfp.constraints.raw_repair import repair_raw_constraints
@@ -83,6 +84,24 @@ class ReplayRecord:
     boundary_violations: Tensor | None = None
     grouping_violations: Tensor | None = None
     mib_violations: Tensor | None = None
+
+
+@dataclass(frozen=True)
+class RankerLossReport:
+    combined: Tensor
+    listwise: Tensor
+    pointwise: Tensor
+    listwise_weight_mean: Tensor
+    listwise_weight_max: Tensor
+
+    def scalars(self) -> dict[str, float]:
+        return {
+            "combined": float(self.combined.detach()),
+            "listwise": float(self.listwise.detach()),
+            "pointwise": float(self.pointwise.detach()),
+            "listwise_weight_mean": float(self.listwise_weight_mean.detach()),
+            "listwise_weight_max": float(self.listwise_weight_max.detach()),
+        }
 
 
 def official_replay_scores(
@@ -292,15 +311,56 @@ def iter_replay(path: str | Path) -> Iterator[ReplayRecord]:
 
 
 def ranker_loss(model: HCFPModel, record: ReplayRecord) -> Tensor:
+    return ranker_loss_report(model, record).combined
+
+
+def ranker_loss_report(model: HCFPModel, record: ReplayRecord) -> RankerLossReport:
     device = next(model.parameters()).device
     case = record.sample.case.to(device=device, dtype=torch.float32)
     features = record.candidate_features.to(device=device)
-    target = record.target_score.to(device=device)
-    target = (target - target.mean()) / target.std(unbiased=False).clamp_min(1.0e-6)
     with torch.no_grad():
         embedding = model.encoder(case)
     prediction = model.ranker(embedding, len(features), features)
-    return F.smooth_l1_loss(prediction, target)
+    return _ranker_loss_from_prediction(prediction, record)
+
+
+def _ranker_loss_from_prediction(prediction: Tensor, record: ReplayRecord) -> RankerLossReport:
+    device = prediction.device
+    target = record.target_score.to(device=device)
+    target = (target - target.mean()) / target.std(unbiased=False).clamp_min(1.0e-6)
+    pointwise = F.smooth_l1_loss(prediction, target)
+    if record.target_rank is None:
+        zero = pointwise * 0.0
+        one = pointwise.detach().new_tensor(1.0)
+        return RankerLossReport(pointwise, zero, pointwise, one, one)
+
+    weight = _listwise_weight(record, device=device)
+    listwise = listmle_loss(
+        prediction,
+        record.target_rank.to(device=device),
+        weight=weight,
+    )
+    combined = listwise + 0.05 * pointwise
+    return RankerLossReport(
+        combined,
+        listwise,
+        pointwise,
+        weight.mean(),
+        weight.max(),
+    )
+
+
+def _listwise_weight(record: ReplayRecord, *, device: torch.device) -> Tensor:
+    weight = torch.ones_like(record.target_score, dtype=torch.float32, device=device)
+    if record.post_repair_cap_margin is None:
+        return weight
+    cap_margin = record.post_repair_cap_margin.to(device=device, dtype=torch.float32)
+    uncapped = cap_margin > 0.0
+    if record.post_repair_hard_feasible is not None:
+        uncapped &= record.post_repair_hard_feasible.to(device=device, dtype=torch.bool)
+    if bool(uncapped.any()) and bool((~uncapped).any()):
+        weight = weight + 0.25 * uncapped.to(dtype=torch.float32)
+    return weight
 
 
 def train_ranker_steps(
@@ -309,7 +369,8 @@ def train_ranker_steps(
     optimizer: torch.optim.Optimizer,
     *,
     steps: int,
-) -> list[float]:
+    report_components: bool = False,
+) -> list[float] | list[dict[str, float]]:
     materialized = list(records)
     if not materialized or steps <= 0:
         raise ValueError("ranker training requires records and positive steps")
@@ -319,11 +380,11 @@ def train_ranker_steps(
     model.train()
     for index in range(steps):
         optimizer.zero_grad(set_to_none=True)
-        loss = ranker_loss(model, materialized[index % len(materialized)])
-        loss.backward()
+        report = ranker_loss_report(model, materialized[index % len(materialized)])
+        report.combined.backward()
         torch.nn.utils.clip_grad_norm_(model.ranker.parameters(), max_norm=5.0)
         optimizer.step()
-        history.append(float(loss.detach()))
+        history.append(report.scalars() if report_components else float(report.combined.detach()))
     return history
 
 

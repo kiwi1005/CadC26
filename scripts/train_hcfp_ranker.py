@@ -52,12 +52,32 @@ def main(argv: list[str] | None = None) -> int:
     targets = torch.cat([record.target_score.reshape(-1) for record in records])
     if not bool(torch.isfinite(targets).all()):
         raise ValueError("replay targets must be finite")
-    records_with_signal = sum(
+    score_records_with_signal = sum(
         float(record.target_score.max() - record.target_score.min()) > 1.0e-8
         for record in records
     )
+    listwise_records = sum(record.target_rank is not None for record in records)
+    if listwise_records not in {0, len(records)}:
+        raise ValueError("ranker training cannot mix listwise and legacy replay records")
+    records_with_signal = (
+        sum(
+            float(record.target_score.max() - record.target_score.min()) > 1.0e-8
+            or (
+                record.feasibility_tier is not None
+                and int(torch.unique(record.feasibility_tier).numel()) > 1
+            )
+            for record in records
+        )
+        if listwise_records
+        else score_records_with_signal
+    )
     if not records_with_signal:
         raise ValueError("replay targets contain no ranking signal")
+    objective = (
+        "ranker_post_repair_listwise_v1"
+        if listwise_records
+        else "ranker_official_v10_pointwise_v1"
+    )
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.ranker.parameters(), lr=args.learning_rate)
     history = train_ranker_steps(
@@ -65,11 +85,14 @@ def main(argv: list[str] | None = None) -> int:
         records,
         optimizer,
         steps=args.steps,
+        report_components=True,
     )
+    capabilities = dict(source["capabilities"])
+    capabilities["ranker"] = True
     checkpoint_metadata = {
-        "capabilities": dict(source["capabilities"]),
+        "capabilities": capabilities,
         "trained_heads": sorted({*source["trained_heads"], "ranker"}),
-        "training_objective_version": "ranker_official_v10_v1",
+        "training_objective_version": objective,
         "parent_state_hash": source["state_hash"],
     }
     checkpoint_hash = save_checkpoint(
@@ -88,13 +111,16 @@ def main(argv: list[str] | None = None) -> int:
         "source_checkpoint_sha256": file_sha256(args.checkpoint),
         "seed": args.seed,
         "steps": args.steps,
-        "first_loss": history[0],
-        "last_loss": history[-1],
+        "first_loss": history[0]["combined"],
+        "last_loss": history[-1]["combined"],
+        "first_loss_components": history[0],
+        "last_loss_components": history[-1],
         "target_kind": OFFICIAL_TARGET_KIND,
         "device": str(device),
         "replay": args.replay,
         "replay_sha256": file_sha256(args.replay),
         "records": len(records),
+        "listwise_records": listwise_records,
         "target_distribution": {
             "count": int(targets.numel()),
             "minimum": float(targets.min()),
@@ -102,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             "mean": float(targets.mean()),
             "standard_deviation": float(targets.std(unbiased=False)),
             "records_with_signal": records_with_signal,
+            "score_records_with_signal": score_records_with_signal,
         },
     }
     Path(f"{args.output}.training.json").write_text(
