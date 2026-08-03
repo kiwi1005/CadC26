@@ -3,7 +3,7 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: Q0--Q2 verified; Q4 passes dirty QoR diagnostics but fails runtime promotion
+Status: Q0--Q2 verified; Q4 passes clean exact-safe QoR but fails runtime promotion
 
 ## Execution checkpoint
 
@@ -22,17 +22,17 @@ Status: Q0--Q2 verified; Q4 passes dirty QoR diagnostics but fails runtime promo
 - Q2 is not default-promoted: group connectivity is 77.3% rather than 95% and
   the one area-compatible MIB candidate is legalizable but not oracle quality.
 - Q4 now retains uncommitted component geometry as a separate exact-guarded
-  alternative. A dirty large16 diagnostic raises exact constraint coverage to
+  alternative. A clean large16 benchmark raises exact constraint coverage to
   364/512 versus the legacy control's 338/512 and improves weighted oracle `J`
   to `2.276194`.
 - The proposal materially improves held-out case 14 from `J=3.052426` and 45
   soft violations to `J=2.415978` and 27 soft violations without weakening the
   exact verifier or Pareto guard.
-- Schema-v7 timing separates solver work from offline evaluator work. A paired
-  one-case smoke measures learned runtime at 22.765 seconds versus 0.243 seconds
-  for pure analytic, so Q4 still fails runtime promotion by a wide margin. Q3
-  remains deferred while guided/component runtime is optimized and then rerun
-  from a clean commit.
+- Schema-v7 timing separates solver work from offline evaluator work. The clean
+  `846147d` benchmark preserves every placement hash while vectorized group
+  collision checks reduce solver p50/p95 from 22.913/27.623 seconds to
+  10.070/14.387 seconds. Analytic p95 is still only 0.0441 seconds, so Q4 fails
+  runtime promotion by a wide margin. Q3 may proceed only as a default-off lane.
 
 ## Decision
 
@@ -296,18 +296,19 @@ projector is retained until the objective-aware beam proves a QoR gain.
 - HPWL and bbox show no systematic regression.
 - Learned p95 is at most 1.20 times analytic p95.
 
-Q4 currently passes exact safety and the dirty feasibility/QoR diagnostic, but
+Q4 currently passes exact safety and the clean feasibility/QoR benchmark, but
 not runtime promotion. Retaining the changed, uncommitted component proposal
 behind raw constraint replay, exact verification, and Pareto dominance raises
 constraint coverage from the component primary's 322/512 and legacy control's
 338/512 to 364/512. Weighted constraint-oracle `J` improves to `2.276194`.
 
-The component lane therefore remains opt-in. Schema-v7 paired timing shows the
-next blocker directly: a one-case learned/analytic ratio of 93.6x, dominated by
-the learned solver core rather than exact selection or offline audit. The next
-implementation must skip already-feasible guided rows, profile the remaining
-conflict-component path, and rerun the same large16 list from a clean commit.
-Explicit pre-projection HPWL perturbation remains deferred.
+The component lane therefore remains opt-in. Schema-v7 clean paired timing
+shows the next blocker directly: learned p95 is 14.387 seconds versus analytic
+p95 0.0441 seconds, a 326.1x ratio. Already-feasible component rows are skipped,
+and the former 3.48-million scalar rectangle checks are vectorized. The next
+implementation must keep Q3 default-off, preserve exact hashes, and use Q5
+ranking to reduce expensive tail work before promotion. Explicit
+pre-projection HPWL perturbation remains deferred.
 
 ## Q5: post-repair DAgger and listwise ranker
 

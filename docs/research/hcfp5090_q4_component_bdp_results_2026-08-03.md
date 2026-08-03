@@ -26,20 +26,26 @@ violations to `J=2.415978` with 27 soft violations. The original candidate
 remains recoverable and no proposal can bypass exact verification or Pareto
 dominance.
 
-This is not default-promotion proof. The large16 result was generated from a
-dirty worktree, and a schema-v7 one-case comparator measures 22.765 seconds for
-the learned solver versus 0.243 seconds for the exact-safe analytic comparator.
-That 93.6x ratio is a smoke measurement, not a stable large16 p95, but it is
-already a decisive runtime blocker. Schema v7 now separates solver runtime,
-runtime-final selection, offline candidate audit, and full audit wall time so
-the next clean rerun cannot mistake evaluator overhead for solver time.
+Clean-commit large16 evidence now confirms the QoR result and exact output
+stability. Commit `846147d` produces the same sample list and zero placement
+hash differences across all 1,552 raw, post-BDP, and exact-portfolio records
+relative to `e57058d`. Constraint coverage remains 364/512 and weighted
+constraint-oracle `J` remains `2.276194`. Vectorizing the rigid-component
+collision predicate lowers solver p50 from 22.913 to 10.070 seconds and p95
+from 27.623 to 14.387 seconds without changing a selected placement.
+
+This is still not default-promotion proof. The paired analytic p95 is 0.0441
+seconds, leaving a 326.1x learned/analytic p95 ratio. Schema v7 separates solver
+runtime, runtime-final selection, offline candidate audit, and full audit wall
+time; the runtime failure is in the learned solver rather than evaluator
+overhead.
 
 The implementation therefore remains opt-in. Q2 still has a 77.3% group
-connectivity result rather than the 95% target, and Q3 remains deferred until a
-clean-commit component/pure-analytic rerun and runtime reduction resolve the Q4
-gate. The
-analytic incumbent, exact verifier, fallback, and dominance safety invariant
-remain mandatory.
+connectivity result rather than the 95% target. Q3 may now be implemented as a
+default-off lane because the clean benchmark preserves the Q2/Q4 oracle gain,
+but it cannot be promoted until runtime is reduced further. The analytic
+incumbent, exact verifier, fallback, and dominance safety invariant remain
+mandatory.
 
 ## Implemented causal path
 
@@ -116,6 +122,47 @@ another motion source before exact Q4 evidence exists is not justified.
    case. Schema v7 records solver core, runtime-final selection, offline
    candidate audit, and full audit wall time separately. The compatibility
    `runtime_seconds` field is the solver total, not the audit wall clock.
+10. Group construction performed 3.48 million Python scalar rectangle checks on
+    one 119-block case. The collision predicate now translates only the rigid
+    component and evaluates every component/outside rectangle pair in FP64.
+    Strict edge-touch semantics, move ordering, provenance, and final geometry
+    remain unchanged.
+
+## Clean exact-safe large16 benchmark
+
+Authoritative clean artifact:
+
+```text
+artifacts/benchmarks/hcfp5090-q4-clean-846147d-vector-overlap-large16.json
+SHA-256: 846d6834a5cd395bb8ef591d7f198dcfaccea9a2843933e77acd1815c0a3fd8d
+solver commit: 846147d70a23511364d395dce2dc1430376a5d1d
+sample-list SHA-256:
+e79491726efed65ebb6c55f7e63564e4896cc7d345bca18da725660de7d8fab9
+```
+
+The comparator alternates execution order: eight cases run learned first and
+eight run analytic first. Analytic raw replay is hard feasible in 15/16 cases;
+the existing safe fallback makes the final analytic comparator hard feasible
+in 16/16.
+
+| Metric | `e57058d` clean baseline | `846147d` vectorized | Change |
+|---|---:|---:|---:|
+| solver p50 | 22.9128 s | 10.0702 s | -56.05% |
+| solver p95 | 27.6234 s | 14.3866 s | -47.92% |
+| solver mean | 21.6225 s | 10.3203 s | -52.27% |
+| solver total | 345.9601 s | 165.1246 s | -52.27% |
+| constraint exact coverage | 364/512 | 364/512 | identical |
+| constraint weighted oracle `J` | 2.276194 | 2.276194 | identical |
+| selected placement hashes | 16 | 16 | 0 mismatches |
+
+All 1,552 raw hashes, 1,552 post-BDP hashes, 424 retained-proposal hashes, and
+1,552 exact-portfolio hashes match the clean baseline. After excluding timing
+and solver-provenance fields, the two schema-v7 reports have zero semantic
+differences.
+
+The remaining runtime gap is explicit: analytic p50/p95 are 0.0240/0.0441
+seconds and learned/analytic p50/p95 ratios are 419.9x/326.1x. Q4 therefore
+passes the exact-safe QoR checkpoint but fails the 1.20x runtime promotion gate.
 
 ## Retained-proposal diagnostic
 
@@ -252,19 +299,20 @@ stays off by default.
 
 Q4 is an exact-safe QoR checkpoint, not a promoted stage. Default learned
 activation remains shadow-only. The feasibility/QoR portfolio target is met in
-the dirty large16 diagnostic, but the learned-versus-analytic runtime target is
+the clean large16 benchmark, but the learned-versus-analytic runtime target is
 not close. The immediate sequence is:
 
-1. commit the retained-proposal and schema-v7 timing boundary;
-2. skip component work for rows already exact feasible and profile remaining
-   infeasible conflict components;
-3. rerun component and pure-analytic lanes from the same clean commit with the
-   identical sample list, checkpoint, seed, and alternating execution order;
+1. keep the clean `846147d` artifact as the Q4 semantic/runtime baseline;
+2. preserve the now-vectorized construction path and profile the remaining
+   topology construction, exact-tail, and final-selection costs separately;
+3. implement geometry-aware dynamics only as an opt-in candidate source, with
+   live force gates and exact hash/provenance boundaries;
 4. require exact portfolio coverage of at least 338/512, zero selected hard
    regressions, no weighted-`J` regression, and learned p95 at most 1.20 times
    analytic p95;
 5. use `scripts/benchmark_hcfp.py` for final official-wrapper wall-time proof.
 
-Q3 collective dynamics remains deferred while the current solver core is one
-to two orders of magnitude slower than the analytic comparator. Exact
-verification and Pareto-safe fallback remain non-negotiable.
+Q3 collective dynamics may now proceed as a default-off training/runtime lane
+because the structure/constraint path has positive exact-safe oracle density.
+It cannot be promoted while the runtime gate fails. Exact verification and
+Pareto-safe fallback remain non-negotiable.
