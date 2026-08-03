@@ -418,9 +418,7 @@ def _best_component_move(
                     boxes[anchor], boxes[child]
                 ):
                     delta = target - boxes[child, :2]
-                    candidate = boxes.clone()
-                    candidate[list(moving), :2] += delta
-                    if _component_overlaps_outside(candidate, moving):
+                    if _component_overlaps_outside(boxes, moving, delta):
                         continue
                     relation = float(scores[anchor, child, relation_index])
                     net = math.log1p(float(weights[anchor, child]))
@@ -502,15 +500,30 @@ def _edge_connected(first: Tensor, second: Tensor) -> bool:
     )
 
 
-def _component_overlaps_outside(boxes: Tensor, component: tuple[int, ...]) -> bool:
-    inside = set(component)
-    for first in component:
-        for second in range(int(boxes.shape[0])):
-            if second in inside:
-                continue
-            if _positive_overlap(boxes[first], boxes[second]):
-                return True
-    return False
+def _component_overlaps_outside(
+    boxes: Tensor,
+    component: tuple[int, ...],
+    delta: Tensor,
+) -> bool:
+    component_index = torch.tensor(component, dtype=torch.long, device=boxes.device)
+    inside = torch.zeros(int(boxes.shape[0]), dtype=torch.bool, device=boxes.device)
+    inside[component_index] = True
+    outside = boxes[~inside]
+    if outside.numel() == 0:
+        return False
+
+    moved = boxes.index_select(0, component_index).clone()
+    moved[:, :2] += delta.to(device=boxes.device, dtype=boxes.dtype)
+    moved_high = moved[:, :2] + moved[:, 2:4]
+    outside_high = outside[:, :2] + outside[:, 2:4]
+    overlap = torch.minimum(
+        moved_high[:, None],
+        outside_high[None],
+    ) - torch.maximum(
+        moved[:, None, :2],
+        outside[None, :, :2],
+    )
+    return bool(((overlap[..., 0] > 0.0) & (overlap[..., 1] > 0.0)).any())
 
 
 def _has_overlap(boxes: Tensor) -> bool:

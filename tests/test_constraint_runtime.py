@@ -7,6 +7,7 @@ import torch
 
 from hcfp.case import from_official
 from hcfp.constraints.construction import (
+    _component_overlaps_outside,
     connect_groups,
     construct_boundary_frame,
     construct_constraint_variants,
@@ -198,3 +199,86 @@ def test_variant_builder_retains_independent_constraint_sources() -> None:
 
     assert {variant.kind for variant in variants} >= {"group_contacts", "boundary_frame"}
     assert all(variant.xywh.shape == boxes.shape for variant in variants)
+
+
+@pytest.mark.parametrize(
+    ("boxes", "component", "delta"),
+    [
+        pytest.param(
+            torch.tensor([[0.0, 0.0, 1.0, 1.0], [2.0, 0.0, 1.0, 1.0]]),
+            (0,),
+            torch.tensor([1.0, 0.0]),
+            id="edge-touch",
+        ),
+        pytest.param(
+            torch.tensor(
+                [[0.0, 0.0, 1.0, 1.0], [2.0, 0.0, 1.0, 1.0]],
+                dtype=torch.float64,
+            ),
+            (0,),
+            torch.tensor(
+                [
+                    torch.nextafter(
+                        torch.tensor(1.0, dtype=torch.float64),
+                        torch.tensor(2.0, dtype=torch.float64),
+                    ),
+                    0.0,
+                ]
+            ),
+            id="ulp-positive-overlap",
+        ),
+        pytest.param(
+            torch.tensor(
+                [
+                    [0.0, 0.0, 1.0, 1.0],
+                    [1.0, 0.0, 1.0, 1.0],
+                    [2.5, 0.0, 1.0, 1.0],
+                ]
+            ),
+            (0, 1),
+            torch.tensor([1.0, 0.0]),
+            id="nonchild-member-collision",
+        ),
+        pytest.param(
+            torch.tensor([[0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 1.0, 1.0]]),
+            (0, 1),
+            torch.tensor([7.0, -3.0]),
+            id="outside-empty",
+        ),
+    ],
+)
+def test_vectorized_component_overlap_matches_scalar_reference(
+    boxes: torch.Tensor,
+    component: tuple[int, ...],
+    delta: torch.Tensor,
+) -> None:
+    expected = _scalar_component_overlaps_after_translation(boxes, component, delta)
+
+    actual = _component_overlaps_outside(
+        torch.as_tensor(boxes, dtype=torch.float64),
+        component,
+        torch.as_tensor(delta, dtype=torch.float64),
+    )
+
+    assert actual is expected
+
+
+def _scalar_component_overlaps_after_translation(
+    boxes: torch.Tensor,
+    component: tuple[int, ...],
+    delta: torch.Tensor,
+) -> bool:
+    candidate = torch.as_tensor(boxes, dtype=torch.float64).clone()
+    candidate[list(component), :2] += torch.as_tensor(delta, dtype=torch.float64)
+    inside = set(component)
+    for first in component:
+        ax, ay, aw, ah = (float(value) for value in candidate[first])
+        for second in range(int(candidate.shape[0])):
+            if second in inside:
+                continue
+            bx, by, bw, bh = (float(value) for value in candidate[second])
+            if min(ax + aw, bx + bw) > max(ax, bx) and min(
+                ay + ah, by + bh
+            ) > max(ay, by):
+                return True
+    return False
