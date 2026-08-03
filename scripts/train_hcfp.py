@@ -270,7 +270,8 @@ def _training_checkpoint_metadata(
     source: dict[str, object] | None,
 ) -> dict[str, object]:
     trained_heads = set(source.get("trained_heads", [])) if source is not None else set()
-    trained_heads.add("encoder")
+    if stage != "collective":
+        trained_heads.add("encoder")
     if stage in {"structure", "all"}:
         trained_heads.add("structure")
         if config.topology_enabled:
