@@ -3,7 +3,34 @@
 Date: 2026-08-04  
 Branch: `feat/hcfp5090-qor-first`  
 Implementation commit: `2cb1ddb`  
-Decision: **initial-stage checkpoint gate PASS on 2/3 seeds; runtime promotion HOLD**
+Decision: **historical dev16 pilot PASS on 2/3 seeds; broad promotion HOLD**
+
+## 2026-08-08 broad-validation update
+
+The 16-case result below remains a valid historical pilot, but it is no longer
+sufficient promotion evidence. A checksum-validated, sample-ID-disjoint
+512-case development replay now shows that the ranker does not generalize at
+the required rate.
+
+| Checkpoint | Initial top-1 | Initial top-4 | False promotion | Decision |
+|---|---:|---:|---:|---|
+| v4 seed 5104 | 44.1% | 70.7% | 4 | hold |
+| v4 seed 5105 | 43.4% | 69.9% | 2 | hold |
+| v5 seed 5104 | 49.2% | 72.1% | 2 | best v5, hold |
+| v5 seed 5105 | 47.3% | 71.9% | 2 | hold |
+| v5 seed 5106 | 48.6% | 71.9% | 1 | hold |
+
+The v5 replay scale improves top-1 by about five points and top-4 by one to two
+points, but remains far below the 75% / 93.75% gates. The exact-eligible
+post-tail shadow remains output-neutral and safe; pre-tail pruning remains
+disabled because the unfiltered false-promotion evidence is real.
+
+The 5,000-record training manifest is
+`artifacts/replay/hcfp5090-q5-dagger5000-manifest.json`. The broad development
+manifest is `artifacts/replay/hcfp5090-q5-dev512-manifest.json`; it contains 512
+unique samples, 1,024 paired records, eight checksum-valid shards, and zero
+sample overlap with the training and earlier replay sets. Full evidence is in
+[`hcfp5090_q6_release_results_2026-08-08.md`](hcfp5090_q6_release_results_2026-08-08.md).
 
 ## Outcome
 

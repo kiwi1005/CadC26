@@ -3,7 +3,7 @@
 Date: 2026-08-03  
 Branch: `feat/hcfp5090-qor-first`  
 Base: `origin/main` at `2ddc494`  
-Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5 checkpoint PASS/system HOLD
+Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5/Q6 QoR evidence complete and promotion HOLD
 
 ## Execution checkpoint
 
@@ -43,11 +43,16 @@ Status: Q0--Q2 verified; Q3 HOLD; Q4 exact-safe/runtime-blocked; Q5 checkpoint P
   checkpoint/config hashes. Repair-aware feature v4, fail-closed checkpoint
   upgrades, listwise training, exact stage gates, output-neutral runtime shadow,
   and selected-versus-oracle visualization are implemented.
-- The 256-list initial-stage pilot passes all checkpoint gates on seeds 5104 and
-  5105: 12/16 exact top-1, 15/16 top-4 oracle recall, and zero false promotion.
-  Seed 5102 records 11/16, 14/16, and one false promotion. All three post-relax
-  gates fail. Q5 therefore remains shadow-only; 5,000-record replay, broad
-  three-seed validation, and A100 profiling remain pending.
+- The historical 256-list pilot passes its small dev16 gate on two checkpoints,
+  but the completed 5,000-record replay and disjoint 512-case broad split do not
+  promote. v5 reaches at best 49.2% top-1 and 72.1% top-4 with nonzero false
+  promotions. A targeted confusable-hard-negative sampler also regresses and is
+  rejected. Q5 remains post-tail shadow-only.
+- Q6 runs the 100 visible official cases with seeds 7001--7003. Each run is
+  100/100 hard feasible, improves 32 cases, ties 68, regresses none, and reaches
+  weighted cost 9.724486415 versus 9.999999 analytic. Runtime remains the
+  release blocker: learned p95 is 6.45--6.59 seconds versus about 0.508 seconds
+  analytic, and no A100 profile is available.
 
 ## Decision
 

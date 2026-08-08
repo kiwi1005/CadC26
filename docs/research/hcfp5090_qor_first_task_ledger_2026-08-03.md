@@ -146,7 +146,8 @@ substitute for the pending promotion rerun.
 - [x] Store training-only feature normalization and reject incompatible
   checkpoint continuation/runtime ingestion.
 - [~] Add mid-flow snapshots and decision-level teacher actions after pilot proof.
-- [ ] Build 5,000-record training-only replay with required composition.
+- [x] Build 5,000-record training-only replay with deterministic overlapping
+  draw quotas and checksum-valid shards.
 - [x] Add post-repair ListMLE with bounded cap-cross weight and legacy fallback.
 - [~] Add post-repair multi-task heads after listwise signal is held-out verified.
 - [x] Implement top-1, top-4 recall, false-promotion, stage, and weighted-regret reporting.
@@ -156,30 +157,37 @@ substitute for the pending promotion rerun.
 - [x] Add an output-neutral runtime shadow aligned to the replay initial slice.
 - [x] Add row-identity-checked selected/oracle visualization across raw,
   post-BDP, and post-repair geometry.
-- [ ] Run full validation through the preserved dominance safety invariant.
+- [x] Run 100-case three-seed shadow validation through the preserved dominance
+  safety invariant.
 
-Current gate: **INITIAL CHECKPOINT PASS ON 2/3 SEEDS; SYSTEM PROMOTION HOLD**.
-Seeds 5104 and 5105 each reach 12/16 exact top-1, 15/16 top-4 oracle recall,
-zero false promotion, weighted rank regret 0.4375, and weighted score regret
-0.004542. Seed 5102 records 11/16, 14/16, and one false promotion. All three
-post-relax evaluations miss the top-1/top-4 gates.
+Current gate: **BROAD PROMOTION HOLD**. The historical 16-case pilot passes on
+two checkpoints, but the disjoint 512-case split records only 49.2% best top-1,
+72.1% best top-4, and one to four false promotions per checkpoint. The
+5,000-record v5 training improves top-1 by about five percentage points over v4
+but does not approach the 75% / 93.75% gates.
 
-The previous initial-stage listwise baseline was 5/16 top-1, 13/16 top-4, two
-false promotions, weighted rank regret 7.0625, and weighted score regret
-0.045904. The new feature/replay contract therefore has real pilot signal, but
-the 5,000-record target, broader validation-like split, active-selection Pareto
-proof, and A100 profile are still missing. Runtime ranking remains output-neutral
-shadow telemetry. Full evidence is in
-[`hcfp5090_q5_ranker_results_2026-08-04.md`](hcfp5090_q5_ranker_results_2026-08-04.md).
+The current post-tail runtime shadow masks exact-ineligible rows and remains
+output-neutral. The dormant pre-tail pruning path cannot use that information,
+so it remains disabled. A more selective confusable-hard-negative sampler was
+also tested and rejected after regressing to 45.9% / 70.5% on the broad split.
+Full evidence is in
+[`hcfp5090_q6_release_results_2026-08-08.md`](hcfp5090_q6_release_results_2026-08-08.md).
 
 ## Q6 — release verification
 
-- [ ] Run 100 cases with at least three deterministic seeds.
-- [ ] Audit hard feasibility, cap crossings, weighted `J`, oracle@K, and regret.
+- [x] Run 100 cases with three deterministic seeds.
+- [x] Audit hard feasibility, cap crossings, weighted QoR, ranker coverage, and
+  counterfactual selection.
 - [ ] Profile A100 cold load, p50/p95 runtime, and peak memory.
 - [ ] Verify missing/corrupt checkpoint fallback.
 - [ ] Freeze algorithm semantics on Aug 20.
 - [ ] Run official wrapper and package dry runs from both supported CWDs.
+
+Current gate: **QOR PASS; RELEASE HOLD**. All three seeds produce 100/100 hard
+feasible outputs, 32 improvements, 68 ties, zero regressions, and weighted cost
+`9.724486415` versus `9.999999` analytic. The learned p95 remains about
+`6.45--6.59 s` versus `0.508 s` analytic, A100 evidence is absent, and active
+ranker pruning is unproven.
 
 ## Required verification per code-bearing commit
 
