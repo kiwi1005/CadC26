@@ -32,6 +32,37 @@ def log_aspect_from_xywh(xywh: Tensor) -> Tensor:
     return torch.log(boxes[..., 2] / boxes[..., 3])
 
 
+def initializer_anchor(
+    case: FloorplanCase,
+    center: Tensor,
+    log_aspect: Tensor,
+    *,
+    absolute: bool,
+) -> tuple[Tensor, Tensor]:
+    """Return the state added to initializer outputs.
+
+    Absolute models predict normalized centers and soft-block log aspects from
+    zero; hard geometry remains anchored to the exact official targets.
+    """
+
+    if not absolute:
+        return center, log_aspect
+    anchored_center = torch.zeros_like(center)
+    anchored_aspect = torch.zeros_like(log_aspect)
+    target_center = centers_from_xywh(case.target).to(
+        device=anchored_center.device,
+        dtype=anchored_center.dtype,
+    )
+    target_aspect = log_aspect_from_xywh(case.target.clamp_min(1.0e-30)).to(
+        device=anchored_aspect.device,
+        dtype=anchored_aspect.dtype,
+    )
+    anchored_center[..., case.preplaced_mask, :] = target_center[case.preplaced_mask]
+    hard_shape = case.fixed_mask | case.preplaced_mask
+    anchored_aspect[..., hard_shape] = target_aspect[hard_shape]
+    return anchored_center, anchored_aspect
+
+
 def exact_shape_projection(
     case: FloorplanCase,
     log_aspect: Tensor,

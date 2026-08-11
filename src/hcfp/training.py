@@ -12,7 +12,7 @@ from hcfp.collective import PAIR_FEATURES, dynamic_pair_features
 from hcfp.data import DataSample, SolutionLabels
 from hcfp.dynamics import DynamicsConfig, initialize_population
 from hcfp.fallback import safe_shelf
-from hcfp.geometry import exact_shape_projection
+from hcfp.geometry import exact_shape_projection, initializer_anchor
 from hcfp.model import HCFPModel, soft_sequence_pair_relation_logits
 from hcfp.constraints.contact_tree import BOTTOM, LEFT, RIGHT, TOP, extract_contacts
 from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_from_rectangles
@@ -108,8 +108,14 @@ def supervised_loss(
         DynamicsConfig(population=population, steps=0),
         safe_shelf(case).to(device=device),
     )
-    target_center = labels.centers.unsqueeze(0) - base.center
-    target_aspect = labels.log_aspect.unsqueeze(0) - base.log_aspect
+    anchor_center, anchor_aspect = initializer_anchor(
+        case,
+        base.center,
+        base.log_aspect,
+        absolute=model.config.initializer_absolute,
+    )
+    target_center = labels.centers.unsqueeze(0) - anchor_center
+    target_aspect = labels.log_aspect.unsqueeze(0) - anchor_aspect
     target_center = target_center.clamp(-model.config.residual_bound, model.config.residual_bound)
     target_aspect = target_aspect.clamp(-model.config.aspect_residual_bound, model.config.aspect_residual_bound)
     target_center[:, case.preplaced_mask] = 0.0

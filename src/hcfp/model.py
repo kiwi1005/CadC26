@@ -28,6 +28,7 @@ class ModelConfig:
     population_embed_dim: int = 8
     residual_bound: float = 0.10
     aspect_residual_bound: float = 0.25
+    initializer_absolute: bool = False
     force_channels: int = 7
     candidate_metric_dim: int = 8
     ranker_feature_mean: tuple[float, ...] = ()
@@ -51,6 +52,8 @@ class ModelConfig:
             raise ValueError("model dimensions must be positive")
         if self.residual_bound <= 0 or self.aspect_residual_bound <= 0:
             raise ValueError("residual bounds must be positive")
+        if type(self.initializer_absolute) is not bool:
+            raise ValueError("initializer_absolute must be boolean")
         if self.compute_dtype not in {"float32", "bfloat16"}:
             raise ValueError("compute_dtype must be float32 or bfloat16")
         if type(self.ranker_use_scene_embedding) is not bool:

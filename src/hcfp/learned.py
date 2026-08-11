@@ -28,7 +28,7 @@ from hcfp.constraints.construction import connect_groups, construct_constraint_v
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
-from hcfp.geometry import xywh_from_state
+from hcfp.geometry import initializer_anchor, xywh_from_state
 from hcfp.model import soft_sequence_pair_relation_logits
 from hcfp.projection import ComponentBDPConfig
 from hcfp.projection_guidance import build_population_guidance
@@ -1425,6 +1425,12 @@ def _learned_population(
         fallback,
         enforce_mib=enforce_mib,
     )
+    anchor_center, anchor_aspect = initializer_anchor(
+        case,
+        base.center,
+        base.log_aspect,
+        absolute=model.config.initializer_absolute,
+    )
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     noise = torch.randn(
         (population, case.n, 3), generator=generator, dtype=torch.float32
@@ -1450,20 +1456,20 @@ def _learned_population(
                     )
                 residual = residual + velocity.float() / config.flow_steps
                 residual[..., :2].clamp_(
-                    -config.max_position_residual,
-                    config.max_position_residual,
+                    -max(config.max_position_residual, model.config.residual_bound),
+                    max(config.max_position_residual, model.config.residual_bound),
                 )
                 residual[..., 2].clamp_(
-                    -config.max_aspect_residual,
-                    config.max_aspect_residual,
+                    -max(config.max_aspect_residual, model.config.aspect_residual_bound),
+                    max(config.max_aspect_residual, model.config.aspect_residual_bound),
                 )
                 residual[:, case.preplaced_mask, :2] = 0.0
                 residual[:, case.fixed_mask | case.preplaced_mask, 2] = 0.0
             output.center_residual[-flow_count:] = residual[-flow_count:, :, :2]
             output.log_aspect_residual[-flow_count:] = residual[-flow_count:, :, 2]
 
-    center = base.center + output.center_residual
-    log_aspect = (base.log_aspect + output.log_aspect_residual).clamp(-4.0, 4.0)
+    center = anchor_center + output.center_residual
+    log_aspect = (anchor_aspect + output.log_aspect_residual).clamp(-4.0, 4.0)
     learned_boxes = xywh_from_state(
         case,
         center,

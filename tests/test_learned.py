@@ -15,6 +15,7 @@ from hcfp.fallback import safe_shelf
 from hcfp.learned import (
     LearnedConfig,
     _attach_ranker_shadow_snapshot,
+    _learned_population,
     _merge_energy_history,
     _tensor_sha256,
     analyze_case_with_checkpoint,
@@ -65,6 +66,41 @@ def _config() -> AnalyticConfig:
         projection_iterations=4,
         direction_beam=1,
     )
+
+
+def test_absolute_initializer_runtime_uses_normalized_centers_and_hard_anchors() -> None:
+    case = _case()
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=16,
+            encoder_layers=1,
+            residual_bound=1.5,
+            aspect_residual_bound=1.2,
+            initializer_absolute=True,
+        )
+    )
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        model.initializer.head[-1].bias[:2] = torch.tensor((0.2, 0.3))
+    config = LearnedConfig(
+        analytic=AnalyticConfig(
+            dynamics=DynamicsConfig(population=1, steps=0),
+            projection_iterations=4,
+            direction_beam=1,
+        ),
+    )
+
+    boxes = _learned_population(case, model, config, seed=3)
+    centers = boxes[..., :2] + 0.5 * boxes[..., 2:4]
+    expected_soft = torch.tanh(torch.tensor((0.2, 0.3))) * 1.5
+    expected_preplaced = case.target[case.preplaced_mask, :2] + 0.5 * case.target[
+        case.preplaced_mask, 2:4
+    ]
+
+    assert torch.allclose(centers[0, ~case.preplaced_mask], expected_soft.expand(3, -1))
+    assert torch.equal(centers[0, case.preplaced_mask], expected_preplaced)
+    assert torch.equal(boxes[0, case.preplaced_mask], case.target[case.preplaced_mask])
 
 
 def _source() -> SimpleNamespace:

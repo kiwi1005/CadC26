@@ -89,6 +89,37 @@ def test_all_supervised_heads_train_with_finite_losses() -> None:
     assert all(torch.isfinite(torch.tensor(step["total"])) for step in history)
 
 
+def test_absolute_initializer_supervises_normalized_geometry_without_shelf_offset() -> None:
+    sample = _constraint_sample()
+    model = HCFPModel(
+        ModelConfig(
+            hidden_dim=16,
+            encoder_layers=1,
+            residual_bound=2.0,
+            aspect_residual_bound=1.2,
+            initializer_absolute=True,
+        )
+    )
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+
+    report = supervised_loss(model, sample, population=2, stage="initializer")
+    center_target = sample.labels.centers.unsqueeze(0).expand(2, -1, -1)
+    aspect_target = sample.labels.log_aspect.unsqueeze(0).expand(2, -1)
+    expected = torch.nn.functional.smooth_l1_loss(
+        torch.zeros_like(center_target),
+        center_target,
+    ) + torch.nn.functional.smooth_l1_loss(
+        torch.zeros_like(aspect_target),
+        aspect_target,
+    )
+
+    assert torch.all(center_target.abs() < model.config.residual_bound)
+    assert torch.all(aspect_target.abs() < model.config.aspect_residual_bound)
+    assert torch.allclose(report.initializer, expected)
+
+
 def test_constraint_supervision_contributes_finite_gradients() -> None:
     torch.manual_seed(6)
     model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True))
@@ -374,6 +405,65 @@ def test_training_cli_emits_checkpoint_and_audit_report(tmp_path: Path) -> None:
     assert metadata["trained_heads"] == ["encoder", "flow", "initializer", "structure"]
     assert metadata["training_objective_version"] == "supervised_loss_v1"
     assert metadata["parent_state_hash"] is None
+
+
+def test_training_cli_can_switch_warm_start_to_absolute_initializer(tmp_path: Path) -> None:
+    shard = tmp_path / "train.tar"
+    source = tmp_path / "source.pt"
+    output = tmp_path / "absolute.pt"
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1)),
+        source,
+        RUNTIME_NORMALIZATION,
+    )
+    write_shard(
+        [_constraint_sample()],
+        shard,
+        provenance={
+            "source": "FloorSet-train",
+            "source_version": "fixture-v1",
+            "split": "train",
+            "denylist_sha256": "fixture-denylist",
+        },
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_hcfp.py",
+            str(shard),
+            "--output",
+            str(output),
+            "--steps",
+            "1",
+            "--population",
+            "2",
+            "--stage",
+            "initializer",
+            "--init-checkpoint",
+            str(source),
+            "--absolute-initializer",
+            "--center-bound",
+            "1.5",
+            "--aspect-residual-bound",
+            "1.2",
+            "--device",
+            "cpu",
+            "--amp",
+            "off",
+            "--ema-decay",
+            "0",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    loaded, _ = load_checkpoint(output, expected_normalization=RUNTIME_NORMALIZATION)
+    assert loaded.config.initializer_absolute is True
+    assert loaded.config.residual_bound == pytest.approx(1.5)
+    assert loaded.config.aspect_residual_bound == pytest.approx(1.2)
 
 
 def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path) -> None:

@@ -38,6 +38,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--encoder-layers", type=int, default=3)
     parser.add_argument(
+        "--absolute-initializer",
+        action="store_true",
+        default=None,
+        help="predict normalized centers directly instead of shelf residuals",
+    )
+    parser.add_argument("--center-bound", type=float)
+    parser.add_argument("--aspect-residual-bound", type=float)
+    parser.add_argument(
         "--topology",
         action="store_true",
         default=None,
@@ -127,6 +135,21 @@ def main(argv: list[str] | None = None) -> int:
         config = replace(
             loaded.config,
             compute_dtype=compute_dtype,
+            residual_bound=(
+                loaded.config.residual_bound
+                if args.center_bound is None
+                else args.center_bound
+            ),
+            aspect_residual_bound=(
+                loaded.config.aspect_residual_bound
+                if args.aspect_residual_bound is None
+                else args.aspect_residual_bound
+            ),
+            initializer_absolute=(
+                loaded.config.initializer_absolute
+                if args.absolute_initializer is None
+                else args.absolute_initializer
+            ),
             topology_enabled=topology_enabled,
             constraint_enabled=(
                 loaded.config.constraint_enabled
@@ -163,6 +186,13 @@ def main(argv: list[str] | None = None) -> int:
             ModelConfig(
                 hidden_dim=args.hidden_dim,
                 encoder_layers=args.encoder_layers,
+                residual_bound=(0.10 if args.center_bound is None else args.center_bound),
+                aspect_residual_bound=(
+                    0.25
+                    if args.aspect_residual_bound is None
+                    else args.aspect_residual_bound
+                ),
+                initializer_absolute=bool(args.absolute_initializer),
                 compute_dtype=compute_dtype,
                 topology_enabled=bool(args.topology),
                 constraint_enabled=bool(args.constraints),
