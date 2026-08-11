@@ -123,6 +123,10 @@ secondary ranker-pruning comparison, not the primary oracle@K measurement.
 Set `HCFP_CHECKPOINT=/absolute/path/model.pt` to opt into the learned
 initializer. Loading is schema/hash/normalization checked; any missing,
 damaged, or incompatible checkpoint falls back to the verified analytic lane.
+For the score-dominant 106--120 block bucket, runtime enables 16 topology and
+16 constraint seeds by default. `HCFP_LARGE_CHECKPOINT` may point that bucket
+at a large-case fine-tuned checkpoint while smaller cases keep
+`HCFP_CHECKPOINT`.
 For effect attribution, benchmark `scripts/audit_learned_optimizer.py` with
 `--checkpoint learned=/absolute/path/model.pt`; this strict adapter requires a
 valid checkpoint while the per-case raw gate still retains the verified

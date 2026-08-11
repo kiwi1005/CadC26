@@ -115,7 +115,21 @@ def _load_default_solver() -> Solver | None:
     if checkpoint:
         try:
             learned = importlib.import_module("hcfp.learned")
-            return lambda case: learned.solve(case, checkpoint=checkpoint)
+            large_checkpoint = os.environ.get("HCFP_LARGE_CHECKPOINT", checkpoint)
+            large_min_blocks = int(os.environ.get("HCFP_STRUCTURED_MIN_BLOCKS", "106"))
+            topology_seeds = int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "16"))
+            constraint_seeds = int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "16"))
+
+            def solve_learned(case: SolveCase):
+                if case.block_count < large_min_blocks:
+                    return learned.solve(case, checkpoint=checkpoint)
+                config = learned.LearnedConfig(
+                    topology_seeds=topology_seeds,
+                    constraint_seeds=constraint_seeds,
+                )
+                return learned.solve(case, checkpoint=large_checkpoint, config=config)
+
+            return solve_learned
         except Exception:
             pass
     for module_name, attr_name in (

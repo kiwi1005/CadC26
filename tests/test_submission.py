@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import torch
 
+import hcfp.runtime as runtime_module
 from hcfp.runtime import HCFPRuntime, SolveCase
 from submission.optimizer import HCFPOptimizer, solve
 
@@ -194,6 +195,39 @@ def test_opt_in_missing_checkpoint_still_returns_verified_solution(monkeypatch) 
 
     assert placements[0] == (10.0, 5.0, 2.0, 2.0)
     assert len(placements) == 3
+
+
+def test_large_cases_use_structured_checkpoint_policy(monkeypatch) -> None:
+    calls = []
+
+    class FakeLearned:
+        @staticmethod
+        def LearnedConfig(**kwargs):
+            return kwargs
+
+        @staticmethod
+        def solve(case, *, checkpoint, config=None):
+            calls.append((case.block_count, checkpoint, config))
+            return []
+
+    original_import = runtime_module.importlib.import_module
+    monkeypatch.setattr(
+        runtime_module.importlib,
+        "import_module",
+        lambda name: FakeLearned if name == "hcfp.learned" else original_import(name),
+    )
+    monkeypatch.setenv("HCFP_CHECKPOINT", "general.pt")
+    monkeypatch.setenv("HCFP_LARGE_CHECKPOINT", "large.pt")
+
+    solver = runtime_module._load_default_solver()
+    assert solver is not None
+    solver(SolveCase(105, [], [], [], [], []))
+    solver(SolveCase(106, [], [], [], [], []))
+
+    assert calls == [
+        (105, "general.pt", None),
+        (106, "large.pt", {"topology_seeds": 16, "constraint_seeds": 16}),
+    ]
 
 
 def test_fallback_audit_exposes_only_its_specialized_optimizer_class() -> None:
