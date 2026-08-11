@@ -11,6 +11,7 @@ import torch
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint, save_checkpoint
 from hcfp.data import DataSample, extract_labels, pairwise_precedence, write_shard
+from hcfp.geometry import exact_shape_projection, overlap_area_matrix
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
 from hcfp.training import ExponentialMovingAverage, supervised_loss, train_steps
@@ -114,6 +115,14 @@ def test_absolute_initializer_supervises_normalized_geometry_without_shelf_offse
         torch.zeros_like(aspect_target),
         aspect_target,
     )
+    dimensions = exact_shape_projection(
+        sample.case,
+        torch.zeros_like(aspect_target),
+    )
+    rectangles = torch.cat((-0.5 * dimensions, dimensions), dim=-1)
+    expected += torch.triu(overlap_area_matrix(rectangles), diagonal=1).sum(
+        dim=(1, 2)
+    ).mean() / sample.case.area.sum()
 
     assert torch.all(center_target.abs() < model.config.residual_bound)
     assert torch.all(aspect_target.abs() < model.config.aspect_residual_bound)

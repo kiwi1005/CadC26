@@ -12,7 +12,7 @@ from hcfp.collective import PAIR_FEATURES, dynamic_pair_features
 from hcfp.data import DataSample, SolutionLabels
 from hcfp.dynamics import DynamicsConfig, initialize_population
 from hcfp.fallback import safe_shelf
-from hcfp.geometry import exact_shape_projection, initializer_anchor
+from hcfp.geometry import exact_shape_projection, initializer_anchor, overlap_area_matrix
 from hcfp.model import HCFPModel, soft_sequence_pair_relation_logits
 from hcfp.constraints.contact_tree import BOTTOM, LEFT, RIGHT, TOP, extract_contacts
 from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_from_rectangles
@@ -187,6 +187,16 @@ def supervised_loss(
     if stage in {"initializer", "all"}:
         initializer = F.smooth_l1_loss(output.center_residual, target_center)
         initializer += F.smooth_l1_loss(output.log_aspect_residual, target_aspect)
+        if model.config.initializer_absolute:
+            predicted_center = anchor_center + output.center_residual
+            predicted_aspect = anchor_aspect + output.log_aspect_residual
+            dimensions = exact_shape_projection(case, predicted_aspect)
+            rectangles = torch.cat(
+                (predicted_center - 0.5 * dimensions, dimensions),
+                dim=-1,
+            )
+            overlap = torch.triu(overlap_area_matrix(rectangles), diagonal=1)
+            initializer += overlap.sum(dim=(1, 2)).mean() / case.area.sum()
 
     flow = zero
     if flow_target is not None:
