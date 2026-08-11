@@ -333,7 +333,7 @@ def _training_checkpoint_metadata(
     source: dict[str, object] | None,
 ) -> dict[str, object]:
     trained_heads = set(source.get("trained_heads", [])) if source is not None else set()
-    if stage != "collective":
+    if stage in {"structure", "all"}:
         trained_heads.add("encoder")
     if stage in {"structure", "all"}:
         trained_heads.add("structure")
@@ -372,9 +372,15 @@ def _training_checkpoint_metadata(
 
 
 def _select_trainable_parameters(model: HCFPModel, stage: str) -> list[str]:
+    prefixes = {
+        "structure": ("encoder.", "structure.", "topology.", "constraints."),
+        "initializer": ("initializer.",),
+        "flow": ("flow.",),
+        "collective": ("collective.",),
+    }
     names = []
     for name, parameter in model.named_parameters():
-        trainable = stage != "collective" or name.startswith("collective.")
+        trainable = stage == "all" or name.startswith(prefixes[stage])
         parameter.requires_grad_(trainable)
         if trainable:
             names.append(name)

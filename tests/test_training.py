@@ -464,6 +464,12 @@ def test_training_cli_can_switch_warm_start_to_absolute_initializer(tmp_path: Pa
     assert loaded.config.initializer_absolute is True
     assert loaded.config.residual_bound == pytest.approx(1.5)
     assert loaded.config.aspect_residual_bound == pytest.approx(1.2)
+    report = json.loads(Path(f"{output}.training.json").read_text(encoding="utf-8"))
+    assert report["trainable_parameter_names"]
+    assert all(
+        name.startswith("initializer.")
+        for name in report["trainable_parameter_names"]
+    )
 
 
 def test_training_cli_enables_constraints_from_legacy_checkpoint(tmp_path: Path) -> None:
