@@ -148,6 +148,23 @@ def test_constraint_supervision_contributes_finite_gradients() -> None:
     assert any(grad is not None and float(grad.detach().abs().sum()) > 0.0 for grad in grads)
 
 
+def test_constraint_only_stage_optimizes_constraint_loss() -> None:
+    model = HCFPModel(
+        ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True)
+    )
+    report = supervised_loss(
+        model,
+        _constraint_sample(),
+        population=2,
+        stage="constraints",
+        seed=9,
+    )
+
+    assert torch.isfinite(report.total)
+    assert float(report.constraint.detach()) > 0.0
+    assert torch.equal(report.total, report.constraint)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_constraint_supervision_runs_on_cuda() -> None:
     model = HCFPModel(

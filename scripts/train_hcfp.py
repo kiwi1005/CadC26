@@ -348,6 +348,8 @@ def _training_checkpoint_metadata(
             trained_heads.add("topology")
         if config.constraint_enabled:
             trained_heads.add("constraints")
+    if stage == "constraints":
+        trained_heads.add("constraints")
     if stage in {"initializer", "all"}:
         trained_heads.add("initializer")
     if stage in {"flow", "all"}:
@@ -381,6 +383,7 @@ def _training_checkpoint_metadata(
 def _select_trainable_parameters(model: HCFPModel, stage: str) -> list[str]:
     prefixes = {
         "structure": ("encoder.", "structure.", "topology.", "constraints."),
+        "constraints": ("constraints.",),
         "initializer": ("initializer.",),
         "flow": ("flow.",),
         "collective": ("collective.",),

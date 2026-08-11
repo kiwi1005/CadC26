@@ -90,3 +90,19 @@ Do not add a larger model yet. Train/replay the near-cap and still-capped large
 cases, with priority on reducing grouping, boundary, and MIB violations while
 preserving the current topology geometry. Runtime reduction comes after the
 next cap-cross gain.
+
+## Constraint-only follow-up
+
+A `constraints` training stage was added so contact, boundary, and MIB heads
+can be fine-tuned without moving the encoder or Sequence-Pair heads. A first
+2,000-step large-case run at learning rate `1e-4` was not promoted:
+
+```text
+parent weighted cost:          8.822391
+constraint-only step 500:      9.159662
+constraint-only step 2000:     8.900946
+hard feasibility:              15/15 for every run
+```
+
+The stage remains useful for smaller learning-rate and replay-targeted sweeps,
+but the active large checkpoint stays the 3,000-step structure model.

@@ -19,7 +19,14 @@ from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_fr
 
 
 Tensor = torch.Tensor
-TRAINING_STAGES = ("structure", "initializer", "flow", "collective", "all")
+TRAINING_STAGES = (
+    "structure",
+    "constraints",
+    "initializer",
+    "flow",
+    "collective",
+    "all",
+)
 _COLLECTIVE_ROLLOUT_STEPS = 2
 _INITIALIZER_OVERLAP_WEIGHT = 0.1
 _OVERLAP_X = PAIR_FEATURES.index("overlap_x")
@@ -145,22 +152,25 @@ def supervised_loss(
 
     structure = zero
     constraint = zero
-    if stage in {"structure", "all"}:
-        allowed = relation_mask_from_rectangles(
-            labels.rectangles,
-            valid_mask=case.block_mask,
-        )
-        valid = allowed.any(dim=-1)
-        relation_logits = output.precedence_logits[..., :4]
-        precedence = partial_label_nll(relation_logits, allowed, pair_mask=valid)
-        precedence += antisymmetry_loss(relation_logits, pair_mask=valid)
-        if output.positive_permutation is not None and output.negative_permutation is not None:
-            topology_logits = soft_sequence_pair_relation_logits(
-                output.positive_permutation,
-                output.negative_permutation,
+    if stage in {"structure", "constraints", "all"}:
+        precedence = zero
+        outline = zero
+        if stage in {"structure", "all"}:
+            allowed = relation_mask_from_rectangles(
+                labels.rectangles,
+                valid_mask=case.block_mask,
             )
-            precedence += partial_label_nll(topology_logits, allowed, pair_mask=valid)
-        outline = F.smooth_l1_loss(output.outline, labels.outline)
+            valid = allowed.any(dim=-1)
+            relation_logits = output.precedence_logits[..., :4]
+            precedence = partial_label_nll(relation_logits, allowed, pair_mask=valid)
+            precedence += antisymmetry_loss(relation_logits, pair_mask=valid)
+            if output.positive_permutation is not None and output.negative_permutation is not None:
+                topology_logits = soft_sequence_pair_relation_logits(
+                    output.positive_permutation,
+                    output.negative_permutation,
+                )
+                precedence += partial_label_nll(topology_logits, allowed, pair_mask=valid)
+            outline = F.smooth_l1_loss(output.outline, labels.outline)
         if output.contact_logits is not None:
             contact_target, contact_mask = _contact_targets(case, labels)
             if bool(contact_mask.any()):
