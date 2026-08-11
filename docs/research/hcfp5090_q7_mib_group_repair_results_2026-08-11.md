@@ -144,3 +144,24 @@ Portfolio evidence:
 artifacts/benchmarks/hcfp5090-q7-legacy-portfolio-official100-seed7001.json
 SHA-256 385fa9a0251ed0953ec3bc4a6164d57fa3e27340682008a4360754e53a042b15
 ```
+
+## Three-seed deterministic replay
+
+The full visible 100 was repeated with execution/flow seeds 7001, 7002, and
+7003. All three runs are 100/100 hard feasible, have weighted cost
+`8.979481766`, and produce 71 exact-uncapped cases. Their canonical placement
+payloads are byte-identical after JSON normalization:
+
+```text
+placement SHA-256 c6a23c621512bacbfd5979185880350752ed8a2c867d344837aae2e01d18c269
+```
+
+| Seed | Runtime p50 | Runtime p95 | Artifact SHA-256 |
+|---:|---:|---:|---|
+| 7001 | 2.60515 s | 6.86615 s | `385fa9a0251ed0953ec3bc4a6164d57fa3e27340682008a4360754e53a042b15` |
+| 7002 | 2.61248 s | 6.72418 s | `6ea9338d0bd69676f90d25e1f1acd8feccda363ad321346cba75ebf1d75e6a71` |
+| 7003 | 2.67095 s | 6.89891 s | `f8fe69d4721656da878fae452808e18cb534dfc802216af1a3f085778ef5801f` |
+
+The placement identity is expected because active flow and collective rollout
+steps are both zero. The rerun nevertheless verifies deterministic candidate
+ordering, exact-tail replay, wrapper execution, and CUDA behavior end to end.

@@ -204,7 +204,7 @@ ranker pruning is unproven.
 - [~] Preserve every previously retained Q6 learned improvement.
 - [x] Add a bounded case-signature portfolio challenger for the six Q6-to-Q7
   regressions, especially case 63, without case-ID memorization.
-- [ ] Rerun three deterministic seeds after the portfolio selection fix.
+- [x] Rerun three deterministic seeds after the portfolio selection fix.
 
 Current gate: **QOR CHECKPOINT PASS; DEFAULT PROMOTION HOLD**. Q7 improves
 weighted capped cost from Q6 `9.724486` to `8.989727`, raises exact uncapped
@@ -219,6 +219,9 @@ The first bounded portfolio slice now restores case 63 from the cap to
 `7.427046`, improves Q7 weighted cost further to `8.979482`, and changes no
 other Q7 case. Five small Q6-to-Q7 quality regressions remain, while the
 portfolio stays at 100/100 hard feasible and zero regressions against Q7.
+Seeds 7001--7003 produce byte-identical placement payloads and the same
+weighted cost `8.979481766`; observed p95 runtime ranges from 6.724 to 6.899
+seconds on the RTX 5090 host.
 
 ## Required verification per code-bearing commit
 
