@@ -120,7 +120,7 @@ def test_absolute_initializer_supervises_normalized_geometry_without_shelf_offse
         torch.zeros_like(aspect_target),
     )
     rectangles = torch.cat((-0.5 * dimensions, dimensions), dim=-1)
-    expected += torch.triu(overlap_area_matrix(rectangles), diagonal=1).sum(
+    expected += 0.1 * torch.triu(overlap_area_matrix(rectangles), diagonal=1).sum(
         dim=(1, 2)
     ).mean() / sample.case.area.sum()
 

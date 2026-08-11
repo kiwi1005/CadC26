@@ -21,6 +21,7 @@ from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_fr
 Tensor = torch.Tensor
 TRAINING_STAGES = ("structure", "initializer", "flow", "collective", "all")
 _COLLECTIVE_ROLLOUT_STEPS = 2
+_INITIALIZER_OVERLAP_WEIGHT = 0.1
 _OVERLAP_X = PAIR_FEATURES.index("overlap_x")
 _OVERLAP_Y = PAIR_FEATURES.index("overlap_y")
 
@@ -185,8 +186,17 @@ def supervised_loss(
 
     initializer = zero
     if stage in {"initializer", "all"}:
-        initializer = F.smooth_l1_loss(output.center_residual, target_center)
-        initializer += F.smooth_l1_loss(output.log_aspect_residual, target_aspect)
+        center_loss = F.smooth_l1_loss(
+            output.center_residual,
+            target_center,
+            reduction="none",
+        ).mean(dim=(1, 2))
+        aspect_loss = F.smooth_l1_loss(
+            output.log_aspect_residual,
+            target_aspect,
+            reduction="none",
+        ).mean(dim=1)
+        initializer = (center_loss + aspect_loss).min()
         if model.config.initializer_absolute:
             predicted_center = anchor_center + output.center_residual
             predicted_aspect = anchor_aspect + output.log_aspect_residual
@@ -196,7 +206,8 @@ def supervised_loss(
                 dim=-1,
             )
             overlap = torch.triu(overlap_area_matrix(rectangles), diagonal=1)
-            initializer += overlap.sum(dim=(1, 2)).mean() / case.area.sum()
+            overlap_loss = overlap.sum(dim=(1, 2)) / case.area.sum()
+            initializer = initializer + _INITIALIZER_OVERLAP_WEIGHT * overlap_loss.min()
 
     flow = zero
     if flow_target is not None:
