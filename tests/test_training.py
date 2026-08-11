@@ -449,6 +449,10 @@ def test_training_cli_can_switch_warm_start_to_absolute_initializer(tmp_path: Pa
             "2",
             "--stage",
             "initializer",
+            "--min-blocks",
+            "4",
+            "--max-blocks",
+            "4",
             "--init-checkpoint",
             str(source),
             "--absolute-initializer",
@@ -474,6 +478,7 @@ def test_training_cli_can_switch_warm_start_to_absolute_initializer(tmp_path: Pa
     assert loaded.config.residual_bound == pytest.approx(1.5)
     assert loaded.config.aspect_residual_bound == pytest.approx(1.2)
     report = json.loads(Path(f"{output}.training.json").read_text(encoding="utf-8"))
+    assert report["block_range"] == [4, 4]
     assert report["trainable_parameter_names"]
     assert all(
         name.startswith("initializer.")

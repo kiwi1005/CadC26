@@ -31,6 +31,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--floorset-lite-root", help="direct official training root; avoids copied shards")
     parser.add_argument("--sample-limit", type=int, help="bounded direct-stream subset for smoke/ablation")
     parser.add_argument("--sampling", choices=("uniform", "score-aware"), default="score-aware")
+    parser.add_argument("--min-blocks", type=int, default=1)
+    parser.add_argument("--max-blocks", type=int, default=120)
     parser.add_argument("-o", "--output", required=True, help="output checkpoint")
     parser.add_argument("--stage", choices=TRAINING_STAGES, default="all")
     parser.add_argument("--steps", type=int, default=100)
@@ -83,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("provide either shards or --floorset-lite-root")
     if args.sample_limit is not None and args.sample_limit <= 0:
         raise ValueError("--sample-limit must be positive")
+    if args.min_blocks <= 0 or args.max_blocks < args.min_blocks:
+        raise ValueError("invalid block-count range")
     manifests = [read_shard_manifest(path) for path in args.shards]
     for manifest in manifests:
         provenance = manifest.get("provenance", {})
@@ -112,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
                 for sample in iter_shard(path)
             )
         for sample in stream:
+            if not args.min_blocks <= sample.case.n <= args.max_blocks:
+                continue
             if sample.sample_id.lower().startswith(("validation-", "val-", "official/")):
                 raise ValueError(
                     f"official validation-like sample ID is forbidden: {sample.sample_id}"
@@ -294,6 +300,7 @@ def main(argv: list[str] | None = None) -> int:
         "init_checkpoint": args.init_checkpoint,
         "sample_count": sample_count,
         "sampling": args.sampling,
+        "block_range": [args.min_blocks, args.max_blocks],
         "direct_floorset_lite_stream": direct_stream,
         "parent_training_report": parent_training_report,
         "shards": [{"path": str(path), "sha256": file_sha256(path)} for path in args.shards],
