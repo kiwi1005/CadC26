@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 
 from hcfp.case import FloorplanCase
+from hcfp.constraints.mib_shapes import OFFICIAL_AREA_REL_TOL
 
 
 Tensor = torch.Tensor
@@ -32,7 +33,7 @@ def log_aspect_from_xywh(xywh: Tensor) -> Tensor:
 
 
 def exact_shape_projection(case: FloorplanCase, log_aspect: Tensor) -> Tensor:
-    """Reconstruct dimensions with exact soft-block area and hard target shapes."""
+    """Reconstruct dimensions with hard targets and compatible shared MIB shapes."""
 
     ratio_log = torch.as_tensor(log_aspect, dtype=torch.float32, device=case.area.device)
     if ratio_log.ndim not in (1, 2) or ratio_log.shape[-1] != case.n:
@@ -49,7 +50,55 @@ def exact_shape_projection(case: FloorplanCase, log_aspect: Tensor) -> Tensor:
     while hard.ndim < dimensions.ndim - 1:
         hard = hard.unsqueeze(0)
         target_wh = target_wh.unsqueeze(0)
-    return torch.where(hard.unsqueeze(-1), target_wh, dimensions)
+    dimensions = torch.where(hard.unsqueeze(-1), target_wh, dimensions)
+    return _project_compatible_mib_shapes(case, dimensions)
+
+
+def _project_compatible_mib_shapes(
+    case: FloorplanCase,
+    dimensions: Tensor,
+) -> Tensor:
+    membership = case.mib_membership.to(device=dimensions.device, dtype=torch.bool)
+    if not membership.numel():
+        return dimensions
+
+    batched = dimensions.ndim == 3
+    projected = dimensions if batched else dimensions.unsqueeze(0)
+    area = case.area.to(device=dimensions.device, dtype=dimensions.dtype)
+    hard = (case.fixed_mask | case.preplaced_mask).to(device=dimensions.device)
+    tolerance = OFFICIAL_AREA_REL_TOL
+
+    for row in membership:
+        members = torch.nonzero(row, as_tuple=False).reshape(-1)
+        if members.numel() < 2:
+            continue
+        member_area = area[members]
+        low = torch.max(member_area * (1.0 - tolerance))
+        high = torch.min(member_area * (1.0 + tolerance))
+        if float(low) > float(high):
+            continue
+
+        hard_members = members[hard[members]]
+        if hard_members.numel():
+            shared = projected[:, hard_members[0]]
+            if not all(
+                bool(torch.equal(projected[:, index], shared))
+                for index in hard_members[1:]
+            ):
+                continue
+            shared_area = shared[:, 0] * shared[:, 1]
+            relative_error = torch.abs(shared_area[:, None] - member_area) / member_area
+            if bool((relative_error > tolerance).any()):
+                continue
+        else:
+            target_area = (low + high) * 0.5
+            log_ratio = torch.log(projected[:, members, 0] / projected[:, members, 1]).mean(dim=1)
+            width = torch.sqrt(target_area * torch.exp(log_ratio))
+            shared = torch.stack((width, target_area / width), dim=1)
+
+        mask = row.view(1, -1, 1)
+        projected = torch.where(mask, shared[:, None, :], projected)
+    return projected if batched else projected[0]
 
 
 def xywh_from_state(case: FloorplanCase, center: Tensor, log_aspect: Tensor) -> Tensor:

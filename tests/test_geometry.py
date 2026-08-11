@@ -35,6 +35,25 @@ def test_shape_projection_preserves_area_and_hard_dimensions() -> None:
     assert torch.equal(wh[:, 2], case.target[2, 2:4].expand(2, -1))
 
 
+def test_shape_projection_broadcasts_compatible_mib_shape() -> None:
+    case = from_official(
+        3,
+        [4.0, 4.02, 9.0],
+        [],
+        [],
+        [],
+        [[0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]],
+    )
+    log_aspect = torch.tensor([[1.0, -1.0, 0.5], [-0.5, 0.5, -0.5]])
+
+    wh = exact_shape_projection(case, log_aspect)
+
+    assert torch.equal(wh[:, 0], wh[:, 1])
+    actual_area = wh[:, 0, 0] * wh[:, 0, 1]
+    relative_error = torch.abs(actual_area[:, None] - case.area[:2]) / case.area[:2]
+    assert bool((relative_error <= 1.0e-2).all())
+
+
 def test_normalization_round_trip_and_overlap_matrix() -> None:
     case = _case()
     raw = torch.tensor([[0.0, 0.0, 2.0, 2.0], [1.0, 1.0, 2.0, 3.0], [10.0, 4.0, 3.0, 3.0]])

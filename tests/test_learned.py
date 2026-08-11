@@ -1670,6 +1670,60 @@ def test_raw_constraint_guard_rejects_infeasible_component_proposal(
     assert selected[0][0] == 20.0
 
 
+def test_post_tail_group_repair_accepts_only_exact_pareto_improvement() -> None:
+    import hcfp.learned as learned
+
+    source = SimpleNamespace(
+        block_count=4,
+        area_targets=[1.0] * 4,
+        b2b_connectivity=[],
+        p2b_connectivity=[],
+        pins_pos=[],
+        constraints=[
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0],
+        ],
+        target_positions=None,
+    )
+    case = from_official(
+        source.block_count,
+        source.area_targets,
+        source.b2b_connectivity,
+        source.p2b_connectivity,
+        source.pins_pos,
+        source.constraints,
+    )
+    placements = [
+        (0.0, 0.0, 1.0, 1.0),
+        (3.0, 0.0, 1.0, 1.0),
+        (6.0, 0.0, 1.0, 1.0),
+        (9.0, 0.0, 1.0, 1.0),
+    ]
+
+    repaired = learned._post_tail_group_repair(source, case, placements)
+
+    assert verify_feasible(source, repaired)
+    assert learned._raw_quality(source, case, repaired) < learned._raw_quality(
+        source, case, placements
+    )
+
+    source.b2b_connectivity = [[1, 3, 100.0], [2, 3, 100.0]]
+    protected_case = from_official(
+        source.block_count,
+        source.area_targets,
+        source.b2b_connectivity,
+        source.p2b_connectivity,
+        source.pins_pos,
+        source.constraints,
+    )
+
+    assert learned._post_tail_group_repair(
+        source, protected_case, placements
+    ) == placements
+
+
 def test_raw_infeasible_or_tradeoff_candidate_cannot_trigger_pareto_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

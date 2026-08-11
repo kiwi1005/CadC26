@@ -189,6 +189,32 @@ feasible outputs, 32 improvements, 68 ties, zero regressions, and weighted cost
 `6.45--6.59 s` versus `0.508 s` analytic, A100 evidence is absent, and active
 ranker pruning is unproven.
 
+## Q7 — QoR-first constraint preservation
+
+- [x] Trace MIB loss through shape construction, projection, raw repair, and
+  final selection.
+- [x] Broadcast compatible shared MIB shapes in the common learned geometry
+  projection while preserving hard targets and one-percent area tolerance.
+- [x] Add a bounded exact post-tail group repair with componentwise soft and
+  bbox/HPWL Pareto guards.
+- [x] Uncap cases 96 and 98 without collective rollout or active ranker pruning.
+- [x] Eliminate aggregate official-visible MIB violations (`243 -> 0`).
+- [x] Cross at least 8/12 original near-cap cases (`11/12`).
+- [x] Preserve 100/100 hard feasibility and zero regressions against analytic.
+- [~] Preserve every previously retained Q6 learned improvement.
+- [ ] Add a bounded case-signature portfolio challenger for the six Q6-to-Q7
+  regressions, especially case 63, without case-ID memorization.
+- [ ] Rerun three deterministic seeds after the portfolio selection fix.
+
+Current gate: **QOR CHECKPOINT PASS; DEFAULT PROMOTION HOLD**. Q7 improves
+weighted capped cost from Q6 `9.724486` to `8.989727`, raises exact uncapped
+cases from 32 to 70, and improves the 106--120 weighted cost from `9.814157` to
+`9.190193`. Runtime increases only about 0.05 seconds at p50 and p95 relative
+to Q6, but remains far above analytic. Direct Q6-to-Q7 comparison still has six
+per-case regressions because MIB-preserving geometry replaced the old candidate
+family. Full evidence is in
+[`hcfp5090_q7_mib_group_repair_results_2026-08-11.md`](hcfp5090_q7_mib_group_repair_results_2026-08-11.md).
+
 ## Required verification per code-bearing commit
 
 ```bash

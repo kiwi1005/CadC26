@@ -24,7 +24,7 @@ from hcfp.case import FloorplanCase, from_official
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
 from hcfp.collective_runtime import CollectiveForceController
-from hcfp.constraints.construction import construct_constraint_variants
+from hcfp.constraints.construction import connect_groups, construct_constraint_variants
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
@@ -407,6 +407,7 @@ def select_official_from_analysis(
     placements = to_official_placements(source, case, analysis.result.selected)
     placements = _repair_constraint_candidate(
         source,
+        case,
         placements,
         snapshot,
         selected_source,
@@ -424,6 +425,7 @@ def select_official_from_analysis(
             analysis,
             placements,
         )
+        placements = _post_tail_group_repair(source, case, placements)
         _record_ranker_selection_counterfactual(
             source,
             case,
@@ -453,6 +455,7 @@ def select_official_from_analysis(
         candidate = to_official_placements(source, case, candidates[index])
         candidate = _repair_constraint_candidate(
             source,
+            case,
             candidate,
             snapshot,
             f"candidate_{index}",
@@ -946,6 +949,7 @@ def _record_ranker_selection_counterfactual(
             )
             placement = _repair_constraint_candidate(
                 source,
+                case,
                 placement,
                 snapshot,
                 source_name,
@@ -1156,6 +1160,7 @@ def _raw_constraint_pareto_guard(
 
 def _repair_constraint_candidate(
     source: Any,
+    case: FloorplanCase,
     placements: list[tuple[float, float, float, float]],
     snapshot: dict[str, object],
     candidate_source: object,
@@ -1164,7 +1169,93 @@ def _repair_constraint_candidate(
     if record is None:
         return placements
     repaired = list(repair_raw_constraints(source, placements, record).placements)
-    return repaired if verify_feasible(source, repaired) else placements
+    repaired_feasible = verify_feasible(source, repaired)
+    if not repaired_feasible:
+        return placements
+    if not verify_feasible(source, placements):
+        return repaired
+    try:
+        return (
+            repaired
+            if _dominates(
+                _raw_quality(source, case, repaired),
+                _raw_quality(source, case, placements),
+            )
+            else placements
+        )
+    except (TypeError, ValueError):
+        return placements
+
+
+def _post_tail_group_repair(
+    source: Any,
+    case: FloorplanCase,
+    placements: list[tuple[float, float, float, float]],
+    *,
+    max_moves: int = 12,
+) -> list[tuple[float, float, float, float]]:
+    """Apply a bounded exact replay only when every measured objective improves."""
+
+    if max_moves <= 0 or not case.group_membership.numel():
+        return placements
+    soft_case = {
+        "normalized": False,
+        "boundary_bits": case.boundary_bits.detach().to(device="cpu"),
+        "group_membership": case.group_membership.detach().to(device="cpu"),
+        "mib_membership": case.mib_membership.detach().to(device="cpu"),
+    }
+    before_soft = soft_violation_normalized(soft_case, placements)
+    if before_soft.raw_grouping == 0:
+        return placements
+    try:
+        _, details = connect_groups(
+            torch.as_tensor(placements, dtype=torch.float64, device="cpu"),
+            case.group_membership,
+            preplaced_mask=case.preplaced_mask,
+            b2b_weight=case.b2b_weight,
+        )
+        moves = tuple(details.get("moves", ()))[:max_moves]
+        if not moves:
+            return placements
+        repair_source = {
+            "normalized": False,
+            "area": _field(source, "area_targets"),
+            "constraints": _field(source, "constraints"),
+            "target": _field(source, "target_positions"),
+            "preplaced_mask": case.preplaced_mask.detach().to(device="cpu"),
+            "raw_preplaced_validated": case.raw_preplaced_validated,
+            **soft_case,
+        }
+        working = placements
+        working_soft = before_soft
+        for move in moves:
+            repaired = list(
+                repair_raw_constraints(
+                    repair_source,
+                    working,
+                    {"details": {"group": {"moves": (move,)}}},
+                ).placements
+            )
+            after_soft = soft_violation_normalized(soft_case, repaired)
+            componentwise_safe = (
+                after_soft.raw_boundary <= working_soft.raw_boundary
+                and after_soft.raw_grouping <= working_soft.raw_grouping
+                and after_soft.raw_mib <= working_soft.raw_mib
+            )
+            if (
+                componentwise_safe
+                and verify_feasible(source, repaired)
+                and _dominates(
+                    _raw_quality(source, case, repaired),
+                    _raw_quality(source, case, working),
+                )
+            ):
+                working = repaired
+                working_soft = after_soft
+        return working
+    except (RuntimeError, TypeError, ValueError):
+        pass
+    return placements
 
 
 def _constraint_records(
