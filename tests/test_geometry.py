@@ -47,8 +47,10 @@ def test_shape_projection_broadcasts_compatible_mib_shape() -> None:
     log_aspect = torch.tensor([[1.0, -1.0, 0.5], [-0.5, 0.5, -0.5]])
 
     wh = exact_shape_projection(case, log_aspect)
+    legacy_wh = exact_shape_projection(case, log_aspect, enforce_mib=False)
 
     assert torch.equal(wh[:, 0], wh[:, 1])
+    assert not torch.equal(legacy_wh[:, 0], legacy_wh[:, 1])
     actual_area = wh[:, 0, 0] * wh[:, 0, 1]
     relative_error = torch.abs(actual_area[:, None] - case.area[:2]) / case.area[:2]
     assert bool((relative_error <= 1.0e-2).all())

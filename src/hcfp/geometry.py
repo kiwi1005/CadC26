@@ -32,7 +32,12 @@ def log_aspect_from_xywh(xywh: Tensor) -> Tensor:
     return torch.log(boxes[..., 2] / boxes[..., 3])
 
 
-def exact_shape_projection(case: FloorplanCase, log_aspect: Tensor) -> Tensor:
+def exact_shape_projection(
+    case: FloorplanCase,
+    log_aspect: Tensor,
+    *,
+    enforce_mib: bool = True,
+) -> Tensor:
     """Reconstruct dimensions with hard targets and compatible shared MIB shapes."""
 
     ratio_log = torch.as_tensor(log_aspect, dtype=torch.float32, device=case.area.device)
@@ -51,7 +56,11 @@ def exact_shape_projection(case: FloorplanCase, log_aspect: Tensor) -> Tensor:
         hard = hard.unsqueeze(0)
         target_wh = target_wh.unsqueeze(0)
     dimensions = torch.where(hard.unsqueeze(-1), target_wh, dimensions)
-    return _project_compatible_mib_shapes(case, dimensions)
+    return (
+        _project_compatible_mib_shapes(case, dimensions)
+        if enforce_mib
+        else dimensions
+    )
 
 
 def _project_compatible_mib_shapes(
@@ -101,9 +110,15 @@ def _project_compatible_mib_shapes(
     return projected if batched else projected[0]
 
 
-def xywh_from_state(case: FloorplanCase, center: Tensor, log_aspect: Tensor) -> Tensor:
+def xywh_from_state(
+    case: FloorplanCase,
+    center: Tensor,
+    log_aspect: Tensor,
+    *,
+    enforce_mib: bool = True,
+) -> Tensor:
     center_tensor = torch.as_tensor(center, dtype=torch.float32, device=case.area.device)
-    dimensions = exact_shape_projection(case, log_aspect)
+    dimensions = exact_shape_projection(case, log_aspect, enforce_mib=enforce_mib)
     if center_tensor.shape != dimensions.shape:
         raise ValueError("center and reconstructed dimensions must have matching shapes")
     return torch.cat((center_tensor - 0.5 * dimensions, dimensions), dim=-1)

@@ -226,6 +226,28 @@ def analyze_case_with_checkpoint(
             ),
             provenance=topology_provenance,
         )
+        if _needs_legacy_mib_challenger(case):
+            legacy_provenance: dict[str, object] = {}
+            legacy_population = _learned_population(
+                case,
+                model,
+                learned_cfg,
+                seed=(
+                    int(str(metadata["state_hash"])[:8], 16)
+                    if learned_cfg.seed is None
+                    else learned_cfg.seed
+                ),
+                provenance=legacy_provenance,
+                enforce_mib=False,
+            )
+            learned_population, topology_provenance = (
+                _merge_legacy_mib_challenger(
+                    learned_population,
+                    topology_provenance,
+                    legacy_population,
+                    legacy_provenance,
+                )
+            )
         topology_count = int(
             topology_provenance.get("topology_seed_count", 0)
         )
@@ -426,6 +448,12 @@ def select_official_from_analysis(
             placements,
         )
         placements = _post_tail_group_repair(source, case, placements)
+        placements = _legacy_mib_challenger_guard(
+            source,
+            case,
+            analysis,
+            placements,
+        )
         _record_ranker_selection_counterfactual(
             source,
             case,
@@ -1258,6 +1286,61 @@ def _post_tail_group_repair(
     return placements
 
 
+def _legacy_mib_challenger_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    current: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Select a tagged legacy repair only when its exact incumbent key wins."""
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    records = tuple(
+        record
+        for record in _constraint_records(snapshot).values()
+        if record.get("challenger") == "legacy_mib"
+        and record.get("stage") == "initial"
+    )
+    if not records:
+        return current
+    try:
+        current_quality = _raw_quality(source, case, current)
+    except (TypeError, ValueError):
+        return current
+    current_key = (current_quality[0], current_quality[1] + 0.05 * current_quality[2])
+    admitted: list[
+        tuple[tuple[float, float], int, list[tuple[float, float, float, float]]]
+    ] = []
+    projected = analysis.analytic.projected_candidates
+    for record in records:
+        index = _candidate_index(record.get("source"))
+        if index is None or not 0 <= index < projected.shape[0]:
+            continue
+        placement = to_official_placements(
+            source,
+            case,
+            projected[index].detach().to(device="cpu", dtype=torch.float32),
+        )
+        placement = _repair_constraint_candidate(
+            source,
+            case,
+            placement,
+            snapshot,
+            record["source"],
+        )
+        placement = _post_tail_group_repair(source, case, placement)
+        if not verify_feasible(source, placement):
+            continue
+        try:
+            quality = _raw_quality(source, case, placement)
+        except (TypeError, ValueError):
+            continue
+        key = (quality[0], quality[1] + 0.05 * quality[2])
+        if key < current_key:
+            admitted.append((key, index, placement))
+    return min(admitted, key=lambda item: (item[0], item[1]))[2] if admitted else current
+
+
 def _constraint_records(
     snapshot: dict[str, object],
 ) -> dict[str, dict[str, object]]:
@@ -1332,10 +1415,16 @@ def _learned_population(
     *,
     seed: int,
     provenance: dict[str, object] | None = None,
+    enforce_mib: bool = True,
 ) -> Tensor:
     population = config.analytic.dynamics.population
     fallback = safe_shelf(case).to(device=case.area.device, dtype=torch.float32)
-    base = initialize_population(case, config.analytic.dynamics, fallback)
+    base = initialize_population(
+        case,
+        config.analytic.dynamics,
+        fallback,
+        enforce_mib=enforce_mib,
+    )
     generator = torch.Generator(device="cpu").manual_seed(int(seed))
     noise = torch.randn(
         (population, case.n, 3), generator=generator, dtype=torch.float32
@@ -1375,7 +1464,12 @@ def _learned_population(
 
     center = base.center + output.center_residual
     log_aspect = (base.log_aspect + output.log_aspect_residual).clamp(-4.0, 4.0)
-    learned_boxes = xywh_from_state(case, center, log_aspect)
+    learned_boxes = xywh_from_state(
+        case,
+        center,
+        log_aspect,
+        enforce_mib=enforce_mib,
+    )
     topology_sources = learned_boxes
     if config.tail_topk is not None and config.tail_topk < population:
         features = candidate_features(case, learned_boxes, fallback)
@@ -1432,6 +1526,101 @@ def _learned_population(
         if failure_reason is not None:
             provenance["topology_seed_failure_reason"] = failure_reason
     return learned_boxes
+
+
+def _needs_legacy_mib_challenger(case: FloorplanCase) -> bool:
+    """Route a legacy-shape challenger for dense-anchor, small-MIB cases."""
+
+    if not 80 <= case.n <= 88 or not case.mib_membership.numel():
+        return False
+    hard = case.fixed_mask | case.preplaced_mask
+    if float(hard.float().mean()) < 0.18:
+        return False
+    return any(
+        int(row.sum()) == 3 and int((row & hard).sum()) == 1
+        for row in case.mib_membership
+    )
+
+
+def _merge_legacy_mib_challenger(
+    primary: Tensor,
+    primary_provenance: dict[str, object],
+    legacy: Tensor,
+    legacy_provenance: dict[str, object],
+) -> tuple[Tensor, dict[str, object]]:
+    def parts(
+        population: Tensor,
+        provenance: dict[str, object],
+    ) -> tuple[Tensor, Tensor, Tensor, int]:
+        topology_count = int(provenance.get("topology_seed_count", 0))
+        constraint_count = int(provenance.get("constraint_seed_count", 0))
+        residual_count = int(population.shape[0]) - topology_count - constraint_count
+        if residual_count < 0:
+            raise ValueError("candidate provenance exceeds population size")
+        return (
+            population[:residual_count],
+            population[residual_count : residual_count + constraint_count],
+            population[residual_count + constraint_count :],
+            residual_count,
+        )
+
+    primary_parts = parts(primary, primary_provenance)
+    legacy_parts = parts(legacy, legacy_provenance)
+    primary_topology_count = int(primary_parts[2].shape[0])
+    merged = torch.cat(
+        (
+            primary_parts[0],
+            legacy_parts[0],
+            primary_parts[1],
+            legacy_parts[1],
+            primary_parts[2],
+            legacy_parts[2],
+        ),
+        dim=0,
+    )
+    provenance = dict(primary_provenance)
+    provenance.update(
+        {
+            "legacy_mib_challenger": True,
+            "topology_seed_attempted": True,
+            "topology_seed_accepted": bool(primary_parts[2].numel())
+            or bool(legacy_parts[2].numel()),
+            "topology_seed_count": int(primary_parts[2].shape[0])
+            + int(legacy_parts[2].shape[0]),
+            "constraint_seed_attempted": True,
+            "constraint_seed_accepted": bool(primary_parts[1].numel())
+            or bool(legacy_parts[1].numel()),
+            "constraint_seed_count": int(primary_parts[1].shape[0])
+            + int(legacy_parts[1].shape[0]),
+            "topology_seed_orders": tuple(
+                primary_provenance.get("topology_seed_orders", ())
+            )
+            + tuple(legacy_provenance.get("topology_seed_orders", ())),
+        }
+    )
+    legacy_records = []
+    for raw in legacy_provenance.get("constraint_seed_records", ()):
+        record = dict(raw)
+        record["challenger"] = "legacy_mib"
+        record["topology_seed_index"] = (
+            int(record["topology_seed_index"]) + primary_topology_count
+        )
+        legacy_records.append(record)
+    provenance["constraint_seed_records"] = tuple(
+        primary_provenance.get("constraint_seed_records", ())
+    ) + tuple(legacy_records)
+    primary_catalog = primary_provenance.get("topology_order_catalog", {})
+    legacy_catalog = legacy_provenance.get("topology_order_catalog", {})
+    if isinstance(primary_catalog, dict) and isinstance(legacy_catalog, dict):
+        provenance["topology_order_catalog"] = {
+            **primary_catalog,
+            **legacy_catalog,
+        }
+    for key in ("constraint_seed_pool_size", "topology_seed_pool_size"):
+        provenance[key] = int(primary_provenance.get(key, 0)) + int(
+            legacy_provenance.get(key, 0)
+        )
+    return merged, provenance
 
 
 def _constraint_seed_candidates(

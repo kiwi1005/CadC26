@@ -101,3 +101,46 @@ SHA-256 6abb7264b2849e555b55a3c02a6c0ea62f005c40c585972ab8ff080fc3929d7a
 
 Static type checking was not run because the active Python environment does
 not contain `mypy`.
+
+## Legacy-shape portfolio checkpoint
+
+The bounded challenger is now active only for an observable rare signature:
+
+- 80--88 blocks;
+- at least 18% fixed/preplaced blocks;
+- a three-member MIB group with exactly one hard-shape member.
+
+The challenger reuses the learned structure path with legacy per-block shape
+reconstruction, tags its constraint candidates in provenance, and permits an
+exact-feasible repaired challenger to replace the incumbent only under the
+same lexicographic key used by `IncumbentManager`: normalized soft violation,
+then `bbox + 0.05 * HPWL`. It does not inspect case IDs or stored validation
+solutions.
+
+On the full official visible 100, this changes only case 63 and restores its Q6
+cost exactly:
+
+| Metric | Q7 | Q7 + portfolio | Delta |
+|---|---:|---:|---:|
+| Hard feasible | 100/100 | 100/100 | 0 |
+| Exact uncapped | 70 | 71 | +1 |
+| Weighted capped cost | 8.989727 | 8.979482 | -0.010245 |
+| 106--120 weighted cost | 9.190193 | 9.190193 | 0 |
+| Runtime p50 | 2.59693 s | 2.60515 s | +0.00822 s |
+| Runtime p95 | 6.60742 s | 6.86615 s | +0.25873 s |
+| Case 63 | 9.999999 | 7.427046 | uncapped |
+
+The portfolio is componentwise non-regressive against Q7: one improvement and
+99 exact ties. Against Q6 it records 65 improvements, 30 ties, and five small
+regressions; the former case-63 regression is eliminated. Those remaining five
+cases are quality-only differences at cases 18, 19, 25, 31, and 84, with no
+hard-feasibility regression. Default promotion therefore remains held pending
+either a cheaper general legacy challenger or explicit acceptance of these
+small Q6 tradeoffs.
+
+Portfolio evidence:
+
+```text
+artifacts/benchmarks/hcfp5090-q7-legacy-portfolio-official100-seed7001.json
+SHA-256 385fa9a0251ed0953ec3bc4a6164d57fa3e27340682008a4360754e53a042b15
+```

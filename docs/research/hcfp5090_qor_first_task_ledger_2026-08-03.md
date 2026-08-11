@@ -202,7 +202,7 @@ ranker pruning is unproven.
 - [x] Cross at least 8/12 original near-cap cases (`11/12`).
 - [x] Preserve 100/100 hard feasibility and zero regressions against analytic.
 - [~] Preserve every previously retained Q6 learned improvement.
-- [ ] Add a bounded case-signature portfolio challenger for the six Q6-to-Q7
+- [x] Add a bounded case-signature portfolio challenger for the six Q6-to-Q7
   regressions, especially case 63, without case-ID memorization.
 - [ ] Rerun three deterministic seeds after the portfolio selection fix.
 
@@ -214,6 +214,11 @@ to Q6, but remains far above analytic. Direct Q6-to-Q7 comparison still has six
 per-case regressions because MIB-preserving geometry replaced the old candidate
 family. Full evidence is in
 [`hcfp5090_q7_mib_group_repair_results_2026-08-11.md`](hcfp5090_q7_mib_group_repair_results_2026-08-11.md).
+
+The first bounded portfolio slice now restores case 63 from the cap to
+`7.427046`, improves Q7 weighted cost further to `8.979482`, and changes no
+other Q7 case. Five small Q6-to-Q7 quality regressions remain, while the
+portfolio stays at 100/100 hard feasible and zero regressions against Q7.
 
 ## Required verification per code-bearing commit
 

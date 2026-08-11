@@ -98,6 +98,8 @@ def initialize_population(
     case: FloorplanCase,
     config: DynamicsConfig,
     initial_xywh: Tensor | None = None,
+    *,
+    enforce_mib: bool = True,
 ) -> PopulationState:
     k, n = config.population, case.n
     device = case.area.device
@@ -106,7 +108,7 @@ def initialize_population(
     target_wh = case.target[:, 2:4].clamp_min(1.0e-30)
     hard_ratio = torch.log(target_wh[:, 0] / target_wh[:, 1]).to(device=device, dtype=torch.float32)
     log_aspect[:, hard] = hard_ratio[hard]
-    dimensions = exact_shape_projection(case, log_aspect)
+    dimensions = exact_shape_projection(case, log_aspect, enforce_mib=enforce_mib)
 
     candidate_id = torch.arange(k, dtype=torch.float32, device=device)
     layout_ratio = torch.exp(torch.linspace(-0.7, 0.7, k, device=device))

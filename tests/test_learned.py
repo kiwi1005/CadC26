@@ -1724,6 +1724,113 @@ def test_post_tail_group_repair_accepts_only_exact_pareto_improvement() -> None:
     ) == placements
 
 
+def test_legacy_mib_challenger_uses_observable_anchor_signature() -> None:
+    import hcfp.learned as learned
+
+    n = 84
+    constraints = torch.zeros((n, 5), dtype=torch.long)
+    constraints[:16, 0] = 1
+    constraints[[0, 20, 21], 2] = 1
+    targets = torch.full((n, 4), -1.0)
+    targets[:16, 2:4] = 1.0
+    case = from_official(n, torch.ones(n), [], [], [], constraints, targets)
+
+    assert learned._needs_legacy_mib_challenger(case)
+
+    constraints[10:16, 0] = 0
+    targets[10:16, 2:4] = -1.0
+    sparse_anchor_case = from_official(
+        n, torch.ones(n), [], [], [], constraints, targets
+    )
+    assert not learned._needs_legacy_mib_challenger(sparse_anchor_case)
+
+
+def test_legacy_portfolio_merge_preserves_candidate_stage_order() -> None:
+    import hcfp.learned as learned
+
+    primary = torch.arange(3.0).view(3, 1, 1).expand(-1, 2, 4)
+    legacy = torch.arange(3.0, 6.0).view(3, 1, 1).expand(-1, 2, 4)
+    primary_provenance = {
+        "topology_seed_count": 1,
+        "constraint_seed_count": 1,
+        "topology_seed_orders": ({"name": "primary"},),
+        "constraint_seed_records": ({"topology_seed_index": 0},),
+    }
+    legacy_provenance = {
+        "topology_seed_count": 1,
+        "constraint_seed_count": 1,
+        "topology_seed_orders": ({"name": "legacy"},),
+        "constraint_seed_records": ({"topology_seed_index": 0},),
+    }
+
+    population, provenance = learned._merge_legacy_mib_challenger(
+        primary,
+        primary_provenance,
+        legacy,
+        legacy_provenance,
+    )
+
+    assert population[:, 0, 0].tolist() == [0.0, 3.0, 1.0, 4.0, 2.0, 5.0]
+    assert provenance["topology_seed_count"] == 2
+    assert provenance["constraint_seed_count"] == 2
+    assert provenance["topology_seed_orders"] == (
+        {"name": "primary"},
+        {"name": "legacy"},
+    )
+    assert provenance["constraint_seed_records"][-1]["topology_seed_index"] == 1
+    assert provenance["constraint_seed_records"][-1]["challenger"] == "legacy_mib"
+
+
+def test_legacy_mib_challenger_uses_exact_incumbent_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hcfp.learned as learned
+
+    analysis = _pareto_analysis()
+    analysis.analytic.incumbent_snapshot["constraint_seed_provenance"] = (
+        {
+            "source": "candidate_3",
+            "challenger": "legacy_mib",
+            "stage": "initial",
+        },
+    )
+    monkeypatch.setattr(
+        learned,
+        "to_official_placements",
+        lambda _source, _case, candidate: [
+            tuple(float(value) for value in row) for row in candidate.tolist()
+        ],
+    )
+    monkeypatch.setattr(
+        learned,
+        "_repair_constraint_candidate",
+        lambda _source, _case, rows, _snapshot, _candidate: rows,
+    )
+    monkeypatch.setattr(
+        learned,
+        "_post_tail_group_repair",
+        lambda _source, _case, rows: rows,
+    )
+    monkeypatch.setattr(learned, "verify_feasible", lambda *_args: True)
+    monkeypatch.setattr(
+        learned,
+        "_raw_quality",
+        lambda _source, _case, rows: {
+            20.0: (2.0, 10.0, 10.0),
+            30.0: (1.0, 30.0, 30.0),
+        }[rows[0][0]],
+    )
+
+    selected = learned._legacy_mib_challenger_guard(
+        _source(),
+        object(),
+        analysis,
+        [(20.0, 0.0, 2.0, 2.0), (23.0, 0.0, 2.0, 2.0)],
+    )
+
+    assert selected[0][0] == 30.0
+
+
 def test_raw_infeasible_or_tradeoff_candidate_cannot_trigger_pareto_guard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
