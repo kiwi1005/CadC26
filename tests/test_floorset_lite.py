@@ -125,6 +125,18 @@ def test_training_stream_can_cap_layouts_per_source_file(tmp_path: Path) -> None
     assert [sample.sample_id.split("/")[0] for sample in samples] == ["worker_0", "worker_1"]
 
 
+def test_training_stream_filters_block_count_before_sample_construction(tmp_path: Path) -> None:
+    layout = tmp_path / "floorset_lite/worker_0/layouts_0.pth"
+    layout.parent.mkdir(parents=True)
+    mixed = [tensor.repeat((2,) + (1,) * (tensor.ndim - 1)) for tensor in _layout_payload()]
+    mixed[0][1, 2, 0] = -1.0
+    torch.save(mixed, layout)
+
+    samples = list(iter_floorset_lite(tmp_path, min_blocks=3, max_blocks=3))
+
+    assert [sample.case.n for sample in samples] == [3]
+
+
 def test_file_cap_counts_score_aware_rejections(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

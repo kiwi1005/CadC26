@@ -108,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
                 limit=args.sample_limit,
                 seed=args.seed,
                 score_aware=args.sampling == "score-aware",
+                min_blocks=args.min_blocks,
+                max_blocks=args.max_blocks,
             )
         else:
             stream = (
@@ -116,8 +118,6 @@ def main(argv: list[str] | None = None) -> int:
                 for sample in iter_shard(path)
             )
         for sample in stream:
-            if not args.min_blocks <= sample.case.n <= args.max_blocks:
-                continue
             if sample.sample_id.lower().startswith(("validation-", "val-", "official/")):
                 raise ValueError(
                     f"official validation-like sample ID is forbidden: {sample.sample_id}"

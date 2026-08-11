@@ -222,7 +222,13 @@ def test_training_cli_reports_exact_consumed_direct_stream(
 
     def sample_iterator(path, **kwargs):
         assert Path(path).resolve() == root.resolve()
-        assert kwargs == {"limit": 2, "seed": 10, "score_aware": True}
+        assert kwargs == {
+            "limit": 2,
+            "seed": 10,
+            "score_aware": True,
+            "min_blocks": 1,
+            "max_blocks": 120,
+        }
         return iter(samples)
 
     def fake_train_steps(_model, sample_factory, _optimizer, *, steps, **_kwargs):

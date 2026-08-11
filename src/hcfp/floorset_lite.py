@@ -161,6 +161,8 @@ def iter_floorset_lite(
     seed: int | None = None,
     score_aware: bool = False,
     max_layouts_per_file: int | None = None,
+    min_blocks: int | None = None,
+    max_blocks: int | None = None,
 ) -> Iterator[DataSample]:
     """Yield training samples one source file at a time without copying 1M cases."""
 
@@ -170,6 +172,8 @@ def iter_floorset_lite(
         seed=seed,
         score_aware=score_aware,
         max_layouts_per_file=max_layouts_per_file,
+        min_blocks=min_blocks,
+        max_blocks=max_blocks,
     ):
         yield sample
 
@@ -181,6 +185,8 @@ def iter_floorset_lite_with_source(
     seed: int | None = None,
     score_aware: bool = False,
     max_layouts_per_file: int | None = None,
+    min_blocks: int | None = None,
+    max_blocks: int | None = None,
 ) -> Iterator[tuple[DataSample, dict[str, Any]]]:
     """Yield samples with exact official-coordinate sources for raw replay."""
 
@@ -190,6 +196,8 @@ def iter_floorset_lite_with_source(
         seed=seed,
         score_aware=score_aware,
         max_layouts_per_file=max_layouts_per_file,
+        min_blocks=min_blocks,
+        max_blocks=max_blocks,
     )
 
 
@@ -200,6 +208,8 @@ def _iter_floorset_lite_with_source(
     seed: int | None,
     score_aware: bool,
     max_layouts_per_file: int | None,
+    min_blocks: int | None,
+    max_blocks: int | None,
 ) -> Iterator[tuple[DataSample, dict[str, Any]]]:
 
     root = Path(root).resolve()
@@ -207,6 +217,10 @@ def _iter_floorset_lite_with_source(
         raise ValueError("visible validation/test paths are forbidden for training")
     if max_layouts_per_file is not None and max_layouts_per_file <= 0:
         raise ValueError("max_layouts_per_file must be positive")
+    if min_blocks is not None and min_blocks <= 0:
+        raise ValueError("min_blocks must be positive")
+    if max_blocks is not None and (max_blocks <= 0 or max_blocks < (min_blocks or 1)):
+        raise ValueError("max_blocks must be positive and not less than min_blocks")
     layout_root = root if root.name == "floorset_lite" else root / "floorset_lite"
     files = sorted(layout_root.glob("worker_*/layouts*"))
     if not files:
@@ -222,6 +236,13 @@ def _iter_floorset_lite_with_source(
             generator.shuffle(layout_indices)
         for file_examined, layout_index in enumerate(layout_indices, start=1):
             block_count = int((payload[0][layout_index][:, 0] != -1).sum().item())
+            if (
+                (min_blocks is not None and block_count < min_blocks)
+                or (max_blocks is not None and block_count > max_blocks)
+            ):
+                if max_layouts_per_file is not None and file_examined >= max_layouts_per_file:
+                    break
+                continue
             if score_aware and generator.random() > score_aware_acceptance(block_count):
                 if max_layouts_per_file is not None and file_examined >= max_layouts_per_file:
                     break
