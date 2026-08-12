@@ -40,6 +40,7 @@ class ModelConfig:
     btree_enabled: bool = False
     constraint_enabled: bool = False
     collective_enabled: bool = False
+    baseline_enabled: bool = False
     collective_message_dim: int = 128
     collective_passes: int = 3
     collective_position_bound: float = 0.05
@@ -49,7 +50,11 @@ class ModelConfig:
     def __post_init__(self) -> None:
         if self.hidden_dim <= 0 or self.encoder_layers <= 0:
             raise ValueError("hidden_dim and encoder_layers must be positive")
-        if self.population_embed_dim <= 0 or self.force_channels <= 0 or self.candidate_metric_dim <= 0:
+        if (
+            self.population_embed_dim <= 0
+            or self.force_channels <= 0
+            or self.candidate_metric_dim <= 0
+        ):
             raise ValueError("model dimensions must be positive")
         if self.residual_bound <= 0 or self.aspect_residual_bound <= 0:
             raise ValueError("residual bounds must be positive")
@@ -61,7 +66,12 @@ class ModelConfig:
             raise ValueError("ranker_use_scene_embedding must be boolean")
         if type(self.btree_enabled) is not bool:
             raise ValueError("btree_enabled must be boolean")
-        if not isinstance(self.ranker_feature_version, str) or not self.ranker_feature_version:
+        if type(self.baseline_enabled) is not bool:
+            raise ValueError("baseline_enabled must be boolean")
+        if (
+            not isinstance(self.ranker_feature_version, str)
+            or not self.ranker_feature_version
+        ):
             raise ValueError("ranker_feature_version must be a non-empty string")
         if self.collective_message_dim <= 0 or self.collective_passes <= 0:
             raise ValueError("collective dimensions and passes must be positive")
@@ -70,19 +80,30 @@ class ModelConfig:
         if not 0.0 < self.collective_gate_delta < 1.0:
             raise ValueError("collective_gate_delta must be in (0, 1)")
         if self.collective_enabled and self.force_channels != 7:
-            raise ValueError("collective dynamics require the canonical seven force channels")
+            raise ValueError(
+                "collective dynamics require the canonical seven force channels"
+            )
         mean = tuple(float(value) for value in self.ranker_feature_mean)
         scale = tuple(float(value) for value in self.ranker_feature_scale)
         object.__setattr__(self, "ranker_feature_mean", mean)
         object.__setattr__(self, "ranker_feature_scale", scale)
         if bool(mean) != bool(scale):
-            raise ValueError("ranker feature mean and scale must be configured together")
-        if mean and (len(mean) != self.candidate_metric_dim or len(scale) != self.candidate_metric_dim):
-            raise ValueError("ranker feature normalization must match candidate_metric_dim")
+            raise ValueError(
+                "ranker feature mean and scale must be configured together"
+            )
+        if mean and (
+            len(mean) != self.candidate_metric_dim
+            or len(scale) != self.candidate_metric_dim
+        ):
+            raise ValueError(
+                "ranker feature normalization must match candidate_metric_dim"
+            )
         if any(not math.isfinite(value) for value in (*mean, *scale)) or any(
             value <= 0.0 for value in scale
         ):
-            raise ValueError("ranker feature normalization must be finite with positive scales")
+            raise ValueError(
+                "ranker feature normalization must be finite with positive scales"
+            )
 
 
 @dataclass(frozen=True)
@@ -102,6 +123,8 @@ class ModelOutput:
     mib_log_aspect: Tensor | None = None
     btree_root_logits: Tensor | None = None
     btree_edge_logits: Tensor | None = None
+    baseline_log_area: Tensor | None = None
+    baseline_log_hpwl: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -156,8 +179,12 @@ class SceneEncoder(nn.Module):
         self.input = nn.Linear(_NODE_FEATURES, config.hidden_dim)
         self.message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
         if config.topology_enabled:
-            self.group_message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
-            self.mib_message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+            self.group_message = nn.Linear(
+                config.hidden_dim, config.hidden_dim, bias=False
+            )
+            self.mib_message = nn.Linear(
+                config.hidden_dim, config.hidden_dim, bias=False
+            )
         self.layers = _mlp(config.hidden_dim, config.encoder_layers)
 
     def forward(self, case: FloorplanCase) -> Tensor:
@@ -205,11 +232,23 @@ class SceneEncoder(nn.Module):
             pin_weight.index_add_(0, block_index, weight)
             pin_centroid.index_add_(0, block_index, weighted_pins)
             pin_centroid = pin_centroid / pin_weight.clamp_min(1.0e-6)[:, None]
-            pin_spread.index_add_(0, block_index, (pins[pin_index] - pin_centroid[block_index]).abs() * weight[:, None])
+            pin_spread.index_add_(
+                0,
+                block_index,
+                (pins[pin_index] - pin_centroid[block_index]).abs() * weight[:, None],
+            )
             pin_spread = pin_spread / pin_weight.clamp_min(1.0e-6)[:, None]
 
-        group_present = case.group_membership.to(device=device).any(dim=0) if case.group_membership.numel() else torch.zeros(case.n, dtype=torch.bool, device=device)
-        mib_present = case.mib_membership.to(device=device).any(dim=0) if case.mib_membership.numel() else torch.zeros(case.n, dtype=torch.bool, device=device)
+        group_present = (
+            case.group_membership.to(device=device).any(dim=0)
+            if case.group_membership.numel()
+            else torch.zeros(case.n, dtype=torch.bool, device=device)
+        )
+        mib_present = (
+            case.mib_membership.to(device=device).any(dim=0)
+            if case.mib_membership.numel()
+            else torch.zeros(case.n, dtype=torch.bool, device=device)
+        )
         return torch.cat(
             (
                 torch.log(case.area).unsqueeze(1),
@@ -246,7 +285,9 @@ class StructureHeads(nn.Module):
         )
 
     def forward(self, case: FloorplanCase, embedding: Tensor) -> tuple[Tensor, Tensor]:
-        pair = torch.tanh(self.left(embedding)[:, None, :] + self.right(embedding)[None, :, :])
+        pair = torch.tanh(
+            self.left(embedding)[:, None, :] + self.right(embedding)[None, :, :]
+        )
         precedence = self.precedence(pair).float()
         raw_outline = self.outline(embedding.mean(dim=0)).float()
         utilization = 0.45 + 0.50 * torch.sigmoid(raw_outline[0])
@@ -264,12 +305,16 @@ class ResidualInitializer(nn.Module):
         self.config = config
         self.population = nn.Embedding(256, config.population_embed_dim)
         self.head = nn.Sequential(
-            nn.Linear(config.hidden_dim + config.population_embed_dim, config.hidden_dim),
+            nn.Linear(
+                config.hidden_dim + config.population_embed_dim, config.hidden_dim
+            ),
             nn.SiLU(),
             nn.Linear(config.hidden_dim, 3),
         )
 
-    def forward(self, case: FloorplanCase, embedding: Tensor, population: int) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, case: FloorplanCase, embedding: Tensor, population: int
+    ) -> tuple[Tensor, Tensor]:
         if population <= 0 or population > self.population.num_embeddings:
             raise ValueError("population must be in [1, 256]")
         ids = torch.arange(population, device=embedding.device)
@@ -279,7 +324,9 @@ class ResidualInitializer(nn.Module):
         center = torch.tanh(raw[..., :2]) * self.config.residual_bound
         aspect = torch.tanh(raw[..., 2]) * self.config.aspect_residual_bound
         center[:, case.preplaced_mask.to(device=center.device)] = 0.0
-        aspect[:, (case.fixed_mask | case.preplaced_mask).to(device=aspect.device)] = 0.0
+        aspect[:, (case.fixed_mask | case.preplaced_mask).to(device=aspect.device)] = (
+            0.0
+        )
         return center, aspect
 
 
@@ -303,9 +350,13 @@ class RectifiedFlowHead(nn.Module):
         time: float | Tensor,
     ) -> Tensor:
         if state is None:
-            work = torch.zeros(population, case.n, 3, dtype=embedding.dtype, device=embedding.device)
+            work = torch.zeros(
+                population, case.n, 3, dtype=embedding.dtype, device=embedding.device
+            )
         else:
-            work = torch.as_tensor(state, dtype=embedding.dtype, device=embedding.device)
+            work = torch.as_tensor(
+                state, dtype=embedding.dtype, device=embedding.device
+            )
             if work.shape != (population, case.n, 3):
                 raise ValueError("flow_state must have shape [population, N, 3]")
         step = torch.as_tensor(time, dtype=embedding.dtype, device=embedding.device)
@@ -318,7 +369,9 @@ class RectifiedFlowHead(nn.Module):
         emb = embedding[None, :, :].expand(population, case.n, -1)
         velocity = self.net(torch.cat((emb, work, step), dim=-1)).float()
         velocity[:, case.preplaced_mask.to(device=velocity.device), :2] = 0.0
-        velocity[:, (case.fixed_mask | case.preplaced_mask).to(device=velocity.device), 2] = 0.0
+        velocity[
+            :, (case.fixed_mask | case.preplaced_mask).to(device=velocity.device), 2
+        ] = 0.0
         return velocity
 
 
@@ -331,11 +384,20 @@ class TypedForceGateController(nn.Module):
             nn.Linear(config.hidden_dim, config.force_channels),
         )
 
-    def forward(self, embedding: Tensor, population: int, step_fraction: float | Tensor = 0.0) -> Tensor:
-        step = torch.as_tensor(step_fraction, dtype=embedding.dtype, device=embedding.device).reshape(1, 1, 1)
+    def forward(
+        self, embedding: Tensor, population: int, step_fraction: float | Tensor = 0.0
+    ) -> Tensor:
+        step = torch.as_tensor(
+            step_fraction, dtype=embedding.dtype, device=embedding.device
+        ).reshape(1, 1, 1)
         step = step.expand(population, embedding.shape[0], 1)
         emb = embedding[None, :, :].expand(population, -1, -1)
-        return torch.nn.functional.softplus(self.net(torch.cat((emb, step), dim=-1))).float() + 1.0e-6
+        return (
+            torch.nn.functional.softplus(
+                self.net(torch.cat((emb, step), dim=-1))
+            ).float()
+            + 1.0e-6
+        )
 
 
 class GeometryAwareCollectiveHead(nn.Module):
@@ -385,11 +447,15 @@ class GeometryAwareCollectiveHead(nn.Module):
     ) -> CollectiveStepOutput:
         if embedding.ndim != 2 or embedding.shape != (case.n, self.config.hidden_dim):
             raise ValueError("embedding must have shape [N, hidden_dim]")
-        geometry = torch.as_tensor(node_geometry, device=embedding.device, dtype=embedding.dtype)
+        geometry = torch.as_tensor(
+            node_geometry, device=embedding.device, dtype=embedding.dtype
+        )
         if geometry.ndim != 3 or geometry.shape[1:] != (case.n, 3):
             raise ValueError("node_geometry must have shape [K,N,3]")
         population = geometry.shape[0]
-        pairs = torch.as_tensor(pair_features, device=embedding.device, dtype=embedding.dtype)
+        pairs = torch.as_tensor(
+            pair_features, device=embedding.device, dtype=embedding.dtype
+        )
         if pairs.shape != (population, case.n, case.n, len(PAIR_FEATURES)):
             raise ValueError("pair_features must have shape [K,N,N,19]")
         mask = torch.as_tensor(pair_mask, device=embedding.device)
@@ -398,7 +464,9 @@ class GeometryAwareCollectiveHead(nn.Module):
         if not bool(torch.isfinite(geometry).all() and torch.isfinite(pairs).all()):
             raise ValueError("collective inputs must be finite")
 
-        fraction = torch.as_tensor(step_fraction, device=embedding.device, dtype=embedding.dtype)
+        fraction = torch.as_tensor(
+            step_fraction, device=embedding.device, dtype=embedding.dtype
+        )
         if fraction.numel() == 1:
             fraction = fraction.reshape(1, 1, 1).expand(population, case.n, 1)
         elif fraction.shape == (population,):
@@ -430,7 +498,9 @@ class GeometryAwareCollectiveHead(nn.Module):
         )
         velocity = raw_velocity * scale
         velocity[:, case.preplaced_mask.to(device=velocity.device), :2] = 0.0
-        velocity[:, (case.fixed_mask | case.preplaced_mask).to(device=velocity.device), 2] = 0.0
+        velocity[
+            :, (case.fixed_mask | case.preplaced_mask).to(device=velocity.device), 2
+        ] = 0.0
         force_gates = (
             1.0
             + self.config.collective_gate_delta
@@ -466,7 +536,12 @@ class RepairAwareRanker(nn.Module):
             nn.Linear(config.hidden_dim, 1),
         )
 
-    def forward(self, embedding: Tensor, population: int, candidate_metrics: Tensor | None = None) -> Tensor:
+    def forward(
+        self,
+        embedding: Tensor,
+        population: int,
+        candidate_metrics: Tensor | None = None,
+    ) -> Tensor:
         context = (
             embedding.mean(dim=0, keepdim=True).expand(population, -1)
             if self.use_scene_embedding
@@ -475,12 +550,16 @@ class RepairAwareRanker(nn.Module):
         if candidate_metrics is None:
             metrics = torch.zeros(population, self.metric_dim, device=embedding.device)
         else:
-            metrics = torch.as_tensor(candidate_metrics, dtype=embedding.dtype, device=embedding.device)
+            metrics = torch.as_tensor(
+                candidate_metrics, dtype=embedding.dtype, device=embedding.device
+            )
             if metrics.shape != (population, self.metric_dim):
-                raise ValueError("candidate_metrics shape does not match [population, candidate_metric_dim]")
-        metrics = (metrics - self.feature_mean.to(dtype=metrics.dtype)) / self.feature_scale.to(
-            dtype=metrics.dtype
-        )
+                raise ValueError(
+                    "candidate_metrics shape does not match [population, candidate_metric_dim]"
+                )
+        metrics = (
+            metrics - self.feature_mean.to(dtype=metrics.dtype)
+        ) / self.feature_scale.to(dtype=metrics.dtype)
         return self.net(torch.cat((context, metrics), dim=1)).squeeze(1).float()
 
 
@@ -504,16 +583,22 @@ class ConstraintHeads(nn.Module):
         case: FloorplanCase,
         embedding: Tensor,
     ) -> tuple[Tensor, Tensor, Tensor]:
-        pair = torch.tanh(self.left(embedding)[:, None, :] + self.right(embedding)[None, :, :])
+        pair = torch.tanh(
+            self.left(embedding)[:, None, :] + self.right(embedding)[None, :, :]
+        )
         contact = self.contact(pair).float()
         boundary = self.boundary(embedding).float()
         if case.mib_membership.numel():
-            membership = case.mib_membership.to(device=embedding.device, dtype=embedding.dtype)
+            membership = case.mib_membership.to(
+                device=embedding.device, dtype=embedding.dtype
+            )
             counts = membership.sum(dim=1, keepdim=True).clamp_min(1.0)
             pooled = membership @ embedding / counts
             mib = self.mib(pooled).squeeze(-1).float()
         else:
-            mib = embedding.new_empty((case.mib_membership.shape[0],), dtype=torch.float32)
+            mib = embedding.new_empty(
+                (case.mib_membership.shape[0],), dtype=torch.float32
+            )
         return contact, boundary, mib
 
 
@@ -529,8 +614,7 @@ class BTreeHeads(nn.Module):
 
     def forward(self, embedding: Tensor) -> tuple[Tensor, Tensor]:
         pair = torch.tanh(
-            self.child(embedding)[:, None, :]
-            + self.parent(embedding)[None, :, :]
+            self.child(embedding)[:, None, :] + self.parent(embedding)[None, :, :]
         )
         edge = self.edge(pair).float()
         diagonal = torch.eye(
@@ -538,6 +622,43 @@ class BTreeHeads(nn.Module):
         )
         edge[diagonal] = torch.finfo(edge.dtype).min
         return self.root(embedding).squeeze(-1).float(), edge
+
+
+class BaselineHeads(nn.Module):
+    """Case-level baseline area/HPWL estimates in normalized log space."""
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        aggregate_features = 10
+        self.net = nn.Sequential(
+            nn.Linear(config.hidden_dim + aggregate_features, config.hidden_dim),
+            nn.SiLU(),
+            nn.Linear(config.hidden_dim, 2),
+        )
+
+    def forward(self, case: FloorplanCase, embedding: Tensor) -> tuple[Tensor, Tensor]:
+        device = embedding.device
+        b2b = case.b2b_weight.to(device=device, dtype=embedding.dtype)
+        p2b = case.p2b_edges.to(device=device, dtype=embedding.dtype)
+        group = case.group_membership.to(device=device)
+        mib = case.mib_membership.to(device=device)
+        pin_count = float(case.pins.shape[0])
+        features = embedding.new_tensor(
+            (
+                math.log1p(case.n),
+                math.log1p(float(b2b.sum() * 0.5)),
+                math.log1p(float(p2b[:, 2].sum())) if p2b.numel() else 0.0,
+                math.log1p(float((b2b > 0).sum() * 0.5)),
+                math.log1p(pin_count),
+                float(case.fixed_mask.float().mean()),
+                float(case.preplaced_mask.float().mean()),
+                float(case.boundary_bits.any(dim=1).float().mean()),
+                float(group.any(dim=0).float().mean()) if group.numel() else 0.0,
+                float(mib.any(dim=0).float().mean()) if mib.numel() else 0.0,
+            )
+        )
+        prediction = self.net(torch.cat((embedding.mean(dim=0), features)))
+        return prediction[0].float(), prediction[1].float()
 
 
 class HCFPModel(nn.Module):
@@ -558,6 +679,8 @@ class HCFPModel(nn.Module):
             self.constraints = ConstraintHeads(self.config)
         if self.config.collective_enabled:
             self.collective = GeometryAwareCollectiveHead(self.config)
+        if self.config.baseline_enabled:
+            self.baseline = BaselineHeads(self.config)
 
     def forward(
         self,
@@ -571,7 +694,9 @@ class HCFPModel(nn.Module):
     ) -> ModelOutput:
         device_type = "cuda" if case.area.is_cuda else "cpu"
         enabled = self.config.compute_dtype == "bfloat16"
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16, enabled=enabled):
+        with torch.autocast(
+            device_type=device_type, dtype=torch.bfloat16, enabled=enabled
+        ):
             embedding = self.encoder(case)
             precedence, outline = self.structure(case, embedding)
             positive: Tensor | None = None
@@ -586,11 +711,19 @@ class HCFPModel(nn.Module):
             boundary_scores: Tensor | None = None
             mib_log_aspect: Tensor | None = None
             if self.config.constraint_enabled:
-                contact_logits, boundary_scores, mib_log_aspect = self.constraints(case, embedding)
+                contact_logits, boundary_scores, mib_log_aspect = self.constraints(
+                    case, embedding
+                )
             center, aspect = self.initializer(case, embedding, population)
-            flow_velocity = self.flow(case, embedding, population, flow_state, flow_time)
+            flow_velocity = self.flow(
+                case, embedding, population, flow_state, flow_time
+            )
             gates = self.gates(embedding, population, step_fraction)
             score = self.ranker(embedding, population, candidate_metrics)
+            baseline_area: Tensor | None = None
+            baseline_hpwl: Tensor | None = None
+            if self.config.baseline_enabled:
+                baseline_area, baseline_hpwl = self.baseline(case, embedding)
         return ModelOutput(
             embedding=embedding.float(),
             precedence_logits=precedence.float(),
@@ -602,9 +735,21 @@ class HCFPModel(nn.Module):
             rank_score=score.float(),
             positive_permutation=(positive.float() if positive is not None else None),
             negative_permutation=(negative.float() if negative is not None else None),
-            contact_logits=(contact_logits.float() if contact_logits is not None else None),
-            boundary_order_scores=(boundary_scores.float() if boundary_scores is not None else None),
-            mib_log_aspect=(mib_log_aspect.float() if mib_log_aspect is not None else None),
+            contact_logits=(
+                contact_logits.float() if contact_logits is not None else None
+            ),
+            boundary_order_scores=(
+                boundary_scores.float() if boundary_scores is not None else None
+            ),
+            mib_log_aspect=(
+                mib_log_aspect.float() if mib_log_aspect is not None else None
+            ),
             btree_root_logits=(btree_root.float() if btree_root is not None else None),
             btree_edge_logits=(btree_edge.float() if btree_edge is not None else None),
+            baseline_log_area=(
+                baseline_area.float() if baseline_area is not None else None
+            ),
+            baseline_log_hpwl=(
+                baseline_hpwl.float() if baseline_hpwl is not None else None
+            ),
         )

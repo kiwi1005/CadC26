@@ -31,16 +31,32 @@ def exact_treemap_candidates(
     hypotheses: Sequence[Any],
     *,
     count: int,
+    area_slack: float = 1.0,
 ) -> tuple[Tensor, tuple[dict[str, object], ...]]:
-    """Use learned order plus exact slicing ratios to make dense seeds."""
+    """Use learned order plus exact slicing ratios to make dense seeds.
+
+    ``area_slack`` is an opt-in contest experiment.  Values below one reduce
+    only ordinary movable block areas before slicing; fixed, preplaced, and
+    MIB members retain their exact target areas/shapes.  The default remains
+    the historical exact-area behavior.
+    """
 
     if count <= 0:
         return reference.new_empty((0, case.n, 4)), ()
-    reference = torch.as_tensor(
-        reference, dtype=torch.float32, device=case.area.device
-    )
+    if not math.isfinite(area_slack) or not 0.0 < area_slack <= 1.0:
+        raise ValueError("area_slack must be finite and in (0, 1]")
+    reference = torch.as_tensor(reference, dtype=torch.float32, device=case.area.device)
     if reference.shape != (case.n, 4):
         raise ValueError("reference must have shape [N,4]")
+    packing_areas = case.area.detach().clone()
+    if area_slack != 1.0:
+        hard = case.fixed_mask | case.preplaced_mask
+        if case.mib_membership.numel():
+            mib_members = case.mib_membership.any(dim=0)
+        else:
+            mib_members = torch.zeros_like(hard)
+        ordinary = ~hard & ~mib_members
+        packing_areas[ordinary] *= area_slack
 
     variants = (
         ("left", "long"),
@@ -76,6 +92,7 @@ def exact_treemap_candidates(
                 bounds,
                 whitespace_side=whitespace_side,
                 axis_mode=axis_mode,
+                packing_areas=packing_areas,
             )
             candidates.append(candidate)
             records.append(
@@ -88,6 +105,7 @@ def exact_treemap_candidates(
                     "whitespace_side": whitespace_side,
                     "whitespace_area": whitespace_area,
                     "axis_mode": axis_mode,
+                    "area_slack": area_slack,
                     "obstacle_aware": obstacle_aware,
                     "mib_constructed_groups": mib_groups,
                 }
@@ -106,9 +124,14 @@ def _pack_candidate(
     *,
     whitespace_side: str,
     axis_mode: str,
+    packing_areas: Tensor | None = None,
 ) -> tuple[Tensor, float, bool, tuple[int, ...]]:
     centers = reference[:, :2] + 0.5 * reference[:, 2:4]
-    areas = case.area.detach().to(device="cpu", dtype=torch.float64)
+    areas = (
+        (case.area if packing_areas is None else packing_areas)
+        .detach()
+        .to(device="cpu", dtype=torch.float64)
+    )
     centers_cpu = centers.detach().to(device="cpu", dtype=torch.float64)
 
     left, bottom, right, top = bounds
@@ -173,9 +196,9 @@ def _pack_candidate(
                         boundary_bits=case.boundary_bits[index],
                         outline=bounds,
                     )
-                candidate[occupied.to(device=candidate.device)] = obstacles[occupied].to(
-                    device=candidate.device, dtype=candidate.dtype
-                )
+                candidate[occupied.to(device=candidate.device)] = obstacles[
+                    occupied
+                ].to(device=candidate.device, dtype=candidate.dtype)
                 return candidate, whitespace_area, True, mib_groups
 
     items = _compound_items(
@@ -247,14 +270,18 @@ def _pack_candidate(
         )
         allocated_center = candidate[:, :2] + 0.5 * candidate[:, 2:4]
         candidate[hard_shape, 2:4] = target_wh[hard_shape]
-        candidate[hard_shape, :2] = allocated_center[hard_shape] - 0.5 * target_wh[hard_shape]
+        candidate[hard_shape, :2] = (
+            allocated_center[hard_shape] - 0.5 * target_wh[hard_shape]
+        )
         max_x = (right - candidate[hard_shape, 2]).clamp_min(left)
         max_y = (top - candidate[hard_shape, 3]).clamp_min(bottom)
         candidate[hard_shape, 0] = torch.maximum(
-            candidate[hard_shape, 0].clamp_min(left), max_x.minimum(candidate[hard_shape, 0])
+            candidate[hard_shape, 0].clamp_min(left),
+            max_x.minimum(candidate[hard_shape, 0]),
         )
         candidate[hard_shape, 1] = torch.maximum(
-            candidate[hard_shape, 1].clamp_min(bottom), max_y.minimum(candidate[hard_shape, 1])
+            candidate[hard_shape, 1].clamp_min(bottom),
+            max_y.minimum(candidate[hard_shape, 1]),
         )
     preplaced = case.preplaced_mask.to(device=candidate.device)
     if bool(preplaced.any()):
@@ -293,7 +320,9 @@ def _place_constraint_obstacles(
     units: list[tuple[tuple[int, ...], int | None]] = []
     mib_members: set[int] = set()
     for group in resolution.groups:
-        if not group.compatible or any(bool(preplaced[index]) for index in group.members):
+        if not group.compatible or any(
+            bool(preplaced[index]) for index in group.members
+        ):
             continue
         units.append((group.members, group.group))
         mib_members.update(group.members)
@@ -338,9 +367,26 @@ def _place_unit(
     if len(members) == 1:
         layouts = ((members, "row"),)
     else:
-        x_order = tuple(sorted(members, key=lambda index: (float(reference_centers[index, 0]), index)))
-        y_order = tuple(sorted(members, key=lambda index: (float(reference_centers[index, 1]), index)))
-        layouts = tuple(dict.fromkeys(((x_order, "row"), (x_order[::-1], "row"), (y_order, "column"), (y_order[::-1], "column"))))
+        x_order = tuple(
+            sorted(
+                members, key=lambda index: (float(reference_centers[index, 0]), index)
+            )
+        )
+        y_order = tuple(
+            sorted(
+                members, key=lambda index: (float(reference_centers[index, 1]), index)
+            )
+        )
+        layouts = tuple(
+            dict.fromkeys(
+                (
+                    (x_order, "row"),
+                    (x_order[::-1], "row"),
+                    (y_order, "column"),
+                    (y_order[::-1], "column"),
+                )
+            )
+        )
 
     left, bottom, right, top = bounds
     best: tuple[tuple[float, float, float], dict[int, Tensor]] | None = None
@@ -372,7 +418,12 @@ def _place_unit(
             )
         for x in x_values:
             for y in y_values:
-                if x < left - _EPS or y < bottom - _EPS or x + footprint_w > right + _EPS or y + footprint_h > top + _EPS:
+                if (
+                    x < left - _EPS
+                    or y < bottom - _EPS
+                    or x + footprint_w > right + _EPS
+                    or y + footprint_h > top + _EPS
+                ):
                     continue
                 proposed: dict[int, Tensor] = {}
                 for offset, index in enumerate(order):
@@ -399,8 +450,14 @@ def _place_unit(
                         + float(bits[2]) * abs(float(box[1] + box[3]) - top)
                         + float(bits[3]) * abs(float(box[1]) - bottom)
                     )
-                    distance += abs(float(box[0] + 0.5 * box[2]) - float(reference_centers[index, 0]))
-                    distance += abs(float(box[1] + 0.5 * box[3]) - float(reference_centers[index, 1]))
+                    distance += abs(
+                        float(box[0] + 0.5 * box[2])
+                        - float(reference_centers[index, 0])
+                    )
+                    distance += abs(
+                        float(box[1] + 0.5 * box[3])
+                        - float(reference_centers[index, 1])
+                    )
                 score = (boundary_miss, distance, x + y)
                 if best is None or score < best[0]:
                     best = (score, proposed)
@@ -497,7 +554,9 @@ def _compound_items(
     for membership in case.group_membership.detach().to(device="cpu", dtype=torch.bool):
         members = tuple(
             int(index)
-            for index in torch.nonzero(membership & eligible, as_tuple=False).reshape(-1)
+            for index in torch.nonzero(membership & eligible, as_tuple=False).reshape(
+                -1
+            )
             if int(index) not in assigned
         )
         if len(members) < 2:
@@ -537,7 +596,9 @@ def _place_items(
     packed = list(items)
     if capacity > used + _EPS:
         packed.append(
-            _Item((), capacity - used, _whitespace_center(bounds, whitespace_side), True)
+            _Item(
+                (), capacity - used, _whitespace_center(bounds, whitespace_side), True
+            )
         )
     unit_rectangles: dict[int, tuple[float, float, float, float]] = {}
     _partition(
@@ -622,7 +683,9 @@ def _boundary_region_misses(
     if boundary_bits is None or outline is None:
         return 0
     members = torch.tensor(item.members, dtype=torch.long)
-    bits = torch.as_tensor(boundary_bits, dtype=torch.bool, device="cpu")[members].any(dim=0)
+    bits = torch.as_tensor(boundary_bits, dtype=torch.bool, device="cpu")[members].any(
+        dim=0
+    )
     return sum(
         (
             int(bool(bits[0]) and abs(region[0] - outline[0]) > _EPS),
@@ -651,14 +714,24 @@ def _free_rectangles(
     left, bottom, right, top = bounds
     boxes = [tuple(float(value) for value in row) for row in obstacles]
     for index, (x, y, width, height) in enumerate(boxes):
-        if x < left - _EPS or y < bottom - _EPS or x + width > right + _EPS or y + height > top + _EPS:
+        if (
+            x < left - _EPS
+            or y < bottom - _EPS
+            or x + width > right + _EPS
+            or y + height > top + _EPS
+        ):
             return []
         for other in boxes[index + 1 :]:
             ox, oy, ow, oh = other
-            if min(x + width, ox + ow) - max(x, ox) > _EPS and min(y + height, oy + oh) - max(y, oy) > _EPS:
+            if (
+                min(x + width, ox + ow) - max(x, ox) > _EPS
+                and min(y + height, oy + oh) - max(y, oy) > _EPS
+            ):
                 return []
 
-    xs = sorted({left, right, *(value for box in boxes for value in (box[0], box[0] + box[2]))})
+    xs = sorted(
+        {left, right, *(value for box in boxes for value in (box[0], box[0] + box[2]))}
+    )
     active: dict[tuple[float, float], tuple[float, float, float, float]] = {}
     result: list[tuple[float, float, float, float]] = []
     for x0, x1 in zip(xs, xs[1:], strict=False):
@@ -715,12 +788,12 @@ def _proposed_overlaps(proposed: Any, placed: list[Tensor]) -> bool:
 
 
 def _pair_overlaps(first: Tensor, second: Tensor) -> bool:
-    overlap_x = min(
-        float(first[0] + first[2]), float(second[0] + second[2])
-    ) - max(float(first[0]), float(second[0]))
-    overlap_y = min(
-        float(first[1] + first[3]), float(second[1] + second[3])
-    ) - max(float(first[1]), float(second[1]))
+    overlap_x = min(float(first[0] + first[2]), float(second[0] + second[2])) - max(
+        float(first[0]), float(second[0])
+    )
+    overlap_y = min(float(first[1] + first[3]), float(second[1] + second[3])) - max(
+        float(first[1]), float(second[1])
+    )
     return overlap_x > _EPS and overlap_y > _EPS
 
 

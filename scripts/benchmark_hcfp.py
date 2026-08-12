@@ -35,7 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     source.add_argument("--result", action="append", metavar="NAME=JSON")
     parser.add_argument("--baseline", default="fallback")
     parser.add_argument("--data-path", default="artifacts/floorset-v10")
-    parser.add_argument("--cases", default="all", help="all or comma-separated test ids")
+    parser.add_argument(
+        "--cases", default="all", help="all or comma-separated test ids"
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
@@ -44,7 +46,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--topology-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--constraint-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--treemap-seeds", type=_non_negative_int, default=0)
-    parser.add_argument("--btree-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--treemap-area-slack", type=float, default=1.0)
+    parser.add_argument(
+        "--btree-seeds",
+        type=_non_negative_int,
+        default=0,
+        help="retained B*-Tree seeds per primary family; dual-axis/variant flags add bounded challengers",
+    )
+    parser.add_argument("--btree-dual-axis", action="store_true")
+    parser.add_argument("--btree-shape-variants", action="store_true")
+    parser.add_argument("--btree-local-moves", type=_non_negative_int, default=0)
+    parser.add_argument("--family-router", action="store_true")
+    parser.add_argument("--contact-synthesis-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--island-relocation", action="store_true")
+    parser.add_argument("--baseline-selection-margin", type=float)
     parser.add_argument("--ranker-selection-experiment", action="store_true")
     parser.add_argument("--tail-topk", type=int)
     parser.add_argument(
@@ -69,7 +84,9 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("--checkpoint requires --optimizer mode")
     unknown_checkpoint_lanes = checkpoints.keys() - specs.keys()
     if unknown_checkpoint_lanes:
-        raise ValueError(f"checkpoint lanes are missing optimizers: {sorted(unknown_checkpoint_lanes)}")
+        raise ValueError(
+            f"checkpoint lanes are missing optimizers: {sorted(unknown_checkpoint_lanes)}"
+        )
     if args.optimizer:
         lanes, case_metadata, lane_metadata = _run_optimizers(
             specs,
@@ -84,7 +101,15 @@ def main(argv: list[str] | None = None) -> int:
             args.topology_seeds,
             args.constraint_seeds,
             args.treemap_seeds,
+            args.treemap_area_slack,
             args.btree_seeds,
+            args.btree_dual_axis,
+            args.btree_shape_variants,
+            args.btree_local_moves,
+            args.family_router,
+            args.contact_synthesis_seeds,
+            args.island_relocation,
+            args.baseline_selection_margin,
             args.ranker_selection_experiment,
         )
         mode = "optimizer"
@@ -109,7 +134,15 @@ def main(argv: list[str] | None = None) -> int:
                 "topology_seeds": args.topology_seeds,
                 "constraint_seeds": args.constraint_seeds,
                 "treemap_seeds": args.treemap_seeds,
+                "treemap_area_slack": args.treemap_area_slack,
                 "btree_seeds": args.btree_seeds,
+                "btree_dual_axis": args.btree_dual_axis,
+                "btree_shape_variants": args.btree_shape_variants,
+                "btree_local_moves": args.btree_local_moves,
+                "family_router": args.family_router,
+                "contact_synthesis_seeds": args.contact_synthesis_seeds,
+                "island_relocation": args.island_relocation,
+                "baseline_selection_margin": args.baseline_selection_margin,
                 "tail_topk": args.tail_topk,
                 "ranker_selection_experiment": args.ranker_selection_experiment,
             },
@@ -129,7 +162,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{name}: feasible={summary['feasible']}/{summary['cases']} "
             f"weighted_cost={summary['weighted_cost']:.6f} decision={decision}"
         )
-    return 0 if all(summary["hard_feasibility_rate"] == 1.0 for summary in report["lane_summary"].values()) else 2
+    return (
+        0
+        if all(
+            summary["hard_feasibility_rate"] == 1.0
+            for summary in report["lane_summary"].values()
+        )
+        else 2
+    )
 
 
 def _assignments(values: list[str]) -> dict[str, Path]:
@@ -176,7 +216,15 @@ def _run_optimizers(
     topology_seeds: int = 0,
     constraint_seeds: int = 0,
     treemap_seeds: int = 0,
+    treemap_area_slack: float = 1.0,
     btree_seeds: int = 0,
+    btree_dual_axis: bool = False,
+    btree_shape_variants: bool = False,
+    btree_local_moves: int = 0,
+    family_router: bool = False,
+    contact_synthesis_seeds: int = 0,
+    island_relocation: bool = False,
+    baseline_selection_margin: float | None = None,
     ranker_selection_experiment: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
     evaluator_module = _load_evaluator(data_path)
@@ -187,11 +235,28 @@ def _run_optimizers(
         _environment("HCFP_DEVICE", device),
         _environment("HCFP_FLOW_STEPS", str(flow_steps)),
         _environment("HCFP_FLOW_SEED", str(flow_seed)),
-        _environment("HCFP_TAIL_TOPK", str(tail_topk) if tail_topk is not None else None),
+        _environment(
+            "HCFP_TAIL_TOPK", str(tail_topk) if tail_topk is not None else None
+        ),
         _environment("HCFP_TOPOLOGY_SEEDS", str(topology_seeds)),
         _environment("HCFP_CONSTRAINT_SEEDS", str(constraint_seeds)),
         _environment("HCFP_TREEMAP_SEEDS", str(treemap_seeds)),
+        _environment("HCFP_TREEMAP_AREA_SLACK", str(treemap_area_slack)),
         _environment("HCFP_BTREE_SEEDS", str(btree_seeds)),
+        _environment("HCFP_BTREE_DUAL_AXIS", "1" if btree_dual_axis else None),
+        _environment(
+            "HCFP_BTREE_SHAPE_VARIANTS", "1" if btree_shape_variants else None
+        ),
+        _environment("HCFP_BTREE_LOCAL_MOVES", str(btree_local_moves)),
+        _environment("HCFP_FAMILY_ROUTER", "1" if family_router else None),
+        _environment("HCFP_CONTACT_SYNTHESIS_SEEDS", str(contact_synthesis_seeds)),
+        _environment("HCFP_ISLAND_RELOCATION", "1" if island_relocation else None),
+        _environment(
+            "HCFP_BASELINE_SELECTION_MARGIN",
+            str(baseline_selection_margin)
+            if baseline_selection_margin is not None
+            else None,
+        ),
         _environment(
             "HCFP_RANKER_SELECTION_EXPERIMENT",
             "1" if ranker_selection_experiment else None,
@@ -227,7 +292,21 @@ def _run_optimizers(
                     "topology_seeds": topology_seeds,
                     "constraint_seeds": constraint_seeds,
                     "treemap_seeds": treemap_seeds,
+                    "treemap_area_slack": treemap_area_slack,
                     "btree_seeds": btree_seeds,
+                    "btree_dual_axis": btree_dual_axis,
+                    "btree_shape_variants": btree_shape_variants,
+                    "btree_local_moves": btree_local_moves,
+                    "btree_candidate_budget_max": btree_seeds
+                    * (
+                        1
+                        + int(btree_dual_axis)
+                        + int(btree_shape_variants or btree_local_moves > 0)
+                    ),
+                    "family_router": family_router,
+                    "contact_synthesis_seeds": contact_synthesis_seeds,
+                    "island_relocation": island_relocation,
+                    "baseline_selection_margin": baseline_selection_margin,
                     "ranker_selection_experiment": ranker_selection_experiment,
                 }
             else:
@@ -239,18 +318,39 @@ def _run_optimizers(
                     "topology_seeds": topology_seeds,
                     "constraint_seeds": constraint_seeds,
                     "treemap_seeds": treemap_seeds,
+                    "treemap_area_slack": treemap_area_slack,
                     "btree_seeds": btree_seeds,
+                    "btree_dual_axis": btree_dual_axis,
+                    "btree_shape_variants": btree_shape_variants,
+                    "btree_local_moves": btree_local_moves,
+                    "btree_candidate_budget_max": btree_seeds
+                    * (
+                        1
+                        + int(btree_dual_axis)
+                        + int(btree_shape_variants or btree_local_moves > 0)
+                    ),
+                    "family_router": family_router,
+                    "contact_synthesis_seeds": contact_synthesis_seeds,
+                    "island_relocation": island_relocation,
+                    "baseline_selection_margin": baseline_selection_margin,
                     "ranker_selection_experiment": False,
                 }
             with (
-                _environment("HCFP_CHECKPOINT", str(checkpoint) if checkpoint is not None else None),
+                _environment(
+                    "HCFP_CHECKPOINT",
+                    str(checkpoint) if checkpoint is not None else None,
+                ),
                 _environment("HCFP_COLLECTIVE_STEPS", str(lane_collective_steps)),
             ):
-                evaluator = evaluator_module.ContestEvaluator(str(data_path), verbose=False)
+                evaluator = evaluator_module.ContestEvaluator(
+                    str(data_path), verbose=False
+                )
                 result = evaluator.evaluate(str(path), test_ids=test_ids)
             lanes[name] = [asdict(row) for row in result.test_results]
             if not metadata:
-                metadata = _case_metadata(evaluator, [int(row.test_id) for row in result.test_results])
+                metadata = _case_metadata(
+                    evaluator, [int(row.test_id) for row in result.test_results]
+                )
     return lanes, metadata, lane_metadata
 
 
@@ -264,8 +364,12 @@ def _case_metadata(evaluator: Any, test_ids: list[int]) -> dict[str, Any]:
             "block_count": block_count,
             "constraints": constraints[:block_count].tolist(),
             "pins_pos": [row for row in pins.tolist() if row != [-1.0, -1.0]],
-            "b2b_connectivity": [row for row in b2b.tolist() if row[:2] != [-1.0, -1.0]],
-            "p2b_connectivity": [row for row in p2b.tolist() if row[:2] != [-1.0, -1.0]],
+            "b2b_connectivity": [
+                row for row in b2b.tolist() if row[:2] != [-1.0, -1.0]
+            ],
+            "p2b_connectivity": [
+                row for row in p2b.tolist() if row[:2] != [-1.0, -1.0]
+            ],
         }
     return metadata
 
@@ -334,14 +438,22 @@ def _provenance(
     }
 
 
-def _visualize(report: dict[str, Any], directory: Path, case_ids: list[int] | None) -> None:
+def _visualize(
+    report: dict[str, Any], directory: Path, case_ids: list[int] | None
+) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     available = [int(row["test_id"]) for row in next(iter(report["lanes"].values()))]
-    selected = case_ids if case_ids is not None else ([available[0], available[-1]] if available else [])
+    selected = (
+        case_ids
+        if case_ids is not None
+        else ([available[0], available[-1]] if available else [])
+    )
     for test_id in selected:
         items = []
         for name, rows in report["lanes"].items():
-            row = next((entry for entry in rows if int(entry["test_id"]) == test_id), None)
+            row = next(
+                (entry for entry in rows if int(entry["test_id"]) == test_id), None
+            )
             if row is None or row.get("positions") is None:
                 continue
             items.append(
@@ -351,7 +463,12 @@ def _visualize(report: dict[str, Any], directory: Path, case_ids: list[int] | No
                     "case": report.get("case_metadata", {}).get(str(test_id)),
                     "telemetry": {
                         key: row[key]
-                        for key in ("cost", "hpwl_gap", "area_gap", "violations_relative")
+                        for key in (
+                            "cost",
+                            "hpwl_gap",
+                            "area_gap",
+                            "violations_relative",
+                        )
                     },
                 }
             )

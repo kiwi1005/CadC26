@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from hcfp.analytic import AnalyticConfig, AnalyticResult, CandidateTelemetry, solve_case_with_telemetry
+from hcfp.analytic import (
+    AnalyticConfig,
+    AnalyticResult,
+    CandidateTelemetry,
+    solve_case_with_telemetry,
+)
 from hcfp.case import from_official
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, _payload_hash, save_checkpoint
 from hcfp.dynamics import DynamicsConfig
@@ -16,8 +21,10 @@ from hcfp.learned import (
     LearnedConfig,
     _attach_ranker_shadow_snapshot,
     _btree_seed_candidates,
+    _dual_axis_seed_budget,
     _learned_population,
     _merge_energy_history,
+    _predicted_baseline_interval,
     _tensor_sha256,
     analyze_case_with_checkpoint,
     effective_collective_steps,
@@ -69,7 +76,9 @@ def _config() -> AnalyticConfig:
     )
 
 
-def test_absolute_initializer_runtime_uses_normalized_centers_and_hard_anchors() -> None:
+def test_absolute_initializer_runtime_uses_normalized_centers_and_hard_anchors() -> (
+    None
+):
     case = _case()
     model = HCFPModel(
         ModelConfig(
@@ -95,9 +104,10 @@ def test_absolute_initializer_runtime_uses_normalized_centers_and_hard_anchors()
     boxes = _learned_population(case, model, config, seed=3)
     centers = boxes[..., :2] + 0.5 * boxes[..., 2:4]
     expected_soft = torch.tanh(torch.tensor((0.2, 0.3))) * 1.5
-    expected_preplaced = case.target[case.preplaced_mask, :2] + 0.5 * case.target[
-        case.preplaced_mask, 2:4
-    ]
+    expected_preplaced = (
+        case.target[case.preplaced_mask, :2]
+        + 0.5 * case.target[case.preplaced_mask, 2:4]
+    )
 
     assert torch.allclose(centers[0, ~case.preplaced_mask], expected_soft.expand(3, -1))
     assert torch.equal(centers[0, case.preplaced_mask], expected_preplaced)
@@ -106,9 +116,7 @@ def test_absolute_initializer_runtime_uses_normalized_centers_and_hard_anchors()
 
 def test_btree_seed_candidates_are_additive_and_hard_feasible() -> None:
     case = _case()
-    model = HCFPModel(
-        ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True)
-    )
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True))
     source = safe_shelf(case).unsqueeze(0).repeat(2, 1, 1)
     output = model(case, population=2)
 
@@ -117,7 +125,99 @@ def test_btree_seed_candidates_are_additive_and_hard_feasible() -> None:
     assert candidates.shape == (2, case.n, 4)
     assert len(records) == 2
     assert all(record["source_type"] == "btree" for record in records)
+    assert all(record["compaction_axis"] == "x" for record in records)
     assert all(verify_feasible(case, candidate) for candidate in candidates)
+
+
+def test_btree_dual_axis_keeps_x_candidates_and_adds_y_candidates() -> None:
+    case = _case()
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True))
+    source = safe_shelf(case).unsqueeze(0).repeat(2, 1, 1)
+    output = model(case, population=2)
+
+    original, _ = _btree_seed_candidates(case, output, source, count=2)
+    candidates, records = _btree_seed_candidates(
+        case, output, source, count=2, dual_axis=True
+    )
+
+    assert torch.equal(candidates[:2], original)
+    assert {record["compaction_axis"] for record in records} == {"x", "y"}
+    assert all(verify_feasible(case, candidate) for candidate in candidates)
+
+
+def test_btree_shape_and_local_moves_are_additive_challengers() -> None:
+    case = _case()
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True))
+    source = safe_shelf(case).unsqueeze(0).repeat(2, 1, 1)
+    output = model(case, population=2)
+
+    base, _ = _btree_seed_candidates(case, output, source, count=2)
+    candidates, records = _btree_seed_candidates(
+        case,
+        output,
+        source,
+        count=2,
+        dual_axis=True,
+        shape_variants=True,
+        local_moves=2,
+    )
+
+    assert torch.equal(candidates[:2], base)
+    assert candidates.shape[0] > base.shape[0]
+    assert any("variant" in record for record in records)
+    assert all(verify_feasible(case, candidate) for candidate in candidates)
+
+
+def test_dual_axis_router_uses_sparse_geometry_and_skips_dense_square() -> None:
+    case = _case()
+    output = SimpleNamespace(baseline_log_area=None, baseline_log_hpwl=None)
+    dense = torch.tensor(
+        [
+            [0.0, 0.0, 2.0, 2.0],
+            [2.0, 0.0, 3.0, 3.0],
+            [0.0, 3.0, 4.0, 4.0],
+            [4.0, 3.0, 5.0, 5.0],
+        ]
+    )
+    sparse = dense.clone()
+    sparse[3, 0] = 100.0
+
+    assert _dual_axis_seed_budget(case, dense, output, maximum=4) == 0
+    assert _dual_axis_seed_budget(case, sparse, output, maximum=4) == 4
+
+    untrained = SimpleNamespace(
+        baseline_log_area=torch.tensor(-20.0),
+        baseline_log_hpwl=torch.tensor(-20.0),
+    )
+    assert _dual_axis_seed_budget(case, dense, untrained, maximum=4) == 0
+    assert (
+        _dual_axis_seed_budget(
+            case,
+            dense,
+            untrained,
+            maximum=4,
+            baseline_trained=True,
+        )
+        == 4
+    )
+
+
+def test_predicted_baseline_interval_requires_trained_capability() -> None:
+    snapshot = {
+        "baseline_head_trained": True,
+        "predicted_baseline_area": 100.0,
+        "predicted_baseline_hpwl": 200.0,
+    }
+
+    interval = _predicted_baseline_interval(snapshot, 0.10)
+
+    assert interval is not None
+    assert interval.area_low == pytest.approx(90.0)
+    assert interval.hpwl_high == pytest.approx(220.0)
+    assert (
+        _predicted_baseline_interval({**snapshot, "baseline_head_trained": False}, 0.10)
+        is None
+    )
 
 
 def _source() -> SimpleNamespace:
@@ -207,10 +307,7 @@ def _pareto_config() -> AnalyticConfig:
 
 def _constant_candidates(values: tuple[float, ...]) -> torch.Tensor:
     return torch.stack(
-        [
-            torch.full((4, 4), value, dtype=torch.float32)
-            for value in values
-        ]
+        [torch.full((4, 4), value, dtype=torch.float32) for value in values]
     )
 
 
@@ -302,7 +399,9 @@ def _shadow_model(scores: tuple[float, ...]) -> SimpleNamespace:
     )
 
 
-def _shadow_analysis(*, eligible: tuple[bool, ...] = (True, True, True, True)) -> AnalyticResult:
+def _shadow_analysis(
+    *, eligible: tuple[bool, ...] = (True, True, True, True)
+) -> AnalyticResult:
     analytic_count = 2
     learned_count = 4
     count = 1 + analytic_count + learned_count + analytic_count + learned_count
@@ -392,7 +491,9 @@ def _merged_synthetic_provenance(
     import hcfp.learned as learned_module
 
     analytic = _synthetic_result((0.0, 1.0, 2.0))
-    post = (110.0, 120.0, 130.0, 140.0) if changed_post_relax else (10.0, 20.0, 30.0, 40.0)
+    post = (
+        (110.0, 120.0, 130.0, 140.0) if changed_post_relax else (10.0, 20.0, 30.0, 40.0)
+    )
     learned = _synthetic_result((0.0, 10.0, 20.0, 30.0, 40.0, *post))
     return learned_module._merge_tail_analyses(
         _case(),
@@ -439,10 +540,16 @@ def _solve_pareto(
         conversions.append(x)
         return [(x, 0.0, 2.0, 2.0), (x + 3.0, 0.0, 2.0, 2.0)]
 
-    monkeypatch.setattr(learned, "analyze_case_with_checkpoint", lambda *_args: analysis)
+    monkeypatch.setattr(
+        learned, "analyze_case_with_checkpoint", lambda *_args: analysis
+    )
     monkeypatch.setattr(learned, "to_official_placements", to_official)
-    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] in feasible_x)
-    monkeypatch.setattr(learned, "_raw_quality", lambda _source, _case, rows: quality[rows[0][0]])
+    monkeypatch.setattr(
+        learned, "verify_feasible", lambda _source, rows: rows[0][0] in feasible_x
+    )
+    monkeypatch.setattr(
+        learned, "_raw_quality", lambda _source, _case, rows: quality[rows[0][0]]
+    )
     result = learned.solve(
         _source(),
         checkpoint=tmp_path / "model.pt",
@@ -478,8 +585,12 @@ def _select_with_ranker_counterfactual(
         return [(x, 0.0, 2.0, 2.0), (x + 3.0, 0.0, 2.0, 2.0)]
 
     monkeypatch.setattr(learned, "to_official_placements", to_official)
-    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] in feasible_x)
-    monkeypatch.setattr(learned, "_raw_quality", lambda _source, _case, rows: quality[rows[0][0]])
+    monkeypatch.setattr(
+        learned, "verify_feasible", lambda _source, rows: rows[0][0] in feasible_x
+    )
+    monkeypatch.setattr(
+        learned, "_raw_quality", lambda _source, _case, rows: quality[rows[0][0]]
+    )
     return learned.select_official_from_analysis(
         source,
         case,
@@ -547,7 +658,10 @@ def test_effective_collective_steps_requires_all_checkpoint_and_model_gates() ->
         )
         == 0
     )
-    assert effective_collective_steps(2, COLLECTIVE_METADATA, ModelConfig(hidden_dim=16)) == 0
+    assert (
+        effective_collective_steps(2, COLLECTIVE_METADATA, ModelConfig(hidden_dim=16))
+        == 0
+    )
 
 
 def test_effective_tail_topk_requires_ranker_capability_and_head() -> None:
@@ -569,12 +683,16 @@ def test_effective_tail_topk_requires_ranker_capability_and_head() -> None:
     )
 
 
-def test_effective_flow_steps_rejects_negative_requests_before_capability_gate() -> None:
+def test_effective_flow_steps_rejects_negative_requests_before_capability_gate() -> (
+    None
+):
     with pytest.raises(ValueError, match="non-negative"):
         effective_flow_steps(-1, {"capabilities": {"flow": False}})
 
 
-def test_effective_collective_steps_rejects_negative_requests_before_capability_gate() -> None:
+def test_effective_collective_steps_rejects_negative_requests_before_capability_gate() -> (
+    None
+):
     with pytest.raises(ValueError, match="non-negative"):
         effective_collective_steps(-1, {"capabilities": {"collective": False}}, {})
 
@@ -711,6 +829,9 @@ def test_ranker_shadow_uses_exact_replay_initial_slice_and_provenance(
     analysis.incumbent_snapshot["btree_seed_provenance"] = (
         {"source": "candidate_3", "stage": "initial"},
     )
+    analysis.incumbent_snapshot["contact_synthesis_seed_provenance"] = (
+        {"source": "candidate_5", "stage": "initial"},
+    )
 
     shadowed = _attach_ranker_shadow_snapshot(
         _case(),
@@ -728,7 +849,7 @@ def test_ranker_shadow_uses_exact_replay_initial_slice_and_provenance(
     assert torch.equal(captured["raw"], analysis.raw_candidates[3:7])
     assert torch.equal(captured["post_bdp"], analysis.projected_candidates[3:7])
     assert torch.equal(captured["anchor"], safe_shelf(_case()))
-    assert captured["kinds"] == ("btree", "constraint", "topology", "topology")
+    assert captured["kinds"] == ("btree", "constraint", "constraint", "topology")
     assert captured["stage"] == "initial"
     assert snapshot["ranker_shadow_candidate_kinds"] == captured["kinds"]
     assert tuple(row["source"] for row in snapshot["ranker_shadow_top4"]) == (
@@ -756,7 +877,9 @@ def test_ranker_shadow_does_not_change_selection_or_exact_source() -> None:
 
     assert torch.equal(shadowed.selected, analysis.selected)
     assert shadowed.incumbent_snapshot["exact_source"] == "candidate_5"
-    assert shadowed.incumbent_snapshot["ranker_shadow_source"] == "merged_learned_initial"
+    assert (
+        shadowed.incumbent_snapshot["ranker_shadow_source"] == "merged_learned_initial"
+    )
 
 
 def test_ranker_shadow_ignores_ineligible_best_score() -> None:
@@ -834,7 +957,10 @@ def test_ranker_shadow_untrained_or_incompatible_checkpoint_is_neutral() -> None
     )
 
     assert torch.equal(untrained.selected, analysis.selected)
-    assert untrained.incumbent_snapshot["ranker_shadow_skipped_reason"] == "ranker_not_trained"
+    assert (
+        untrained.incumbent_snapshot["ranker_shadow_skipped_reason"]
+        == "ranker_not_trained"
+    )
     assert "ranker_shadow_top4" not in untrained.incumbent_snapshot
     assert torch.equal(incompatible.selected, analysis.selected)
     assert (
@@ -856,7 +982,9 @@ def test_ranker_shadow_uses_source_index_for_deterministic_ties() -> None:
         topology_count=1,
     )
 
-    assert tuple(row["source"] for row in shadowed.incumbent_snapshot["ranker_shadow_top4"]) == (
+    assert tuple(
+        row["source"] for row in shadowed.incumbent_snapshot["ranker_shadow_top4"]
+    ) == (
         "candidate_3",
         "candidate_4",
         "candidate_5",
@@ -1023,7 +1151,9 @@ def test_ranker_selection_experiment_rejects_non_dominating_shadow_candidate(
     )
 
 
-def test_legacy_checkpoint_disables_requested_flow_without_falling_back(tmp_path: Path) -> None:
+def test_legacy_checkpoint_disables_requested_flow_without_falling_back(
+    tmp_path: Path,
+) -> None:
     checkpoint = tmp_path / "legacy.pt"
     save_checkpoint(
         HCFPModel(
@@ -1089,7 +1219,9 @@ def test_collective_capability_false_disables_requested_steps_without_falling_ba
     assert verify_feasible(_case(), result.selected)
 
 
-def test_collective_tail_runs_when_checkpoint_and_model_gates_pass(tmp_path: Path) -> None:
+def test_collective_tail_runs_when_checkpoint_and_model_gates_pass(
+    tmp_path: Path,
+) -> None:
     checkpoint = tmp_path / "model.pt"
     save_checkpoint(
         HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
@@ -1149,7 +1281,9 @@ def test_collective_tail_keeps_topology_and_constraint_provenance_with_bdp_disab
     assert "constraint_seed_failure_reason" in analysis.analytic.incumbent_snapshot
 
 
-def test_collective_default_off_preserves_selected_and_candidate_pool(tmp_path: Path) -> None:
+def test_collective_default_off_preserves_selected_and_candidate_pool(
+    tmp_path: Path,
+) -> None:
     checkpoint = tmp_path / "model.pt"
     save_checkpoint(
         HCFPModel(ModelConfig(hidden_dim=16, collective_enabled=True)),
@@ -1168,16 +1302,22 @@ def test_collective_default_off_preserves_selected_and_candidate_pool(tmp_path: 
     assert default_off.result.collective_steps == 0
     assert default_off.result.collective_used is False
     assert torch.equal(default_off.result.selected, legacy.result.selected)
-    assert torch.equal(default_off.analytic.raw_candidates, legacy.analytic.raw_candidates)
+    assert torch.equal(
+        default_off.analytic.raw_candidates, legacy.analytic.raw_candidates
+    )
     assert torch.equal(
         default_off.analytic.projected_candidates,
         legacy.analytic.projected_candidates,
     )
 
 
-def test_untrained_ranker_request_does_not_prune_learned_candidates(tmp_path: Path) -> None:
+def test_untrained_ranker_request_does_not_prune_learned_candidates(
+    tmp_path: Path,
+) -> None:
     checkpoint = tmp_path / "model.pt"
-    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION
+    )
     config = LearnedConfig(analytic=_config(), tail_topk=1)
 
     result = solve_case_with_checkpoint(_case(), checkpoint, config)
@@ -1187,7 +1327,9 @@ def test_untrained_ranker_request_does_not_prune_learned_candidates(tmp_path: Pa
     assert verify_feasible(_case(), result.selected)
 
 
-def test_trained_ranker_capability_prunes_learned_sidecar_candidates(tmp_path: Path) -> None:
+def test_trained_ranker_capability_prunes_learned_sidecar_candidates(
+    tmp_path: Path,
+) -> None:
     checkpoint = tmp_path / "model.pt"
     save_checkpoint(
         HCFPModel(ModelConfig(hidden_dim=16)),
@@ -1223,15 +1365,26 @@ def test_ranker_capability_requires_matching_trained_head(tmp_path: Path) -> Non
 
 def test_split_tail_preserves_standalone_analytic_candidates(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model.pt"
-    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION
+    )
 
     analysis = analyze_case_with_checkpoint(_case(), checkpoint, _config())
     standalone = solve_case_with_telemetry(_case(), _config())
 
-    assert torch.equal(analysis.analytic.raw_candidates[:3], standalone.raw_candidates[:3])
-    assert torch.equal(analysis.analytic.raw_candidates[5:7], standalone.raw_candidates[3:5])
-    assert torch.equal(analysis.analytic.projected_candidates[:3], standalone.projected_candidates[:3])
-    assert torch.equal(analysis.analytic.projected_candidates[5:7], standalone.projected_candidates[3:5])
+    assert torch.equal(
+        analysis.analytic.raw_candidates[:3], standalone.raw_candidates[:3]
+    )
+    assert torch.equal(
+        analysis.analytic.raw_candidates[5:7], standalone.raw_candidates[3:5]
+    )
+    assert torch.equal(
+        analysis.analytic.projected_candidates[:3], standalone.projected_candidates[:3]
+    )
+    assert torch.equal(
+        analysis.analytic.projected_candidates[5:7],
+        standalone.projected_candidates[3:5],
+    )
     assert analysis.analytic.incumbent_snapshot["analytic_exact_source"] is not None
     assert analysis.analytic.incumbent_snapshot["analytic_fast_source"] is not None
 
@@ -1246,8 +1399,13 @@ def test_split_tail_carries_normalized_infeasible_analytic_fast_source() -> None
     projection_ok[1:3] = True
     analytic = replace(
         standalone,
-        telemetry=replace(standalone.telemetry, hard_feasible=hard, projection_ok=projection_ok),
-        incumbent_snapshot={"exact_source": "candidate_2", "fast_source": "candidate_1"},
+        telemetry=replace(
+            standalone.telemetry, hard_feasible=hard, projection_ok=projection_ok
+        ),
+        incumbent_snapshot={
+            "exact_source": "candidate_2",
+            "fast_source": "candidate_1",
+        },
     )
 
     merged = learned._merge_tail_analyses(_case(), analytic, standalone)
@@ -1351,7 +1509,9 @@ def test_raw_treemap_proxy_guard_requires_no_hpwl_loss(
     assert selected[0][0] == expected_x
 
 
-def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(tmp_path: Path) -> None:
+def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(
+    tmp_path: Path,
+) -> None:
     first = tmp_path / "first.pt"
     second = tmp_path / "second.pt"
     model = HCFPModel(ModelConfig(hidden_dim=16))
@@ -1365,8 +1525,12 @@ def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(tmp_path
     first_analysis = analyze_case_with_checkpoint(_case(), first, config)
     second_analysis = analyze_case_with_checkpoint(_case(), second, config)
 
-    assert first_analysis.result.checkpoint_hash != second_analysis.result.checkpoint_hash
-    assert torch.equal(first_analysis.analytic.raw_candidates, second_analysis.analytic.raw_candidates)
+    assert (
+        first_analysis.result.checkpoint_hash != second_analysis.result.checkpoint_hash
+    )
+    assert torch.equal(
+        first_analysis.analytic.raw_candidates, second_analysis.analytic.raw_candidates
+    )
 
 
 def test_missing_checkpoint_fails_closed_to_analytic_lane(tmp_path: Path) -> None:
@@ -1380,19 +1544,28 @@ def test_missing_checkpoint_fails_closed_to_analytic_lane(tmp_path: Path) -> Non
 
 def test_normalization_mismatch_fails_closed(tmp_path: Path) -> None:
     checkpoint = tmp_path / "model.pt"
-    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, {"coordinate_scale": "wrong"})
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, {"coordinate_scale": "wrong"}
+    )
 
     result = solve_case_with_checkpoint(_case(), checkpoint, _config())
 
     assert result.used_checkpoint is False
-    assert result.failure_reason is not None and "normalization mismatch" in result.failure_reason
+    assert (
+        result.failure_reason is not None
+        and "normalization mismatch" in result.failure_reason
+    )
 
 
-def test_raw_infeasible_learned_output_replays_analytic_incumbent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raw_infeasible_learned_output_replays_analytic_incumbent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import hcfp.learned as learned
 
     checkpoint = tmp_path / "model.pt"
-    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION
+    )
     source = SimpleNamespace(
         block_count=2,
         area_targets=[4.0, 4.0],
@@ -1410,16 +1583,22 @@ def test_raw_infeasible_learned_output_replays_analytic_incumbent(tmp_path: Path
     )
     monkeypatch.setattr(learned, "solve_analytic", lambda *_args, **_kwargs: analytic)
 
-    result = learned.solve(source, checkpoint=checkpoint, config=_config(), require_checkpoint=True)
+    result = learned.solve(
+        source, checkpoint=checkpoint, config=_config(), require_checkpoint=True
+    )
 
     assert result == analytic
 
 
-def test_raw_infeasible_analytic_replay_uses_safe_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_raw_infeasible_analytic_replay_uses_safe_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import hcfp.learned as learned
 
     checkpoint = tmp_path / "model.pt"
-    save_checkpoint(HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION)
+    save_checkpoint(
+        HCFPModel(ModelConfig(hidden_dim=16)), checkpoint, RUNTIME_NORMALIZATION
+    )
     source = SimpleNamespace(
         block_count=2,
         area_targets=[4.0, 4.0],
@@ -1435,7 +1614,9 @@ def test_raw_infeasible_analytic_replay_uses_safe_fallback(tmp_path: Path, monke
     monkeypatch.setattr(learned, "solve_analytic", lambda *_args, **_kwargs: overlap)
     monkeypatch.setattr(learned, "safe_fallback", lambda *_args, **_kwargs: safe)
 
-    result = learned.solve(source, checkpoint=checkpoint, config=_config(), require_checkpoint=True)
+    result = learned.solve(
+        source, checkpoint=checkpoint, config=_config(), require_checkpoint=True
+    )
 
     assert result == safe
 
@@ -1454,16 +1635,22 @@ def test_raw_infeasible_selected_uses_next_raw_feasible_pool_candidate(
         converted.append(x)
         return [(x, 0.0, 2.0, 2.0), (x + 3.0, 0.0, 2.0, 2.0)]
 
-    monkeypatch.setattr(learned, "analyze_case_with_checkpoint", lambda *_args: _analysis())
+    monkeypatch.setattr(
+        learned, "analyze_case_with_checkpoint", lambda *_args: _analysis()
+    )
     monkeypatch.setattr(learned, "to_official_placements", to_official)
-    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] == 10.0)
+    monkeypatch.setattr(
+        learned, "verify_feasible", lambda _source, rows: rows[0][0] == 10.0
+    )
     monkeypatch.setattr(
         learned,
         "solve_analytic",
         lambda *_args, **_kwargs: pytest.fail("analytic replay must not run"),
     )
 
-    result = learned.solve(source, checkpoint=tmp_path / "model.pt", require_checkpoint=True)
+    result = learned.solve(
+        source, checkpoint=tmp_path / "model.pt", require_checkpoint=True
+    )
 
     assert result[0][0] == 10.0
     assert converted[-1] == 10.0
@@ -1487,13 +1674,17 @@ def test_raw_infeasible_pool_still_fails_closed_to_analytic_then_fallback(
         analytic_calls += 1
         return overlap
 
-    monkeypatch.setattr(learned, "analyze_case_with_checkpoint", lambda *_args: _analysis())
+    monkeypatch.setattr(
+        learned, "analyze_case_with_checkpoint", lambda *_args: _analysis()
+    )
     monkeypatch.setattr(learned, "to_official_placements", lambda *_args: overlap)
     monkeypatch.setattr(learned, "verify_feasible", lambda *_args: False)
     monkeypatch.setattr(learned, "solve_analytic", replay_analytic)
     monkeypatch.setattr(learned, "safe_fallback", lambda *_args: safe)
 
-    result = learned.solve(source, checkpoint=tmp_path / "model.pt", require_checkpoint=True)
+    result = learned.solve(
+        source, checkpoint=tmp_path / "model.pt", require_checkpoint=True
+    )
 
     assert analytic_calls == 1
     assert result == safe
@@ -1514,12 +1705,18 @@ def test_raw_feasible_pool_fallback_does_not_replace_analytic_replay(
 
     analysis = _analysis()
     analysis.result.selected = analysis.analytic.projected_candidates[1]
-    monkeypatch.setattr(learned, "analyze_case_with_checkpoint", lambda *_args: analysis)
+    monkeypatch.setattr(
+        learned, "analyze_case_with_checkpoint", lambda *_args: analysis
+    )
     monkeypatch.setattr(learned, "to_official_placements", to_official)
-    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] in (0.0, 40.0))
+    monkeypatch.setattr(
+        learned, "verify_feasible", lambda _source, rows: rows[0][0] in (0.0, 40.0)
+    )
     monkeypatch.setattr(learned, "solve_analytic", lambda *_args, **_kwargs: analytic)
 
-    result = learned.solve(source, checkpoint=tmp_path / "model.pt", require_checkpoint=True)
+    result = learned.solve(
+        source, checkpoint=tmp_path / "model.pt", require_checkpoint=True
+    )
 
     assert result == analytic
 
@@ -1539,7 +1736,9 @@ def test_raw_feasible_selected_keeps_fast_path_without_pool_scan(
         conversions += 1
         return expected
 
-    monkeypatch.setattr(learned, "analyze_case_with_checkpoint", lambda *_args: _analysis())
+    monkeypatch.setattr(
+        learned, "analyze_case_with_checkpoint", lambda *_args: _analysis()
+    )
     monkeypatch.setattr(learned, "to_official_placements", to_official)
     monkeypatch.setattr(learned, "verify_feasible", lambda *_args: True)
     monkeypatch.setattr(
@@ -1548,7 +1747,9 @@ def test_raw_feasible_selected_keeps_fast_path_without_pool_scan(
         lambda *_args, **_kwargs: pytest.fail("analytic replay must not run"),
     )
 
-    result = learned.solve(source, checkpoint=tmp_path / "model.pt", require_checkpoint=True)
+    result = learned.solve(
+        source, checkpoint=tmp_path / "model.pt", require_checkpoint=True
+    )
 
     assert result == expected
     assert conversions == 1
@@ -1702,7 +1903,9 @@ def test_raw_constraint_guard_can_admit_exact_dominating_component_proposal(
         "repair_raw_constraints",
         lambda _source, rows, _record: SimpleNamespace(placements=tuple(rows)),
     )
-    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] == 5.0)
+    monkeypatch.setattr(
+        learned, "verify_feasible", lambda _source, rows: rows[0][0] == 5.0
+    )
     monkeypatch.setattr(
         learned,
         "_raw_quality",
@@ -1799,7 +2002,9 @@ def test_raw_constraint_guard_rejects_infeasible_component_proposal(
         "repair_raw_constraints",
         lambda _source, rows, _record: SimpleNamespace(placements=tuple(rows)),
     )
-    monkeypatch.setattr(learned, "verify_feasible", lambda _source, rows: rows[0][0] != 5.0)
+    monkeypatch.setattr(
+        learned, "verify_feasible", lambda _source, rows: rows[0][0] != 5.0
+    )
     monkeypatch.setattr(
         learned,
         "_raw_quality",
@@ -1869,9 +2074,10 @@ def test_post_tail_group_repair_accepts_only_exact_pareto_improvement() -> None:
         source.constraints,
     )
 
-    assert learned._post_tail_group_repair(
-        source, protected_case, placements
-    ) == placements
+    assert (
+        learned._post_tail_group_repair(source, protected_case, placements)
+        == placements
+    )
 
 
 def test_legacy_mib_challenger_uses_observable_anchor_signature() -> None:
@@ -2063,17 +2269,25 @@ def test_require_checkpoint_failure_does_not_scan_pool_or_replay_analytic(
     )
 
     with pytest.raises(RuntimeError, match="checkpoint unavailable"):
-        learned.solve(_source(), checkpoint=tmp_path / "model.pt", require_checkpoint=True)
+        learned.solve(
+            _source(), checkpoint=tmp_path / "model.pt", require_checkpoint=True
+        )
 
 
 def test_candidate_funnel_proxy_can_trade_small_geometry_cost_for_soft_gain() -> None:
     import hcfp.learned as learned
 
-    assert learned._relative_candidate_proxy_delta(
-        (0.50, 108.0, 115.0),
-        (0.75, 100.0, 100.0),
-    ) < 0.0
-    assert learned._relative_candidate_proxy_delta(
-        (0.75, 108.0, 115.0),
-        (0.75, 100.0, 100.0),
-    ) > 0.0
+    assert (
+        learned._relative_candidate_proxy_delta(
+            (0.50, 108.0, 115.0),
+            (0.75, 100.0, 100.0),
+        )
+        < 0.0
+    )
+    assert (
+        learned._relative_candidate_proxy_delta(
+            (0.75, 108.0, 115.0),
+            (0.75, 100.0, 100.0),
+        )
+        > 0.0
+    )

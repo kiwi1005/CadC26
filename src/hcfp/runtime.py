@@ -119,7 +119,41 @@ def _load_default_solver() -> Solver | None:
             large_min_blocks = int(os.environ.get("HCFP_STRUCTURED_MIN_BLOCKS", "106"))
             topology_seeds = int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "16"))
             constraint_seeds = int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "16"))
+            treemap_seeds = int(os.environ.get("HCFP_TREEMAP_SEEDS", "0"))
+            treemap_area_slack = float(os.environ.get("HCFP_TREEMAP_AREA_SLACK", "1.0"))
             btree_seeds = int(os.environ.get("HCFP_BTREE_SEEDS", "0"))
+            contact_synthesis_seeds = int(
+                os.environ.get("HCFP_CONTACT_SYNTHESIS_SEEDS", "0")
+            )
+            btree_dual_axis = os.environ.get("HCFP_BTREE_DUAL_AXIS", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            btree_shape_variants = os.environ.get(
+                "HCFP_BTREE_SHAPE_VARIANTS", ""
+            ).lower() in {"1", "true", "yes", "on"}
+            btree_local_moves = int(os.environ.get("HCFP_BTREE_LOCAL_MOVES", "0"))
+            family_router = os.environ.get("HCFP_FAMILY_ROUTER", "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            island_relocation = os.environ.get(
+                "HCFP_ISLAND_RELOCATION", ""
+            ).lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            baseline_selection_margin = (
+                float(os.environ["HCFP_BASELINE_SELECTION_MARGIN"])
+                if os.environ.get("HCFP_BASELINE_SELECTION_MARGIN") is not None
+                else None
+            )
 
             def solve_learned(case: SolveCase):
                 if case.block_count < large_min_blocks:
@@ -127,7 +161,16 @@ def _load_default_solver() -> Solver | None:
                 config = learned.LearnedConfig(
                     topology_seeds=topology_seeds,
                     constraint_seeds=constraint_seeds,
+                    treemap_seeds=treemap_seeds,
+                    treemap_area_slack=treemap_area_slack,
                     btree_seeds=btree_seeds,
+                    btree_dual_axis=btree_dual_axis,
+                    btree_shape_variants=btree_shape_variants,
+                    btree_local_moves=btree_local_moves,
+                    family_router=family_router,
+                    contact_synthesis_seeds=contact_synthesis_seeds,
+                    island_relocation=island_relocation,
+                    baseline_selection_margin=baseline_selection_margin,
                 )
                 return learned.solve(case, checkpoint=large_checkpoint, config=config)
 
@@ -205,7 +248,9 @@ def _coerce_placement(rect: Sequence[float]) -> Placement:
     return (x, y, w, h)
 
 
-def _shape_for_block(i: int, area: float, fixed: bool, target: Sequence[Any] | None) -> tuple[float, float]:
+def _shape_for_block(
+    i: int, area: float, fixed: bool, target: Sequence[Any] | None
+) -> tuple[float, float]:
     if fixed and _valid_target(target):
         _, _, w, h = _placement_from_target(target)
         return w, h
@@ -233,14 +278,20 @@ def _target_rows(target_positions: Any, n: int) -> list[Sequence[Any] | None]:
     if target_positions is None:
         return [None] * n
     rows = _as_list(target_positions, n, default=None)
-    return [row if isinstance(row, Sequence) and not isinstance(row, (str, bytes)) else None for row in rows]
+    return [
+        row if isinstance(row, Sequence) and not isinstance(row, (str, bytes)) else None
+        for row in rows
+    ]
 
 
 def _constraint_row(constraints: Any, index: int) -> Any:
     if constraints is None:
         return ()
     if isinstance(constraints, dict):
-        return {key: _index_or_default(value, index, None) for key, value in constraints.items()}
+        return {
+            key: _index_or_default(value, index, None)
+            for key, value in constraints.items()
+        }
     try:
         return constraints[index]
     except (TypeError, IndexError, KeyError):
@@ -250,7 +301,11 @@ def _constraint_row(constraints: Any, index: int) -> Any:
 def _field(row: Any, name: str, index: int) -> Any:
     if isinstance(row, dict):
         return row.get(name, False)
-    if not isinstance(row, (str, bytes)) and hasattr(row, "__len__") and hasattr(row, "__getitem__"):
+    if (
+        not isinstance(row, (str, bytes))
+        and hasattr(row, "__len__")
+        and hasattr(row, "__getitem__")
+    ):
         return row[index] if len(row) > index else False
     return getattr(row, name, False)
 

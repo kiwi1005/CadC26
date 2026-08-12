@@ -28,9 +28,18 @@ def main(argv: list[str] | None = None) -> int:
     command_args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("shards", nargs="*", help="input .tar shards")
-    parser.add_argument("--floorset-lite-root", help="direct official training root; avoids copied shards")
-    parser.add_argument("--sample-limit", type=int, help="bounded direct-stream subset for smoke/ablation")
-    parser.add_argument("--sampling", choices=("uniform", "score-aware"), default="score-aware")
+    parser.add_argument(
+        "--floorset-lite-root",
+        help="direct official training root; avoids copied shards",
+    )
+    parser.add_argument(
+        "--sample-limit",
+        type=int,
+        help="bounded direct-stream subset for smoke/ablation",
+    )
+    parser.add_argument(
+        "--sampling", choices=("uniform", "score-aware"), default="score-aware"
+    )
     parser.add_argument("--min-blocks", type=int, default=1)
     parser.add_argument("--max-blocks", type=int, default=120)
     parser.add_argument("-o", "--output", required=True, help="output checkpoint")
@@ -71,6 +80,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="opt in to Q3 dynamic pair messages and collective rollout supervision",
     )
+    parser.add_argument(
+        "--baseline-head",
+        action="store_true",
+        default=None,
+        help="opt in to case-level baseline area/HPWL prediction",
+    )
     parser.add_argument("--learning-rate", type=float, default=3.0e-4)
     parser.add_argument("--amp", choices=("off", "bf16"), default="bf16")
     parser.add_argument("--ema-decay", type=float, default=0.999)
@@ -79,7 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="use the target EMA decay from the first update",
     )
-    parser.add_argument("--init-checkpoint", help="warm-start model weights from a runtime checkpoint")
+    parser.add_argument(
+        "--init-checkpoint", help="warm-start model weights from a runtime checkpoint"
+    )
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
@@ -99,11 +116,19 @@ def main(argv: list[str] | None = None) -> int:
         if provenance.get("split") != "train":
             raise ValueError("training accepts only shards with provenance split=train")
         source = str(provenance.get("source", "")).lower()
-        if not source or any(token in source for token in ("validation", "visible", "test")):
+        if not source or any(
+            token in source for token in ("validation", "visible", "test")
+        ):
             raise ValueError("training shard source is missing or validation/test-like")
         if not provenance.get("denylist_sha256"):
-            raise ValueError("training shard provenance is missing a validation denylist checksum")
-    sample_count = sum(len(manifest.get("samples", [])) for manifest in manifests) if manifests else args.sample_limit
+            raise ValueError(
+                "training shard provenance is missing a validation denylist checksum"
+            )
+    sample_count = (
+        sum(len(manifest.get("samples", [])) for manifest in manifests)
+        if manifests
+        else args.sample_limit
+    )
 
     consumed_sample_ids: list[str] = []
 
@@ -118,13 +143,11 @@ def main(argv: list[str] | None = None) -> int:
                 max_blocks=args.max_blocks,
             )
         else:
-            stream = (
-                sample
-                for path in args.shards
-                for sample in iter_shard(path)
-            )
+            stream = (sample for path in args.shards for sample in iter_shard(path))
         for sample in stream:
-            if sample.sample_id.lower().startswith(("validation-", "val-", "official/")):
+            if sample.sample_id.lower().startswith(
+                ("validation-", "val-", "official/")
+            ):
                 raise ValueError(
                     f"official validation-like sample ID is forbidden: {sample.sample_id}"
                 )
@@ -140,9 +163,7 @@ def main(argv: list[str] | None = None) -> int:
             map_location="cpu",
         )
         topology_enabled = (
-            loaded.config.topology_enabled
-            if args.topology is None
-            else args.topology
+            loaded.config.topology_enabled if args.topology is None else args.topology
         )
         config = replace(
             loaded.config,
@@ -176,6 +197,11 @@ def main(argv: list[str] | None = None) -> int:
                 if args.collective is None
                 else args.collective
             ),
+            baseline_enabled=(
+                loaded.config.baseline_enabled
+                if args.baseline_head is None
+                else args.baseline_head
+            ),
         )
         model = HCFPModel(config)
         incompatible = model.load_state_dict(loaded.state_dict(), strict=False)
@@ -186,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
             "encoder.mib_message.",
             "constraints.",
             "collective.",
+            "baseline.",
         )
         invalid_missing = [
             name
@@ -202,7 +229,9 @@ def main(argv: list[str] | None = None) -> int:
             ModelConfig(
                 hidden_dim=args.hidden_dim,
                 encoder_layers=args.encoder_layers,
-                residual_bound=(0.10 if args.center_bound is None else args.center_bound),
+                residual_bound=(
+                    0.10 if args.center_bound is None else args.center_bound
+                ),
                 aspect_residual_bound=(
                     0.25
                     if args.aspect_residual_bound is None
@@ -214,10 +243,17 @@ def main(argv: list[str] | None = None) -> int:
                 btree_enabled=bool(args.btree),
                 constraint_enabled=bool(args.constraints),
                 collective_enabled=bool(args.collective),
+                baseline_enabled=bool(args.baseline_head),
             )
         )
     if args.stage == "collective" and not model.config.collective_enabled:
-        raise ValueError("--stage collective requires --collective or a collective checkpoint")
+        raise ValueError(
+            "--stage collective requires --collective or a collective checkpoint"
+        )
+    if args.stage == "baseline" and not model.config.baseline_enabled:
+        raise ValueError(
+            "--stage baseline requires --baseline-head or a baseline checkpoint"
+        )
     checkpoint_metadata = _training_checkpoint_metadata(
         args.stage,
         model.config,
@@ -315,13 +351,17 @@ def main(argv: list[str] | None = None) -> int:
         "block_range": [args.min_blocks, args.max_blocks],
         "direct_floorset_lite_stream": direct_stream,
         "parent_training_report": parent_training_report,
-        "shards": [{"path": str(path), "sha256": file_sha256(path)} for path in args.shards],
+        "shards": [
+            {"path": str(path), "sha256": file_sha256(path)} for path in args.shards
+        ],
         "floorset_lite_root": args.floorset_lite_root,
         "first_loss": history[0],
         "last_loss": history[-1],
     }
     report_path = Path(f"{args.output}.training.json")
-    report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    report_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
 
@@ -351,7 +391,9 @@ def _training_checkpoint_metadata(
     config: ModelConfig,
     source: dict[str, object] | None,
 ) -> dict[str, object]:
-    trained_heads = set(source.get("trained_heads", [])) if source is not None else set()
+    trained_heads = (
+        set(source.get("trained_heads", [])) if source is not None else set()
+    )
     if stage in {"structure", "all"}:
         trained_heads.add("encoder")
     if stage in {"structure", "all"}:
@@ -372,6 +414,8 @@ def _training_checkpoint_metadata(
         trained_heads.add("flow")
     if stage in {"collective", "all"} and config.collective_enabled:
         trained_heads.add("collective")
+    if stage in {"baseline", "all"} and config.baseline_enabled:
+        trained_heads.add("baseline")
     capabilities = (
         dict(source.get("capabilities", {})) if source is not None else {"flow": False}
     )
@@ -379,6 +423,8 @@ def _training_checkpoint_metadata(
         capabilities["flow"] = True
     if stage in {"collective", "all"} and config.collective_enabled:
         capabilities["collective"] = True
+    if stage in {"baseline", "all"} and config.baseline_enabled:
+        capabilities["baseline"] = True
     objective = (
         "collective_rollout_v1"
         if stage == "collective"
@@ -404,6 +450,7 @@ def _select_trainable_parameters(model: HCFPModel, stage: str) -> list[str]:
         "initializer": ("initializer.",),
         "flow": ("flow.",),
         "collective": ("collective.",),
+        "baseline": ("baseline.",),
     }
     names = []
     for name, parameter in model.named_parameters():

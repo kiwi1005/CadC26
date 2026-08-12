@@ -172,6 +172,10 @@ and submission freeze is tracked in
 The completed P0 bbox/cap evidence and the P1 training-only outline-recovery
 audit are recorded in
 [`docs/research/hcfp5090_p0_p1_outline_results_2026-08-12.md`](docs/research/hcfp5090_p0_p1_outline_results_2026-08-12.md).
+The P7 axis-dual B*-Tree, sparse-island rescue, failed challenger ablations,
+baseline-head calibration, full100 QoR result and per-case visual audit are
+recorded in
+[`docs/research/hcfp5090_p7_frontier_completion_2026-08-13.md`](docs/research/hcfp5090_p7_frontier_completion_2026-08-13.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,

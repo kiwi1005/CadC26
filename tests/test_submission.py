@@ -70,7 +70,11 @@ def _representative_case_payload():
 
 
 def _max_abs_delta(left, right):
-    return max(abs(a - b) for rect_a, rect_b in zip(left, right) for a, b in zip(rect_a, rect_b))
+    return max(
+        abs(a - b)
+        for rect_a, rect_b in zip(left, right)
+        for a, b in zip(rect_a, rect_b)
+    )
 
 
 def test_official_solve_contract_preserves_hard_targets_and_float_tuples():
@@ -93,7 +97,10 @@ def test_runtime_uses_injected_solver_when_valid():
 
     runtime = HCFPRuntime(solver=solver)
 
-    assert runtime.solve(2, [1, 4], [], [], [], []) == [(0.0, 0.0, 1.0, 1.0), (1.0, 0.0, 2.0, 2.0)]
+    assert runtime.solve(2, [1, 4], [], [], [], []) == [
+        (0.0, 0.0, 1.0, 1.0),
+        (1.0, 0.0, 2.0, 2.0),
+    ]
 
 
 def test_runtime_falls_back_on_exception_and_non_finite_output():
@@ -226,7 +233,24 @@ def test_large_cases_use_structured_checkpoint_policy(monkeypatch) -> None:
 
     assert calls == [
         (105, "general.pt", None),
-        (106, "large.pt", {"topology_seeds": 16, "constraint_seeds": 16}),
+        (
+            106,
+            "large.pt",
+            {
+                "topology_seeds": 16,
+                "constraint_seeds": 16,
+                "treemap_seeds": 0,
+                "treemap_area_slack": 1.0,
+                "btree_seeds": 0,
+                "btree_dual_axis": False,
+                "btree_shape_variants": False,
+                "btree_local_moves": 0,
+                "family_router": False,
+                "contact_synthesis_seeds": 0,
+                "island_relocation": False,
+                "baseline_selection_margin": None,
+            },
+        ),
     ]
 
 

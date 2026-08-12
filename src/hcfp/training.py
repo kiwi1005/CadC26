@@ -12,14 +12,23 @@ from hcfp.collective import PAIR_FEATURES, dynamic_pair_features
 from hcfp.data import DataSample, SolutionLabels
 from hcfp.dynamics import DynamicsConfig, initialize_population
 from hcfp.fallback import safe_shelf
-from hcfp.geometry import exact_shape_projection, initializer_anchor, overlap_area_matrix
+from hcfp.geometry import (
+    exact_shape_projection,
+    initializer_anchor,
+    overlap_area_matrix,
+)
 from hcfp.model import HCFPModel, soft_sequence_pair_relation_logits
 from hcfp.constraints.contact_tree import BOTTOM, LEFT, RIGHT, TOP, extract_contacts
-from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_from_rectangles
+from hcfp.topology import (
+    antisymmetry_loss,
+    partial_label_nll,
+    relation_mask_from_rectangles,
+)
 
 
 Tensor = torch.Tensor
 TRAINING_STAGES = (
+    "baseline",
     "structure",
     "btree",
     "constraints",
@@ -42,6 +51,7 @@ class LossReport:
     flow: Tensor
     constraint: Tensor
     collective: Tensor
+    baseline: Tensor | None = None
 
     def scalars(self) -> dict[str, float]:
         return {
@@ -51,6 +61,9 @@ class LossReport:
             "flow": float(self.flow.detach()),
             "constraint": float(self.constraint.detach()),
             "collective": float(self.collective.detach()),
+            "baseline": float(self.baseline.detach())
+            if self.baseline is not None
+            else 0.0,
         }
 
 
@@ -80,7 +93,9 @@ class ExponentialMovingAverage:
     def effective_decay(self) -> float:
         if not self.warmup:
             return self.target_decay
-        return min(self.target_decay, (1.0 + self.update_count) / (10.0 + self.update_count))
+        return min(
+            self.target_decay, (1.0 + self.update_count) / (10.0 + self.update_count)
+        )
 
     @torch.no_grad()
     def update(self, model: HCFPModel) -> None:
@@ -125,8 +140,12 @@ def supervised_loss(
     )
     target_center = labels.centers.unsqueeze(0) - anchor_center
     target_aspect = labels.log_aspect.unsqueeze(0) - anchor_aspect
-    target_center = target_center.clamp(-model.config.residual_bound, model.config.residual_bound)
-    target_aspect = target_aspect.clamp(-model.config.aspect_residual_bound, model.config.aspect_residual_bound)
+    target_center = target_center.clamp(
+        -model.config.residual_bound, model.config.residual_bound
+    )
+    target_aspect = target_aspect.clamp(
+        -model.config.aspect_residual_bound, model.config.aspect_residual_bound
+    )
     target_center[:, case.preplaced_mask] = 0.0
     target_aspect[:, case.fixed_mask | case.preplaced_mask] = 0.0
 
@@ -136,11 +155,17 @@ def supervised_loss(
     if stage in {"flow", "all"}:
         qstar = torch.cat((target_center, target_aspect.unsqueeze(-1)), dim=-1)
         generator = torch.Generator(device="cpu").manual_seed(int(seed))
-        noise = torch.randn(qstar.shape, generator=generator, dtype=torch.float32).to(device=device)
+        noise = torch.randn(qstar.shape, generator=generator, dtype=torch.float32).to(
+            device=device
+        )
         noise[:, case.preplaced_mask, :2] = 0.0
         noise[:, case.fixed_mask | case.preplaced_mask, 2] = 0.0
-        flow_time = torch.rand(population, generator=generator, dtype=torch.float32).to(device=device)
-        flow_state = (1.0 - flow_time[:, None, None]) * noise + flow_time[:, None, None] * qstar
+        flow_time = torch.rand(population, generator=generator, dtype=torch.float32).to(
+            device=device
+        )
+        flow_state = (1.0 - flow_time[:, None, None]) * noise + flow_time[
+            :, None, None
+        ] * qstar
         flow_target = qstar - noise
 
     output = model(
@@ -166,12 +191,17 @@ def supervised_loss(
             relation_logits = output.precedence_logits[..., :4]
             precedence = partial_label_nll(relation_logits, allowed, pair_mask=valid)
             precedence += antisymmetry_loss(relation_logits, pair_mask=valid)
-            if output.positive_permutation is not None and output.negative_permutation is not None:
+            if (
+                output.positive_permutation is not None
+                and output.negative_permutation is not None
+            ):
                 topology_logits = soft_sequence_pair_relation_logits(
                     output.positive_permutation,
                     output.negative_permutation,
                 )
-                precedence += partial_label_nll(topology_logits, allowed, pair_mask=valid)
+                precedence += partial_label_nll(
+                    topology_logits, allowed, pair_mask=valid
+                )
             if (
                 sample.tree_edges is not None
                 and output.btree_root_logits is not None
@@ -197,7 +227,9 @@ def supervised_loss(
                 or output.btree_root_logits is None
                 or output.btree_edge_logits is None
             ):
-                raise ValueError("btree stage requires tree labels and btree_enabled model")
+                raise ValueError(
+                    "btree stage requires tree labels and btree_enabled model"
+                )
             root_target, child_mask, edge_target = _btree_targets(
                 sample.tree_edges,
                 case.n,
@@ -274,13 +306,26 @@ def supervised_loss(
     elif stage == "collective":
         raise ValueError("collective stage requires collective_enabled model")
 
+    baseline = zero
+    if stage in {"baseline", "all"}:
+        if output.baseline_log_area is None or output.baseline_log_hpwl is None:
+            if stage == "baseline":
+                raise ValueError("baseline stage requires baseline_enabled model")
+        else:
+            target = _baseline_targets(case, labels)
+            prediction = torch.stack(
+                (output.baseline_log_area, output.baseline_log_hpwl)
+            )
+            baseline = F.smooth_l1_loss(prediction, target)
+
     return LossReport(
-        structure + initializer + flow + collective,
-        structure,
-        initializer,
-        flow,
-        constraint,
-        collective,
+        total=structure + initializer + flow + collective + baseline,
+        structure=structure,
+        initializer=initializer,
+        flow=flow,
+        constraint=constraint,
+        collective=collective,
+        baseline=baseline,
     )
 
 
@@ -324,11 +369,15 @@ def _collective_supervision(
     )
     topology = relation.unsqueeze(0).expand(population, -1, -1)
     contact_target, _ = _contact_targets(case, labels)
-    latch = torch.where(
-        contact_target > 0,
-        contact_target - 1,
-        torch.full_like(contact_target, -1),
-    ).unsqueeze(0).expand(population, -1, -1)
+    latch = (
+        torch.where(
+            contact_target > 0,
+            contact_target - 1,
+            torch.full_like(contact_target, -1),
+        )
+        .unsqueeze(0)
+        .expand(population, -1, -1)
+    )
 
     loss = embedding.sum() * 0.0
     for step_index in range(_COLLECTIVE_ROLLOUT_STEPS):
@@ -400,10 +449,11 @@ def _collective_gate_targets(case, pair_features: Tensor) -> Tensor:
     degree = case.b2b_weight.to(device=pair_features.device).sum(dim=1) > 0.0
     pin = torch.zeros(case.n, dtype=torch.bool, device=pair_features.device)
     if case.p2b_edges.numel():
-        pin[case.p2b_edges[:, 1].to(device=pair_features.device, dtype=torch.long)] = True
+        pin[case.p2b_edges[:, 1].to(device=pair_features.device, dtype=torch.long)] = (
+            True
+        )
     overlap = (
-        (pair_features[..., _OVERLAP_X] > 0.0)
-        & (pair_features[..., _OVERLAP_Y] > 0.0)
+        (pair_features[..., _OVERLAP_X] > 0.0) & (pair_features[..., _OVERLAP_Y] > 0.0)
     ).any(dim=2)
     boundary = case.boundary_bits.to(device=pair_features.device).any(dim=1)
     group = (
@@ -450,6 +500,7 @@ def train_steps(
 
         def sample_factory() -> Iterable[DataSample]:
             return iter(materialized)
+
     iterator: Iterator[DataSample] = iter(sample_factory())
     history = []
     model.train()
@@ -494,6 +545,20 @@ def _labels_to(labels: SolutionLabels, device: torch.device) -> SolutionLabels:
     )
 
 
+def _baseline_targets(case, labels: SolutionLabels) -> Tensor:
+    """Return ``[log(area / scale²), log(hpwl / scale)]`` targets."""
+
+    scale = torch.as_tensor(
+        case.scale, dtype=torch.float32, device=labels.baseline_area.device
+    )
+    tiny = torch.finfo(torch.float32).tiny
+    area = labels.baseline_area.to(dtype=torch.float32).clamp_min(tiny) / scale.square()
+    hpwl = labels.baseline_hpwl.to(dtype=torch.float32).clamp_min(
+        tiny
+    ) / scale.clamp_min(tiny)
+    return torch.stack((area.log(), hpwl.log()))
+
+
 def _btree_targets(
     edges: Tensor,
     block_count: int,
@@ -515,13 +580,17 @@ def _btree_targets(
 
 
 def _contact_targets(case, labels: SolutionLabels) -> tuple[Tensor, Tensor]:
-    membership = case.group_membership.to(device=labels.rectangles.device, dtype=torch.bool)
+    membership = case.group_membership.to(
+        device=labels.rectangles.device, dtype=torch.bool
+    )
     n = case.n
     if membership.numel():
         active = membership.to(dtype=labels.rectangles.dtype)
         same_group = (active.transpose(0, 1) @ active) > 0
     else:
-        same_group = torch.zeros((n, n), dtype=torch.bool, device=labels.rectangles.device)
+        same_group = torch.zeros(
+            (n, n), dtype=torch.bool, device=labels.rectangles.device
+        )
     diagonal = torch.eye(n, dtype=torch.bool, device=labels.rectangles.device)
     mask = same_group & ~diagonal & case.block_mask[:, None] & case.block_mask[None, :]
     target = torch.zeros((n, n), dtype=torch.long, device=labels.rectangles.device)
@@ -555,20 +624,28 @@ def _boundary_order_targets(case, labels: SolutionLabels) -> tuple[Tensor, Tenso
     height = (top - bottom).clamp_min(1.0e-12)
     x_norm = (centers[:, 0] - left) / width
     y_norm = (centers[:, 1] - bottom) / height
-    target = torch.stack((y_norm, y_norm, x_norm, x_norm), dim=1).to(dtype=torch.float32)
+    target = torch.stack((y_norm, y_norm, x_norm, x_norm), dim=1).to(
+        dtype=torch.float32
+    )
     mask = bits & case.block_mask[:, None]
     return target, mask
 
 
 def _mib_log_aspect_targets(case, labels: SolutionLabels) -> tuple[Tensor, Tensor]:
-    membership = case.mib_membership.to(device=labels.rectangles.device, dtype=torch.bool)
+    membership = case.mib_membership.to(
+        device=labels.rectangles.device, dtype=torch.bool
+    )
     if membership.shape[0] == 0:
-        return labels.log_aspect.new_empty((0,)), torch.zeros((0,), dtype=torch.bool, device=labels.rectangles.device)
+        return labels.log_aspect.new_empty((0,)), torch.zeros(
+            (0,), dtype=torch.bool, device=labels.rectangles.device
+        )
     mask = membership & case.block_mask[None, :]
     counts = mask.sum(dim=1)
     target = labels.log_aspect.new_zeros((membership.shape[0],))
     active = counts > 0
     if bool(active.any()):
         weights = mask[active].to(dtype=labels.log_aspect.dtype)
-        target[active] = (weights @ labels.log_aspect) / counts[active].to(dtype=labels.log_aspect.dtype)
+        target[active] = (weights @ labels.log_aspect) / counts[active].to(
+            dtype=labels.log_aspect.dtype
+        )
     return target, active

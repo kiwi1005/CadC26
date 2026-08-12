@@ -46,10 +46,20 @@ def contact_aware_vertical_orders(
 
     nodes = list(range(n))
     variants = (
-        ("boundary_band", sorted(nodes, key=lambda node: (boundary_band(node), int(rank[node])))),
+        (
+            "boundary_band",
+            sorted(nodes, key=lambda node: (boundary_band(node), int(rank[node]))),
+        ),
         (
             "group_cluster",
-            sorted(nodes, key=lambda node: (float(group_rank[node]), int(group_id[node]), int(rank[node]))),
+            sorted(
+                nodes,
+                key=lambda node: (
+                    float(group_rank[node]),
+                    int(group_id[node]),
+                    int(rank[node]),
+                ),
+            ),
         ),
         (
             "boundary_group",
@@ -95,14 +105,22 @@ def local_tree_variants(
         raise ValueError("constraint tensors do not match B*-Tree")
     candidates: list[tuple[tuple[int, ...], str, BStarTree]] = []
 
-    for parent, (left_child, right_child) in enumerate(zip(tree.left, tree.right, strict=True)):
+    for parent, (left_child, right_child) in enumerate(
+        zip(tree.left, tree.right, strict=True)
+    ):
         if left_child < 0 or right_child < 0:
             continue
         left = list(tree.left)
         right = list(tree.right)
         left[parent], right[parent] = right_child, left_child
         priority = -int(bits[left_child].any()) - int(bits[right_child].any())
-        candidates.append(((0, priority, parent), f"sibling_flip:{parent}", _tree_from_children(left, right)))
+        candidates.append(
+            (
+                (0, priority, parent),
+                f"sibling_flip:{parent}",
+                _tree_from_children(left, right),
+            )
+        )
 
     parents = [-1] * n
     parent_sides = [-1] * n
@@ -150,6 +168,120 @@ def local_tree_variants(
     return tuple(selected)
 
 
+def subtree_move_variants(
+    tree: "BStarTree",
+    *,
+    limit: int,
+) -> tuple[tuple[str, "BStarTree"], ...]:
+    """Generate bounded recursive transpose and subtree reinsert variants.
+
+    A ``subtree_transpose`` recursively exchanges left and right children for
+    every node below the selected root.  A ``subtree_reinsert`` detaches one
+    subtree and attaches it to an empty child slot outside that subtree.  Both
+    operations preserve the B*-Tree node set and are rebuilt through
+    :meth:`BStarTree.from_edges`, so malformed or cyclic variants cannot leak
+    into callers.
+    """
+
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    if limit == 0 or tree.block_count <= 1:
+        return ()
+
+    n = tree.block_count
+    children = tuple(zip(tree.left, tree.right, strict=True))
+    parents = [-1] * n
+    parent_sides = [-1] * n
+    for parent, (left_child, right_child) in enumerate(children):
+        for side, child in enumerate((left_child, right_child)):
+            if child >= 0:
+                parents[child] = parent
+                parent_sides[child] = side
+
+    descendants: list[set[int]] = [set() for _ in range(n)]
+
+    def collect(node: int) -> set[int]:
+        members = descendants[node]
+        if members:
+            return members
+        for child in children[node]:
+            if child >= 0:
+                members.add(child)
+                members.update(collect(child))
+        return members
+
+    for node in range(n):
+        collect(node)
+
+    candidates: list[tuple[tuple[int, ...], str, BStarTree]] = []
+
+    # Keep transpose variants before reinsertions, and enumerate roots by
+    # block index for deterministic output independent of hash/set ordering.
+    for node in range(n):
+        if not descendants[node]:
+            continue
+        left = list(tree.left)
+        right = list(tree.right)
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            left[current], right[current] = right[current], left[current]
+            if left[current] >= 0:
+                stack.append(left[current])
+            if right[current] >= 0:
+                stack.append(right[current])
+        candidates.append(
+            ((0, node), f"subtree_transpose:{node}", _tree_from_children(left, right))
+        )
+
+    # A target slot is empty in the post-detach tree either when it was
+    # already empty, or when it is the source slot just vacated.
+    for node in range(n):
+        if node == tree.root:
+            continue
+        old_parent = parents[node]
+        old_side = parent_sides[node]
+        if old_parent < 0:
+            continue
+        blocked = descendants[node] | {node}
+        for target in range(n):
+            if target in blocked:
+                continue
+            for side in (0, 1):
+                current_child = children[target][side]
+                if current_child >= 0 and not (
+                    target == old_parent and side == old_side
+                ):
+                    continue
+                if target == old_parent and side == old_side:
+                    continue
+                left = list(tree.left)
+                right = list(tree.right)
+                source_branch = left if old_side == 0 else right
+                source_branch[old_parent] = -1
+                target_branch = left if side == 0 else right
+                target_branch[target] = node
+                candidates.append(
+                    (
+                        (1, node, target, side),
+                        f"subtree_reinsert:{node}:{target}:{side}",
+                        _tree_from_children(left, right),
+                    )
+                )
+
+    selected: list[tuple[str, BStarTree]] = []
+    seen: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
+    for _, name, candidate in sorted(candidates, key=lambda item: item[0]):
+        key = (candidate.left, candidate.right)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append((name, candidate))
+        if len(selected) == limit:
+            break
+    return tuple(selected)
+
+
 def _tree_from_children(left: list[int], right: list[int]) -> "BStarTree":
     edges = [
         (parent, child, side)
@@ -169,7 +301,9 @@ class BStarTree:
     @classmethod
     def from_edges(cls, edges: Tensor, block_count: int) -> "BStarTree":
         values = torch.as_tensor(edges, dtype=torch.float64, device="cpu")
-        if values.shape != (block_count - 1, 3) or not bool(torch.isfinite(values).all()):
+        if values.shape != (block_count - 1, 3) or not bool(
+            torch.isfinite(values).all()
+        ):
             raise ValueError("B*-Tree edges must have shape [N-1,3] and be finite")
         rounded = values.round()
         if not torch.equal(values, rounded):
@@ -220,7 +354,9 @@ class BStarTree:
         return torch.tensor(
             [
                 (parent, child, side)
-                for parent, children in enumerate(zip(self.left, self.right, strict=True))
+                for parent, children in enumerate(
+                    zip(self.left, self.right, strict=True)
+                )
                 for side, child in enumerate(children)
                 if child >= 0
             ],
@@ -281,7 +417,9 @@ class BStarTree:
         """Pack movable nodes above an anchor-aware contour, preserving preplaced boxes."""
 
         dims = torch.as_tensor(dimensions, dtype=torch.float64, device="cpu")
-        mask = torch.as_tensor(preplaced_mask, dtype=torch.bool, device="cpu").reshape(-1)
+        mask = torch.as_tensor(preplaced_mask, dtype=torch.bool, device="cpu").reshape(
+            -1
+        )
         targets = torch.as_tensor(preplaced_xywh, dtype=torch.float64, device="cpu")
         if dims.shape != (self.block_count, 2) or mask.numel() != self.block_count:
             raise ValueError("anchor-aware B*-Tree inputs do not match block count")
@@ -315,7 +453,6 @@ class BStarTree:
         place(self.root, float(origin[0]))
         return boxes
 
-
     def pack_x_compacted(
         self,
         dimensions: Tensor,
@@ -329,8 +466,12 @@ class BStarTree:
         """Keep B*-Tree x relations and compact y by a supplied runtime order."""
 
         dims = torch.as_tensor(dimensions, dtype=torch.float64, device="cpu")
-        order = torch.as_tensor(vertical_order, dtype=torch.long, device="cpu").reshape(-1)
-        mask = torch.as_tensor(preplaced_mask, dtype=torch.bool, device="cpu").reshape(-1)
+        order = torch.as_tensor(vertical_order, dtype=torch.long, device="cpu").reshape(
+            -1
+        )
+        mask = torch.as_tensor(preplaced_mask, dtype=torch.bool, device="cpu").reshape(
+            -1
+        )
         targets = torch.as_tensor(preplaced_xywh, dtype=torch.float64, device="cpu")
         if dims.shape != (self.block_count, 2) or mask.numel() != self.block_count:
             raise ValueError("x-compacted B*-Tree inputs do not match block count")
@@ -377,16 +518,194 @@ class BStarTree:
             placed.append((x, y, width, height))
         return boxes
 
+    def pack_y_compacted(
+        self,
+        dimensions: Tensor,
+        horizontal_order: Tensor,
+        preplaced_mask: Tensor,
+        preplaced_xywh: Tensor,
+        *,
+        origin: tuple[float, float] = (0.0, 0.0),
+        gutter: float = 2.0e-6,
+    ) -> Tensor:
+        """Keep B*-Tree y relations and compact x by a runtime order."""
+
+        dims = torch.as_tensor(dimensions, dtype=torch.float64, device="cpu")
+        targets = torch.as_tensor(preplaced_xywh, dtype=torch.float64, device="cpu")
+        if dims.shape != (self.block_count, 2):
+            raise ValueError("y-compacted B*-Tree inputs do not match block count")
+        if targets.shape != (self.block_count, 4):
+            raise ValueError("preplaced_xywh must have shape [N,4]")
+
+        # Transpose the geometry and swap branches so the original right-child
+        # (y) relation becomes the x relation consumed by pack_x_compacted.
+        transposed_tree = BStarTree(self.root, self.right, self.left)
+        transposed = transposed_tree.pack_x_compacted(
+            dims[:, [1, 0]],
+            horizontal_order,
+            preplaced_mask,
+            targets[:, [1, 0, 3, 2]],
+            origin=(origin[1], origin[0]),
+            gutter=gutter,
+        )
+        return transposed[:, [1, 0, 3, 2]]
+
+
+def btree_dimension_variants(
+    dimensions: Tensor,
+    *,
+    fixed_mask: Tensor | None = None,
+    preplaced_mask: Tensor | None = None,
+    mib_membership: Tensor | None = None,
+    weighted_degree: Tensor | None = None,
+    high_degree_threshold: float | None = None,
+    low_degree_threshold: float | None = None,
+    areas: Tensor | None = None,
+) -> dict[str, Tensor]:
+    """Build small aspect-ratio challenger families for B*-Tree packing.
+
+    The returned tensors use ``[width, height]`` rows and preserve the input
+    order.  ``unlimited`` is an exact clone of ``dimensions``.  ``ar64`` and
+    ``ar32`` cap the aspect ratio of movable, non-MIB members while retaining
+    each row's area.  ``net_aware`` uses weighted degree to apply the tighter
+    32 cap to high-degree blocks, the 64 cap to ordinary blocks, and leaves
+    low-degree blocks unchanged.
+
+    Fixed, preplaced, and every member of a MIB group are protected: their
+    dimensions are copied verbatim into every returned family.  Thresholds
+    for ``net_aware`` default to the 75th/25th degree quantiles over eligible
+    blocks and may be supplied explicitly for deterministic sweeps.
+    """
+
+    source = torch.as_tensor(dimensions)
+    if source.ndim != 2 or source.shape[1] != 2:
+        raise ValueError("dimensions must have shape [N,2]")
+    if not source.is_floating_point() and not source.is_complex():
+        source = source.to(dtype=torch.float64)
+    else:
+        source = source.to(dtype=torch.float64)
+    if not bool(torch.isfinite(source).all()) or bool((source <= 0.0).any()):
+        raise ValueError("dimensions must be finite and positive")
+    n = int(source.shape[0])
+
+    def mask_or_zero(value: Tensor | None, name: str) -> Tensor:
+        if value is None:
+            return torch.zeros(n, dtype=torch.bool, device=source.device)
+        mask = torch.as_tensor(value, dtype=torch.bool, device=source.device).reshape(
+            -1
+        )
+        if mask.numel() != n:
+            raise ValueError(f"{name} must have shape [N]")
+        return mask
+
+    protected = mask_or_zero(fixed_mask, "fixed_mask") | mask_or_zero(
+        preplaced_mask, "preplaced_mask"
+    )
+    if mib_membership is not None:
+        mib = torch.as_tensor(mib_membership, dtype=torch.bool, device=source.device)
+        if mib.ndim == 1:
+            if mib.numel() != n:
+                raise ValueError("mib_membership must have shape [N] or [G,N]")
+            protected |= mib.reshape(-1)
+        elif mib.ndim == 2 and mib.shape[1] == n:
+            protected |= mib.any(dim=0)
+        else:
+            raise ValueError("mib_membership must have shape [N] or [G,N]")
+
+    if areas is None:
+        target_area = source[:, 0] * source[:, 1]
+    else:
+        target_area = torch.as_tensor(
+            areas, dtype=torch.float64, device=source.device
+        ).reshape(-1)
+        if target_area.numel() != n:
+            raise ValueError("areas must have shape [N]")
+        if not bool(torch.isfinite(target_area).all()) or bool(
+            (target_area <= 0.0).any()
+        ):
+            raise ValueError("areas must be finite and positive")
+    eligible = ~protected
+
+    def capped(cap: float, selected: Tensor) -> Tensor:
+        if cap <= 0.0:
+            raise ValueError("aspect-ratio cap must be positive")
+        result = source.clone()
+        width, height = source[:, 0], source[:, 1]
+        ratio = torch.maximum(width / height, height / width)
+        change = selected & (ratio > cap)
+        wide = width >= height
+        capped_width = torch.where(
+            wide,
+            torch.sqrt(target_area * cap),
+            torch.sqrt(target_area / cap),
+        )
+        # Derive the second side from the target area instead of a second
+        # square root so the area invariant is preserved as tightly as the
+        # working dtype allows.
+        capped_height = target_area / capped_width
+        result[:, 0] = torch.where(change, capped_width, width)
+        result[:, 1] = torch.where(change, capped_height, height)
+        return result
+
+    result: dict[str, Tensor] = {
+        "unlimited": source.clone(),
+        "ar64": capped(64.0, eligible),
+        "ar32": capped(32.0, eligible),
+    }
+
+    if weighted_degree is None:
+        result["net_aware"] = result["ar64"].clone()
+    else:
+        degree = torch.as_tensor(
+            weighted_degree, dtype=torch.float64, device=source.device
+        ).reshape(-1)
+        if degree.numel() != n:
+            raise ValueError("weighted_degree must have shape [N]")
+        if not bool(torch.isfinite(degree).all()):
+            raise ValueError("weighted_degree must be finite")
+        eligible_degree = degree[eligible]
+        if eligible_degree.numel() == 0:
+            result["net_aware"] = source.clone()
+        else:
+            high = (
+                float(torch.quantile(eligible_degree, 0.75))
+                if high_degree_threshold is None
+                else float(high_degree_threshold)
+            )
+            low = (
+                float(torch.quantile(eligible_degree, 0.25))
+                if low_degree_threshold is None
+                else float(low_degree_threshold)
+            )
+            if high < low:
+                raise ValueError(
+                    "high_degree_threshold must be >= low_degree_threshold"
+                )
+            high_mask = eligible & (degree >= high)
+            low_mask = eligible & (degree <= low) & ~high_mask
+            ordinary_mask = eligible & ~high_mask & ~low_mask
+            aware = capped(64.0, ordinary_mask)
+            aware[high_mask] = capped(32.0, high_mask)[high_mask]
+            result["net_aware"] = aware
+    return result
+
 
 def decode_btree_logits(root_logits: Tensor, edge_logits: Tensor) -> BStarTree:
     """Greedily decode a valid rooted binary tree from root and edge scores."""
 
-    root_scores = torch.as_tensor(root_logits).detach().to(dtype=torch.float64, device="cpu").reshape(-1)
+    root_scores = (
+        torch.as_tensor(root_logits)
+        .detach()
+        .to(dtype=torch.float64, device="cpu")
+        .reshape(-1)
+    )
     edges = torch.as_tensor(edge_logits).detach().to(dtype=torch.float64, device="cpu")
     n = int(root_scores.numel())
     if n <= 0 or edges.shape != (n, n, 2):
         raise ValueError("B*-Tree logits must have shapes [N] and [N,N,2]")
-    if not bool(torch.isfinite(root_scores).all()) or not bool(torch.isfinite(edges).all()):
+    if not bool(torch.isfinite(root_scores).all()) or not bool(
+        torch.isfinite(edges).all()
+    ):
         raise ValueError("B*-Tree logits must be finite")
     root = int(root_scores.argmax())
     connected = {root}
@@ -401,7 +720,9 @@ def decode_btree_logits(root_logits: Tensor, edge_logits: Tensor) -> BStarTree:
                 if branch[parent] >= 0:
                     continue
                 for child in sorted(remaining):
-                    choices.append((float(edges[child, parent, side]), -parent, -child, -side))
+                    choices.append(
+                        (float(edges[child, parent, side]), -parent, -child, -side)
+                    )
         if not choices:
             raise RuntimeError("B*-Tree decoder exhausted branch capacity")
         _, parent_neg, child_neg, side_neg = max(choices)

@@ -22,15 +22,28 @@ from hcfp.analytic import (
     to_official_placements,
 )
 from hcfp.case import FloorplanCase, from_official
-from hcfp.btree import contact_aware_vertical_orders, decode_btree_logits
+from hcfp.btree import (
+    btree_dimension_variants,
+    contact_aware_vertical_orders,
+    decode_btree_logits,
+    subtree_move_variants,
+)
+from hcfp.baseline_router import (
+    BaselineInterval,
+    CandidateMetrics as BaselineCandidateMetrics,
+    approximate_local_cost,
+    conservative_promotion,
+)
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
 from hcfp.collective_runtime import CollectiveForceController
+from hcfp.contact_synthesis import apply_contact_obligations
 from hcfp.constraints.construction import connect_groups, construct_constraint_variants
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
 from hcfp.geometry import centers_from_xywh, initializer_anchor, xywh_from_state
+from hcfp.island_relocation import generate_island_relocations
 from hcfp.model import soft_sequence_pair_relation_logits
 from hcfp.projection import ComponentBDPConfig
 from hcfp.projection_guidance import build_population_guidance
@@ -116,7 +129,15 @@ class LearnedConfig:
     topology_seeds: int = 0
     constraint_seeds: int = 0
     treemap_seeds: int = 0
+    treemap_area_slack: float = 1.0
     btree_seeds: int = 0
+    btree_dual_axis: bool = False
+    btree_shape_variants: bool = False
+    btree_local_moves: int = 0
+    family_router: bool = False
+    contact_synthesis_seeds: int = 0
+    island_relocation: bool = False
+    baseline_selection_margin: float | None = None
     collective_steps: int = 0
     ranker_selection_experiment: bool = False
 
@@ -137,8 +158,26 @@ class LearnedConfig:
             raise ValueError("constraint_seeds must be non-negative")
         if self.treemap_seeds < 0:
             raise ValueError("treemap_seeds must be non-negative")
+        if not 0.0 < self.treemap_area_slack <= 1.0:
+            raise ValueError("treemap_area_slack must be in (0, 1]")
         if self.btree_seeds < 0:
             raise ValueError("btree_seeds must be non-negative")
+        if type(self.btree_dual_axis) is not bool:
+            raise ValueError("btree_dual_axis must be boolean")
+        if type(self.btree_shape_variants) is not bool:
+            raise ValueError("btree_shape_variants must be boolean")
+        if self.btree_local_moves < 0:
+            raise ValueError("btree_local_moves must be non-negative")
+        if type(self.family_router) is not bool:
+            raise ValueError("family_router must be boolean")
+        if self.contact_synthesis_seeds < 0:
+            raise ValueError("contact_synthesis_seeds must be non-negative")
+        if type(self.island_relocation) is not bool:
+            raise ValueError("island_relocation must be boolean")
+        if self.baseline_selection_margin is not None and not (
+            0.0 <= self.baseline_selection_margin < 1.0
+        ):
+            raise ValueError("baseline_selection_margin must be in [0, 1)")
         if self.collective_steps < 0:
             raise ValueError("collective_steps must be non-negative")
         if self.constraint_seeds and not self.topology_seeds:
@@ -153,7 +192,11 @@ def effective_flow_steps(requested: int, checkpoint_metadata: dict[str, Any]) ->
     if requested < 0:
         raise ValueError("flow_steps must be non-negative")
     capabilities = checkpoint_metadata.get("capabilities", {})
-    return requested if isinstance(capabilities, dict) and capabilities.get("flow") is True else 0
+    return (
+        requested
+        if isinstance(capabilities, dict) and capabilities.get("flow") is True
+        else 0
+    )
 
 
 def effective_collective_steps(
@@ -241,7 +284,14 @@ def analyze_case_with_checkpoint(
             ),
         )
         model = model.to(device=case.area.device).eval()
-        topology_provenance: dict[str, object] = {}
+        capabilities = metadata.get("capabilities", {})
+        topology_provenance: dict[str, object] = {
+            "baseline_head_trained": bool(
+                isinstance(capabilities, dict)
+                and capabilities.get("baseline") is True
+                and "baseline" in metadata.get("trained_heads", ())
+            )
+        }
         learned_population = _learned_population(
             case,
             model,
@@ -267,20 +317,14 @@ def analyze_case_with_checkpoint(
                 provenance=legacy_provenance,
                 enforce_mib=False,
             )
-            learned_population, topology_provenance = (
-                _merge_legacy_mib_challenger(
-                    learned_population,
-                    topology_provenance,
-                    legacy_population,
-                    legacy_provenance,
-                )
+            learned_population, topology_provenance = _merge_legacy_mib_challenger(
+                learned_population,
+                topology_provenance,
+                legacy_population,
+                legacy_provenance,
             )
-        topology_count = int(
-            topology_provenance.get("topology_seed_count", 0)
-        )
-        constraint_count = int(
-            topology_provenance.get("constraint_seed_count", 0)
-        )
+        topology_count = int(topology_provenance.get("topology_seed_count", 0))
+        constraint_count = int(topology_provenance.get("constraint_seed_count", 0))
         residual_count = (
             int(learned_population.shape[0]) - topology_count - constraint_count
         )
@@ -296,7 +340,9 @@ def analyze_case_with_checkpoint(
             else None
         )
         projection_guidance = (
-            population_guidance if cfg.component_bdp.enabled and topology_count else None
+            population_guidance
+            if cfg.component_bdp.enabled and topology_count
+            else None
         )
         # Keep the established analytic comparator on v0. Q4 applies only to
         # provenance-bearing learned structure and remains Pareto-guarded.
@@ -307,10 +353,13 @@ def analyze_case_with_checkpoint(
         force_controller = None
         if learned_cfg.collective_steps:
             device_type = "cuda" if case.area.is_cuda else "cpu"
-            with torch.inference_mode(), torch.autocast(
-                device_type=device_type,
-                dtype=torch.bfloat16,
-                enabled=model.config.compute_dtype == "bfloat16",
+            with (
+                torch.inference_mode(),
+                torch.autocast(
+                    device_type=device_type,
+                    dtype=torch.bfloat16,
+                    enabled=model.config.compute_dtype == "bfloat16",
+                ),
             ):
                 static_embedding = model.encoder(case).float()
             force_controller = CollectiveForceController.from_guidance(
@@ -318,7 +367,9 @@ def analyze_case_with_checkpoint(
                 static_embedding,
                 population_guidance,
             )
-        dynamics_cfg = replace(cfg.dynamics, population=int(learned_population.shape[0]))
+        dynamics_cfg = replace(
+            cfg.dynamics, population=int(learned_population.shape[0])
+        )
         if learned_cfg.collective_steps:
             dynamics_cfg = replace(dynamics_cfg, steps=learned_cfg.collective_steps)
         learned_tail_cfg = replace(
@@ -405,9 +456,7 @@ def analyze_case_with_checkpoint(
                 btree_seed_accepted=bool(
                     topology_provenance.get("btree_seed_accepted", False)
                 ),
-                btree_seed_count=int(
-                    topology_provenance.get("btree_seed_count", 0)
-                ),
+                btree_seed_count=int(topology_provenance.get("btree_seed_count", 0)),
                 collective_steps=learned_cfg.collective_steps,
                 collective_used=force_controller is not None,
                 collective_calls=(
@@ -529,7 +578,10 @@ def select_official_from_analysis(
                 case,
                 analysis,
                 placements,
+                baseline_margin=_learned_config(config).baseline_selection_margin,
             )
+        if _learned_config(config).island_relocation:
+            placements = _island_relocation_guard(source, case, placements)
         _record_ranker_selection_counterfactual(
             source,
             case,
@@ -571,6 +623,7 @@ def select_official_from_analysis(
                     case,
                     analysis,
                     candidate,
+                    baseline_margin=_learned_config(config).baseline_selection_margin,
                 )
             if index == 0:
                 break
@@ -606,7 +659,23 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
             constraint_seeds=int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "0")),
             treemap_seeds=int(os.environ.get("HCFP_TREEMAP_SEEDS", "0")),
+            treemap_area_slack=float(os.environ.get("HCFP_TREEMAP_AREA_SLACK", "1.0")),
             btree_seeds=int(os.environ.get("HCFP_BTREE_SEEDS", "0")),
+            btree_dual_axis=_truthy_env(os.environ.get("HCFP_BTREE_DUAL_AXIS")),
+            btree_shape_variants=_truthy_env(
+                os.environ.get("HCFP_BTREE_SHAPE_VARIANTS")
+            ),
+            btree_local_moves=int(os.environ.get("HCFP_BTREE_LOCAL_MOVES", "0")),
+            family_router=_truthy_env(os.environ.get("HCFP_FAMILY_ROUTER")),
+            contact_synthesis_seeds=int(
+                os.environ.get("HCFP_CONTACT_SYNTHESIS_SEEDS", "0")
+            ),
+            island_relocation=_truthy_env(os.environ.get("HCFP_ISLAND_RELOCATION")),
+            baseline_selection_margin=(
+                float(os.environ["HCFP_BASELINE_SELECTION_MARGIN"])
+                if os.environ.get("HCFP_BASELINE_SELECTION_MARGIN") is not None
+                else None
+            ),
             collective_steps=int(os.environ.get("HCFP_COLLECTIVE_STEPS", "0")),
             ranker_selection_experiment=_truthy_env(
                 os.environ.get("HCFP_RANKER_SELECTION_EXPERIMENT")
@@ -655,16 +724,15 @@ def _merge_tail_analyses(
     projected = merge_tensor(
         analytic.projected_candidates, learned.projected_candidates
     )
-    raw_candidates = merge_tensor(
-        analytic.raw_candidates, learned.raw_candidates
-    )
+    raw_candidates = merge_tensor(analytic.raw_candidates, learned.raw_candidates)
     telemetry_values = {}
     for field in fields(CandidateTelemetry):
         first = getattr(analytic.telemetry, field.name)
         second = getattr(learned.telemetry, field.name)
         telemetry_values[field.name] = (
             merge_tuple(first, second)
-            if field.name in {"projection_failure_reasons", "component_proposal_rollback_reason"}
+            if field.name
+            in {"projection_failure_reasons", "component_proposal_rollback_reason"}
             else merge_tensor(first, second)
         )
     telemetry = CandidateTelemetry(**telemetry_values)
@@ -830,6 +898,23 @@ def _merge_tail_analyses(
         snapshot["btree_seed_provenance"] = btree_candidates
         if stale_sources:
             snapshot["btree_seed_stale_sources"] = tuple(stale_sources)
+    if topology_provenance and bool(
+        topology_provenance.get("contact_synthesis_seed_accepted", False)
+    ):
+        contact_candidates, stale_sources = _residual_seed_stage_records(
+            tuple(topology_provenance.get("contact_synthesis_seed_records", ())),
+            raw_candidates,
+            initial_start=initial_start,
+            final_start=final_start,
+            learned_count=learned_count,
+            candidate_type="contact_synthesis",
+        )
+        snapshot["contact_synthesis_seed_sources"] = tuple(
+            str(candidate["source"]) for candidate in contact_candidates
+        )
+        snapshot["contact_synthesis_seed_provenance"] = contact_candidates
+        if stale_sources:
+            snapshot["contact_synthesis_seed_stale_sources"] = tuple(stale_sources)
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -886,7 +971,9 @@ def _seed_stage_records(
         )
         final_source = f"candidate_{final_index}"
         final_hash = _tensor_sha256(raw_candidates[final_index])
-        transform = "identity" if final_hash == initial_hash else "population_relaxation"
+        transform = (
+            "identity" if final_hash == initial_hash else "population_relaxation"
+        )
         candidates.append(
             {
                 **record,
@@ -945,7 +1032,9 @@ def _residual_seed_stage_records(
                 "source": final_source,
                 "candidate_type": candidate_type,
                 "stage": "post_relax",
-                "transform": "identity" if final_hash == initial_hash else "population_relaxation",
+                "transform": "identity"
+                if final_hash == initial_hash
+                else "population_relaxation",
                 "parent_candidate_sha256": initial_hash,
                 "candidate_sha256": final_hash,
             }
@@ -1002,9 +1091,13 @@ def _attach_ranker_shadow_snapshot(
             "initial",
         )
         eligible = (
-            analysis.telemetry.hard_feasible[initial_start:initial_stop]
-            & analysis.telemetry.projection_ok[initial_start:initial_stop]
-        ).detach().to(device="cpu", dtype=torch.bool)
+            (
+                analysis.telemetry.hard_feasible[initial_start:initial_stop]
+                & analysis.telemetry.projection_ok[initial_start:initial_stop]
+            )
+            .detach()
+            .to(device="cpu", dtype=torch.bool)
+        )
         embedding = features.new_empty((0, 0))
         with torch.inference_mode():
             scores = (
@@ -1052,10 +1145,7 @@ def _attach_ranker_shadow_snapshot(
 
 def _ranker_shadow_contract(model: Any, metadata: dict[str, Any]) -> str | None:
     trained_heads = metadata.get("trained_heads", ())
-    if not (
-        isinstance(trained_heads, (list, tuple))
-        and "ranker" in trained_heads
-    ):
+    if not (isinstance(trained_heads, (list, tuple)) and "ranker" in trained_heads):
         return "ranker_not_trained"
     config = getattr(model, "config", {})
     try:
@@ -1107,7 +1197,11 @@ def _ranker_candidate_kinds(
             topology_count=topology_count,
         )
     )
-    for candidate_type in ("treemap", "btree"):
+    for candidate_type, ranker_kind in (
+        ("treemap", "treemap"),
+        ("btree", "btree"),
+        ("contact_synthesis", "constraint"),
+    ):
         records = snapshot.get(f"{candidate_type}_seed_provenance", ())
         if not isinstance(records, tuple):
             continue
@@ -1117,7 +1211,7 @@ def _ranker_candidate_kinds(
             index = _candidate_index(str(record.get("source", "")))
             relative = -1 if index is None else index - initial_start
             if 0 <= relative < len(kinds):
-                kinds[relative] = candidate_type
+                kinds[relative] = ranker_kind
     return tuple(kinds)
 
 
@@ -1364,7 +1458,10 @@ def _raw_treemap_proxy_guard(
             continue
         hpwl_tolerance = 1.0e-6 * max(1.0, current_metrics[2])
         proxy = _treemap_proxy_score(case, metrics)
-        if metrics[2] <= current_metrics[2] + hpwl_tolerance and proxy < current_proxy - 1.0e-6:
+        if (
+            metrics[2] <= current_metrics[2] + hpwl_tolerance
+            and proxy < current_proxy - 1.0e-6
+        ):
             admitted.append((proxy, metrics[2], metrics[1], index, placement))
     return min(admitted, key=lambda item: item[:4])[4] if admitted else current
 
@@ -1384,6 +1481,8 @@ def _candidate_funnel_proxy_guard(
     case: FloorplanCase,
     analysis: LearnedAnalysis,
     current: list[tuple[float, float, float, float]],
+    *,
+    baseline_margin: float | None = None,
 ) -> list[tuple[float, float, float, float]]:
     """Try provenance candidates after repair using a relative soft/area/HPWL proxy."""
 
@@ -1395,6 +1494,7 @@ def _candidate_funnel_proxy_guard(
         ("constraint_seed_provenance", projected),
         ("treemap_seed_provenance", raw),
         ("btree_seed_provenance", raw),
+        ("contact_synthesis_seed_provenance", raw),
     ):
         records = snapshot.get(name, ())
         for record in records if isinstance(records, (tuple, list)) else ():
@@ -1409,6 +1509,12 @@ def _candidate_funnel_proxy_guard(
         current_metrics = _raw_quality(source, case, current)
     except (TypeError, ValueError):
         return current
+    baseline_interval = _predicted_baseline_interval(snapshot, baseline_margin)
+    incumbent_baseline_metrics = BaselineCandidateMetrics(
+        layout_area=current_metrics[1],
+        hpwl=current_metrics[2],
+        violations_relative=current_metrics[0],
+    )
     admitted = []
     audit_records = []
     for index, candidate_source, candidate in candidates:
@@ -1431,7 +1537,35 @@ def _candidate_funnel_proxy_guard(
             metrics = _raw_quality(source, case, placement)
         except (TypeError, ValueError):
             continue
-        delta = _relative_candidate_proxy_delta(metrics, current_metrics)
+        if baseline_interval is None:
+            delta = _relative_candidate_proxy_delta(metrics, current_metrics)
+            accepted = delta < -1.0e-6
+        else:
+            challenger_metrics = BaselineCandidateMetrics(
+                layout_area=metrics[1],
+                hpwl=metrics[2],
+                violations_relative=metrics[0],
+            )
+            area_prediction = 0.5 * (
+                baseline_interval.area_low + baseline_interval.area_high
+            )
+            hpwl_prediction = 0.5 * (
+                baseline_interval.hpwl_low + baseline_interval.hpwl_high
+            )
+            delta = approximate_local_cost(
+                challenger_metrics,
+                baseline_area=area_prediction,
+                baseline_hpwl=hpwl_prediction,
+            ) - approximate_local_cost(
+                incumbent_baseline_metrics,
+                baseline_area=area_prediction,
+                baseline_hpwl=hpwl_prediction,
+            )
+            accepted = conservative_promotion(
+                challenger_metrics,
+                incumbent_baseline_metrics,
+                baseline_interval,
+            )
         audit_records.append(
             {
                 "source": candidate_source,
@@ -1442,8 +1576,10 @@ def _candidate_funnel_proxy_guard(
                 "hpwl": metrics[2],
             }
         )
-        if delta < -1.0e-6:
-            admitted.append((delta, metrics[0], metrics[1], metrics[2], index, placement))
+        if accepted:
+            admitted.append(
+                (delta, metrics[0], metrics[1], metrics[2], index, placement)
+            )
     snapshot["candidate_funnel_proxy_records"] = tuple(audit_records)
     if not admitted:
         snapshot["candidate_funnel_proxy_source"] = None
@@ -1451,6 +1587,27 @@ def _candidate_funnel_proxy_guard(
     winner = min(admitted, key=lambda item: item[:5])
     snapshot["candidate_funnel_proxy_source"] = f"candidate_{winner[4]}"
     return winner[5]
+
+
+def _predicted_baseline_interval(
+    snapshot: dict[str, object],
+    margin: float | None,
+) -> BaselineInterval | None:
+    if margin is None or not bool(snapshot.get("baseline_head_trained", False)):
+        return None
+    try:
+        area = float(snapshot["predicted_baseline_area"])
+        hpwl = float(snapshot["predicted_baseline_hpwl"])
+        low = 1.0 - margin
+        high = 1.0 + margin
+        return BaselineInterval(
+            area_low=area * low,
+            area_high=area * high,
+            hpwl_low=hpwl * low,
+            hpwl_high=hpwl * high,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _relative_candidate_proxy_delta(
@@ -1654,6 +1811,53 @@ def _post_tail_group_repair(
     return placements
 
 
+def _island_relocation_guard(
+    source: Any,
+    case: FloorplanCase,
+    placements: list[tuple[float, float, float, float]],
+    *,
+    max_candidates: int = 16,
+) -> list[tuple[float, float, float, float]]:
+    """Try cheap rigid-island moves only for visibly sparse incumbents."""
+
+    if max_candidates <= 0:
+        return placements
+    boxes = torch.as_tensor(placements, dtype=torch.float64, device="cpu")
+    occupied = float((boxes[:, 2] * boxes[:, 3]).sum())
+    utilization = occupied / max(bbox_area(boxes), torch.finfo(torch.float64).eps)
+    if utilization >= 0.50:
+        return placements
+    try:
+        incumbent = _raw_quality(source, case, placements)
+        candidates = generate_island_relocations(
+            source,
+            boxes,
+            max_candidates=max_candidates,
+            preplaced_mask=case.preplaced_mask,
+        )
+    except (RuntimeError, TypeError, ValueError):
+        return placements
+    admitted = []
+    for index, candidate in enumerate(candidates):
+        challenger = [
+            tuple(float(value) for value in row) for row in candidate.placement.tolist()
+        ]
+        if not verify_feasible(source, challenger):
+            continue
+        try:
+            metrics = _raw_quality(source, case, challenger)
+        except (RuntimeError, TypeError, ValueError):
+            continue
+        delta = _relative_candidate_proxy_delta(metrics, incumbent)
+        if delta < -1.0e-6:
+            admitted.append((delta, metrics, index, challenger))
+    return (
+        min(admitted, key=lambda item: (item[0], item[1], item[2]))[3]
+        if admitted
+        else placements
+    )
+
+
 def _legacy_mib_challenger_guard(
     source: Any,
     case: FloorplanCase,
@@ -1666,8 +1870,7 @@ def _legacy_mib_challenger_guard(
     records = tuple(
         record
         for record in _constraint_records(snapshot).values()
-        if record.get("challenger") == "legacy_mib"
-        and record.get("stage") == "initial"
+        if record.get("challenger") == "legacy_mib" and record.get("stage") == "initial"
     )
     if not records:
         return current
@@ -1706,7 +1909,9 @@ def _legacy_mib_challenger_guard(
         key = (quality[0], quality[1] + 0.05 * quality[2])
         if key < current_key:
             admitted.append((key, index, placement))
-    return min(admitted, key=lambda item: (item[0], item[1]))[2] if admitted else current
+    return (
+        min(admitted, key=lambda item: (item[0], item[1]))[2] if admitted else current
+    )
 
 
 def _constraint_records(
@@ -1840,9 +2045,8 @@ def _condition_candidate_inside_outline(
             offset = 0.5 * (target_lower + target_upper) - source_lower
             return values + values.new_tensor(offset)
         if source_span <= target_span + _OUTLINE_EPS:
-            offset = (
-                0.5 * (target_lower + target_upper)
-                - 0.5 * (source_lower + source_upper)
+            offset = 0.5 * (target_lower + target_upper) - 0.5 * (
+                source_lower + source_upper
             )
             return values + values.new_tensor(offset)
         return target_lower + (values - source_lower) * (target_span / source_span)
@@ -1850,7 +2054,9 @@ def _condition_candidate_inside_outline(
     work[movable, 0] = fit_axis(movable_boxes[:, 0], left, right, max_width)
     work[movable, 1] = fit_axis(movable_boxes[:, 1], bottom, top, max_height)
     if bool(preplaced.any()):
-        work[preplaced] = case.target.to(device=work.device, dtype=work.dtype)[preplaced]
+        work[preplaced] = case.target.to(device=work.device, dtype=work.dtype)[
+            preplaced
+        ]
 
     inside = (
         (work[:, 0] >= left - _OUTLINE_EPS)
@@ -1858,7 +2064,9 @@ def _condition_candidate_inside_outline(
         & (work[:, 0] + work[:, 2] <= right + _OUTLINE_EPS)
         & (work[:, 1] + work[:, 3] <= top + _OUTLINE_EPS)
     )
-    if not bool(inside.all()) or bool(torch.allclose(work, original, rtol=1.0e-6, atol=1.0e-7)):
+    if not bool(inside.all()) or bool(
+        torch.allclose(work, original, rtol=1.0e-6, atol=1.0e-7)
+    ):
         return None
     try:
         return work if verify_feasible(case, work) else None
@@ -1908,12 +2116,11 @@ def _outline_conditioned_variant(
                 "outline_variant_hypothesis_id": str(
                     getattr(hypothesis, "hypothesis_id", "unknown")
                 ),
-                "outline_variant_source": str(
-                    getattr(hypothesis, "source", "unknown")
-                ),
+                "outline_variant_source": str(getattr(hypothesis, "source", "unknown")),
                 "outline_variant_confidence": confidence,
                 "outline_variant_bounds": tuple(
-                    float(value) for value in hypothesis.bounds  # type: ignore[attr-defined]
+                    float(value)
+                    for value in hypothesis.bounds  # type: ignore[attr-defined]
                 ),
                 "outline_variant_candidate_sha256": _tensor_sha256(variant),
             }
@@ -1958,6 +2165,23 @@ def _learned_population(
 
     with torch.inference_mode():
         output = model(case, population=population)
+        if (
+            provenance is not None
+            and output.baseline_log_area is not None
+            and output.baseline_log_hpwl is not None
+        ):
+            provenance.update(
+                {
+                    "predicted_baseline_area": float(
+                        torch.exp(output.baseline_log_area).item()
+                        * case.scale
+                        * case.scale
+                    ),
+                    "predicted_baseline_hpwl": float(
+                        torch.exp(output.baseline_log_hpwl).item() * case.scale
+                    ),
+                }
+            )
         flow_count = round(population * config.flow_fraction)
         if flow_count and config.flow_steps:
             for step in range(config.flow_steps):
@@ -1977,7 +2201,9 @@ def _learned_population(
                     max(config.max_position_residual, model.config.residual_bound),
                 )
                 residual[..., 2].clamp_(
-                    -max(config.max_aspect_residual, model.config.aspect_residual_bound),
+                    -max(
+                        config.max_aspect_residual, model.config.aspect_residual_bound
+                    ),
                     max(config.max_aspect_residual, model.config.aspect_residual_bound),
                 )
                 residual[:, case.preplaced_mask, :2] = 0.0
@@ -2032,9 +2258,7 @@ def _learned_population(
                         provenance["constraint_seed_failure_reason"] = (
                             f"{type(exc).__name__}: {exc}"
                         )
-            learned_boxes = torch.cat(
-                (learned_boxes, constraints, topology), dim=0
-            )
+            learned_boxes = torch.cat((learned_boxes, constraints, topology), dim=0)
     if provenance is not None:
         provenance.setdefault("outline_variant_attempted", False)
         provenance.setdefault("outline_variant_accepted", False)
@@ -2075,11 +2299,14 @@ def _learned_population(
                 if topology.numel()
                 else learned_boxes[0]
             )
+            treemap_kwargs: dict[str, object] = {"count": config.treemap_seeds}
+            if config.treemap_area_slack != 1.0:
+                treemap_kwargs["area_slack"] = config.treemap_area_slack
             treemaps, records = exact_treemap_candidates(
                 case,
                 reference,
                 hypotheses,
-                count=config.treemap_seeds,
+                **treemap_kwargs,
             )
             if treemaps.numel():
                 raw_treemaps = treemaps
@@ -2153,6 +2380,14 @@ def _learned_population(
                 output,
                 topology_sources,
                 count=config.btree_seeds,
+                dual_axis=config.btree_dual_axis,
+                shape_variants=config.btree_shape_variants,
+                local_moves=config.btree_local_moves,
+                route_dual_axis=config.family_router,
+                baseline_trained=bool(
+                    provenance is not None
+                    and provenance.get("baseline_head_trained", False)
+                ),
             )
             if btrees.numel():
                 treemap_count = int(
@@ -2184,7 +2419,84 @@ def _learned_population(
                     )
         except (RuntimeError, TypeError, ValueError) as exc:
             if provenance is not None:
-                provenance["btree_seed_failure_reason"] = (
+                provenance["btree_seed_failure_reason"] = f"{type(exc).__name__}: {exc}"
+    if provenance is not None:
+        provenance.setdefault(
+            "contact_synthesis_seed_attempted",
+            config.contact_synthesis_seeds > 0,
+        )
+        provenance.setdefault("contact_synthesis_seed_accepted", False)
+        provenance.setdefault("contact_synthesis_seed_count", 0)
+    if config.contact_synthesis_seeds:
+        try:
+            tail_count = int(constraints.shape[0] + topology.shape[0])
+            structured_end = int(learned_boxes.shape[0]) - tail_count
+            bases = learned_boxes[residual_slots:structured_end]
+            if not bases.numel():
+                bases = constraints if constraints.numel() else topology
+            pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
+            for source_index, source in enumerate(
+                bases[: max(1, config.contact_synthesis_seeds)]
+            ):
+                for candidate in apply_contact_obligations(
+                    case,
+                    source,
+                    max_candidates=1,
+                ):
+                    candidate = candidate.to(
+                        device=learned_boxes.device,
+                        dtype=learned_boxes.dtype,
+                    )
+                    soft = soft_violation_normalized(case, candidate).raw_total
+                    quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
+                    pool.append(
+                        (
+                            (soft, quality, source_index),
+                            candidate,
+                            {
+                                "source_type": "contact_synthesis",
+                                "shape_source_index": source_index,
+                            },
+                        )
+                    )
+            selected = []
+            seen: set[str] = set()
+            for item in sorted(pool, key=lambda item: item[0]):
+                digest = _tensor_sha256(item[1])
+                if digest in seen:
+                    continue
+                seen.add(digest)
+                selected.append(item)
+                if len(selected) == config.contact_synthesis_seeds:
+                    break
+            if selected:
+                contact_boxes = torch.stack([item[1] for item in selected])
+                learned_boxes = torch.cat(
+                    (
+                        learned_boxes[:structured_end],
+                        contact_boxes,
+                        learned_boxes[structured_end:],
+                    ),
+                    dim=0,
+                )
+                if provenance is not None:
+                    provenance.update(
+                        {
+                            "contact_synthesis_seed_accepted": True,
+                            "contact_synthesis_seed_count": len(selected),
+                            "contact_synthesis_seed_records": tuple(
+                                {
+                                    **item[2],
+                                    "residual_index": structured_end + index,
+                                    "candidate_sha256": _tensor_sha256(item[1]),
+                                }
+                                for index, item in enumerate(selected)
+                            ),
+                        }
+                    )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            if provenance is not None:
+                provenance["contact_synthesis_seed_failure_reason"] = (
                     f"{type(exc).__name__}: {exc}"
                 )
     if provenance is not None:
@@ -2210,6 +2522,11 @@ def _btree_seed_candidates(
     source_boxes: Tensor,
     *,
     count: int,
+    dual_axis: bool = False,
+    shape_variants: bool = False,
+    local_moves: int = 0,
+    route_dual_axis: bool = False,
+    baseline_trained: bool = False,
 ) -> tuple[Tensor, tuple[dict[str, object], ...]]:
     if count <= 0:
         return source_boxes.new_empty((0, case.n, 4)), ()
@@ -2222,11 +2539,13 @@ def _btree_seed_candidates(
         if infer_outline_hypotheses is not None
         else ()
     )
-    origins = (
-        tuple((outline.x_left, outline.y_bottom, outline.hypothesis_id) for outline in hypotheses)
-        or ((0.0, 0.0, "origin"),)
-    )
-    pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
+    origins = tuple(
+        (outline.x_left, outline.y_bottom, outline.hypothesis_id)
+        for outline in hypotheses
+    ) or ((0.0, 0.0, "origin"),)
+    x_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
+    y_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
+    challenger_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
     for source_index, source in enumerate(sources[: max(1, count)]):
         dims = source[:, 2:4]
         base_order = torch.argsort(centers_from_xywh(source)[:, 1], stable=True)
@@ -2247,7 +2566,7 @@ def _btree_seed_candidates(
                 hard = verify_feasible(case, candidate)
                 soft = soft_violation_normalized(case, candidate).raw_total
                 quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
-                pool.append(
+                x_pool.append(
                     (
                         (not hard, soft, quality, source_index, outline_id, order_name),
                         candidate,
@@ -2256,20 +2575,207 @@ def _btree_seed_candidates(
                             "shape_source_index": source_index,
                             "outline_hypothesis": outline_id,
                             "vertical_order_source": order_name,
+                            "compaction_axis": "x",
                             "predicted_root": tree.root,
                         },
                     )
                 )
-    selected = []
+        if dual_axis:
+            horizontal_base = torch.argsort(
+                centers_from_xywh(source)[:, 0], stable=True
+            )
+            transposed_boundary = case.boundary_bits[:, (2, 3, 1, 0)]
+            horizontal_orders = contact_aware_vertical_orders(
+                horizontal_base,
+                transposed_boundary,
+                case.group_membership,
+            )[:2]
+            for order_name, order in horizontal_orders:
+                for x0, y0, outline_id in origins:
+                    candidate = tree.pack_y_compacted(
+                        dims,
+                        order,
+                        case.preplaced_mask,
+                        case.target,
+                        origin=(x0, y0),
+                    ).float()
+                    hard = verify_feasible(case, candidate)
+                    soft = soft_violation_normalized(case, candidate).raw_total
+                    quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
+                    y_pool.append(
+                        (
+                            (
+                                not hard,
+                                soft,
+                                quality,
+                                source_index,
+                                outline_id,
+                                order_name,
+                            ),
+                            candidate,
+                            {
+                                "source_type": "btree",
+                                "shape_source_index": source_index,
+                                "outline_hypothesis": outline_id,
+                                "horizontal_order_source": order_name,
+                                "compaction_axis": "y",
+                                "predicted_root": tree.root,
+                            },
+                        )
+                    )
+        if source_index == 0 and (shape_variants or local_moves):
+            x0, y0, outline_id = origins[0]
+            x_order_name, x_order = orders[0]
+            horizontal_base = torch.argsort(
+                centers_from_xywh(source)[:, 0], stable=True
+            )
+            y_order_name, y_order = contact_aware_vertical_orders(
+                horizontal_base,
+                case.boundary_bits[:, (2, 3, 1, 0)],
+                case.group_membership,
+            )[0]
+
+            def add_challenger(
+                candidate: Tensor,
+                *,
+                axis: str,
+                variant: str,
+                order_name: str,
+            ) -> None:
+                hard = verify_feasible(case, candidate)
+                soft = soft_violation_normalized(case, candidate).raw_total
+                quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
+                challenger_pool.append(
+                    (
+                        (not hard, soft, quality, axis, variant),
+                        candidate.float(),
+                        {
+                            "source_type": "btree",
+                            "shape_source_index": source_index,
+                            "outline_hypothesis": outline_id,
+                            "compaction_axis": axis,
+                            "variant": variant,
+                            "order_source": order_name,
+                            "predicted_root": tree.root,
+                        },
+                    )
+                )
+
+            if shape_variants:
+                weighted_degree = case.b2b_weight.sum(dim=0) + case.b2b_weight.sum(
+                    dim=1
+                )
+                dimension_variants = btree_dimension_variants(
+                    dims,
+                    fixed_mask=case.fixed_mask,
+                    preplaced_mask=case.preplaced_mask,
+                    mib_membership=case.mib_membership,
+                    weighted_degree=weighted_degree,
+                    areas=case.area,
+                )
+                for name in ("ar64", "ar32", "net_aware"):
+                    variant_dims = dimension_variants[name]
+                    add_challenger(
+                        tree.pack_x_compacted(
+                            variant_dims,
+                            x_order,
+                            case.preplaced_mask,
+                            case.target,
+                            origin=(x0, y0),
+                        ),
+                        axis="x",
+                        variant=f"shape:{name}",
+                        order_name=x_order_name,
+                    )
+                    if dual_axis:
+                        add_challenger(
+                            tree.pack_y_compacted(
+                                variant_dims,
+                                y_order,
+                                case.preplaced_mask,
+                                case.target,
+                                origin=(x0, y0),
+                            ),
+                            axis="y",
+                            variant=f"shape:{name}",
+                            order_name=y_order_name,
+                        )
+            for move_name, variant_tree in subtree_move_variants(
+                tree,
+                limit=local_moves,
+            ):
+                add_challenger(
+                    variant_tree.pack_x_compacted(
+                        dims,
+                        x_order,
+                        case.preplaced_mask,
+                        case.target,
+                        origin=(x0, y0),
+                    ),
+                    axis="x",
+                    variant=move_name,
+                    order_name=x_order_name,
+                )
+                if dual_axis:
+                    add_challenger(
+                        variant_tree.pack_y_compacted(
+                            dims,
+                            y_order,
+                            case.preplaced_mask,
+                            case.target,
+                            origin=(x0, y0),
+                        ),
+                        axis="y",
+                        variant=move_name,
+                        order_name=y_order_name,
+                    )
+    selected: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
     seen: set[str] = set()
-    for item in sorted(pool, key=lambda item: item[0]):
-        digest = _tensor_sha256(item[1])
-        if digest in seen:
-            continue
-        seen.add(digest)
-        selected.append(item)
-        if len(selected) == count:
-            break
+
+    def append_pool(
+        pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]],
+        limit: int,
+    ) -> None:
+        if limit <= 0:
+            return
+        added = 0
+        for item in sorted(pool, key=lambda item: item[0]):
+            digest = _tensor_sha256(item[1])
+            if digest in seen:
+                continue
+            seen.add(digest)
+            selected.append(item)
+            added += 1
+            if added == limit:
+                break
+
+    append_pool(x_pool, count)
+    dual_axis_count = count if dual_axis else 0
+    if route_dual_axis and dual_axis_count and selected:
+        dual_axis_count = _dual_axis_seed_budget(
+            case,
+            selected[0][1],
+            output,
+            maximum=count,
+            baseline_trained=baseline_trained,
+        )
+    append_pool(y_pool, dual_axis_count)
+    append_pool(
+        challenger_pool,
+        count if shape_variants or local_moves else 0,
+    )
+    selected = [
+        (
+            key,
+            candidate,
+            {
+                **record,
+                "dual_axis_routed_count": dual_axis_count,
+                "family_router_enabled": route_dual_axis,
+            },
+        )
+        for key, candidate, record in selected
+    ]
     if not selected:
         raise ValueError("B*-Tree candidate generation produced no candidates")
     return (
@@ -2278,6 +2784,58 @@ def _btree_seed_candidates(
         ),
         tuple(item[2] for item in selected),
     )
+
+
+def _dual_axis_seed_budget(
+    case: FloorplanCase,
+    reference: Tensor,
+    output: Any,
+    *,
+    maximum: int,
+    baseline_trained: bool = False,
+) -> int:
+    """Route 0/2/4 dual-axis challengers from runtime-visible geometry."""
+
+    if maximum <= 0:
+        return 0
+    boxes = reference.detach().to(dtype=torch.float64, device="cpu")
+    occupied = float((boxes[:, 2] * boxes[:, 3]).sum())
+    left = float(boxes[:, 0].amin())
+    bottom = float(boxes[:, 1].amin())
+    width = float((boxes[:, 0] + boxes[:, 2]).amax()) - left
+    height = float((boxes[:, 1] + boxes[:, 3]).amax()) - bottom
+    utilization = occupied / max(width * height, torch.finfo(torch.float64).eps)
+    aspect = max(width / max(height, 1.0e-12), height / max(width, 1.0e-12))
+    budget = (
+        maximum
+        if utilization < 0.50 or case.n >= 106
+        else min(2, maximum)
+        if aspect >= 2.0
+        else 0
+    )
+    if (
+        baseline_trained
+        and output.baseline_log_area is not None
+        and output.baseline_log_hpwl is not None
+    ):
+        predicted_area = math.exp(float(output.baseline_log_area)) * case.scale**2
+        predicted_hpwl = math.exp(float(output.baseline_log_hpwl)) * case.scale
+        soft = soft_violation_normalized(case, reference).total
+        estimated = approximate_local_cost(
+            BaselineCandidateMetrics(
+                layout_area=bbox_area(reference) * case.scale**2,
+                hpwl=total_hpwl(case, reference),
+                violations_relative=soft,
+                hard_feasible=verify_feasible(case, reference),
+            ),
+            baseline_area=predicted_area,
+            baseline_hpwl=predicted_hpwl,
+        )
+        if estimated >= 7.0:
+            budget = maximum
+        elif estimated >= 5.5:
+            budget = max(budget, min(2, maximum))
+    return budget
 
 
 def _needs_legacy_mib_challenger(case: FloorplanCase) -> bool:
@@ -2395,18 +2953,12 @@ def _constraint_seed_candidates(
     mib_log_aspect = getattr(output, "mib_log_aspect", None)
     relation_scores = relation_scores.detach().to(device="cpu", dtype=torch.float32)
     if boundary_scores is not None:
-        boundary_scores = boundary_scores.detach().to(
-            device="cpu", dtype=torch.float32
-        )
+        boundary_scores = boundary_scores.detach().to(device="cpu", dtype=torch.float32)
     if mib_log_aspect is not None:
-        mib_log_aspect = mib_log_aspect.detach().to(
-            device="cpu", dtype=torch.float32
-        )
+        mib_log_aspect = mib_log_aspect.detach().to(device="cpu", dtype=torch.float32)
 
     reference = safe_shelf(case).detach().to(device="cpu", dtype=torch.float32)
-    hpwl_denominator = max(
-        total_hpwl(case, reference), torch.finfo(torch.float64).eps
-    )
+    hpwl_denominator = max(total_hpwl(case, reference), torch.finfo(torch.float64).eps)
     bbox_denominator = max(bbox_area(reference), torch.finfo(torch.float64).eps)
     pool: list[Tensor] = []
     records: list[dict[str, object]] = []
@@ -2482,9 +3034,7 @@ def _constraint_seed_candidates(
     )
     selected_indices = representatives[:count]
     selected_indices.extend(
-        index
-        for index in ordered_indices
-        if index not in selected_indices
+        index for index in ordered_indices if index not in selected_indices
     )
     selected_indices = selected_indices[:count]
     selected_records = tuple(dict(records[index]) for index in selected_indices)
