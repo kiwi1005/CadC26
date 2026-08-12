@@ -56,8 +56,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--btree-dual-axis", action="store_true")
     parser.add_argument("--btree-shape-variants", action="store_true")
     parser.add_argument("--btree-local-moves", type=_non_negative_int, default=0)
+    parser.add_argument("--btree-beam", type=_positive_int, default=1)
+    parser.add_argument("--btree-connectivity-weight", type=float, default=0.0)
     parser.add_argument("--family-router", action="store_true")
     parser.add_argument("--contact-synthesis-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--dense-patch-candidates", type=_non_negative_int, default=0)
+    parser.add_argument(
+        "--boundary-skeleton-candidates", type=_non_negative_int, default=0
+    )
+    parser.add_argument("--region-assignment-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--island-relocation", action="store_true")
     parser.add_argument("--baseline-selection-margin", type=float)
     parser.add_argument("--ranker-selection-experiment", action="store_true")
@@ -106,8 +113,13 @@ def main(argv: list[str] | None = None) -> int:
             args.btree_dual_axis,
             args.btree_shape_variants,
             args.btree_local_moves,
+            args.btree_beam,
+            args.btree_connectivity_weight,
             args.family_router,
             args.contact_synthesis_seeds,
+            args.dense_patch_candidates,
+            args.boundary_skeleton_candidates,
+            args.region_assignment_seeds,
             args.island_relocation,
             args.baseline_selection_margin,
             args.ranker_selection_experiment,
@@ -139,8 +151,13 @@ def main(argv: list[str] | None = None) -> int:
                 "btree_dual_axis": args.btree_dual_axis,
                 "btree_shape_variants": args.btree_shape_variants,
                 "btree_local_moves": args.btree_local_moves,
+                "btree_beam": args.btree_beam,
+                "btree_connectivity_weight": args.btree_connectivity_weight,
                 "family_router": args.family_router,
                 "contact_synthesis_seeds": args.contact_synthesis_seeds,
+                "dense_patch_candidates": args.dense_patch_candidates,
+                "boundary_skeleton_candidates": args.boundary_skeleton_candidates,
+                "region_assignment_seeds": args.region_assignment_seeds,
                 "island_relocation": args.island_relocation,
                 "baseline_selection_margin": args.baseline_selection_margin,
                 "tail_topk": args.tail_topk,
@@ -195,6 +212,13 @@ def _non_negative_int(value: str) -> int:
     return parsed
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
 def _load_rows(path: Path) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     rows = payload.get("test_results", payload.get("results"))
@@ -221,8 +245,13 @@ def _run_optimizers(
     btree_dual_axis: bool = False,
     btree_shape_variants: bool = False,
     btree_local_moves: int = 0,
+    btree_beam: int = 1,
+    btree_connectivity_weight: float = 0.0,
     family_router: bool = False,
     contact_synthesis_seeds: int = 0,
+    dense_patch_candidates: int = 0,
+    boundary_skeleton_candidates: int = 0,
+    region_assignment_seeds: int = 0,
     island_relocation: bool = False,
     baseline_selection_margin: float | None = None,
     ranker_selection_experiment: bool = False,
@@ -250,6 +279,15 @@ def _run_optimizers(
         _environment("HCFP_BTREE_LOCAL_MOVES", str(btree_local_moves)),
         _environment("HCFP_FAMILY_ROUTER", "1" if family_router else None),
         _environment("HCFP_CONTACT_SYNTHESIS_SEEDS", str(contact_synthesis_seeds)),
+        _environment_group(
+            {
+                "HCFP_DENSE_PATCH_CANDIDATES": str(dense_patch_candidates),
+                "HCFP_BOUNDARY_SKELETON_CANDIDATES": str(boundary_skeleton_candidates),
+                "HCFP_BTREE_BEAM": str(btree_beam),
+                "HCFP_BTREE_CONNECTIVITY_WEIGHT": str(btree_connectivity_weight),
+                "HCFP_REGION_ASSIGNMENT_SEEDS": str(region_assignment_seeds),
+            }
+        ),
         _environment("HCFP_ISLAND_RELOCATION", "1" if island_relocation else None),
         _environment(
             "HCFP_BASELINE_SELECTION_MARGIN",
@@ -297,14 +335,20 @@ def _run_optimizers(
                     "btree_dual_axis": btree_dual_axis,
                     "btree_shape_variants": btree_shape_variants,
                     "btree_local_moves": btree_local_moves,
+                    "btree_beam": btree_beam,
+                    "btree_connectivity_weight": btree_connectivity_weight,
                     "btree_candidate_budget_max": btree_seeds
                     * (
                         1
                         + int(btree_dual_axis)
                         + int(btree_shape_variants or btree_local_moves > 0)
-                    ),
+                    )
+                    + max(0, btree_beam - 1) * (1 + int(btree_dual_axis)),
                     "family_router": family_router,
                     "contact_synthesis_seeds": contact_synthesis_seeds,
+                    "dense_patch_candidates": dense_patch_candidates,
+                    "boundary_skeleton_candidates": boundary_skeleton_candidates,
+                    "region_assignment_seeds": region_assignment_seeds,
                     "island_relocation": island_relocation,
                     "baseline_selection_margin": baseline_selection_margin,
                     "ranker_selection_experiment": ranker_selection_experiment,
@@ -323,14 +367,20 @@ def _run_optimizers(
                     "btree_dual_axis": btree_dual_axis,
                     "btree_shape_variants": btree_shape_variants,
                     "btree_local_moves": btree_local_moves,
+                    "btree_beam": btree_beam,
+                    "btree_connectivity_weight": btree_connectivity_weight,
                     "btree_candidate_budget_max": btree_seeds
                     * (
                         1
                         + int(btree_dual_axis)
                         + int(btree_shape_variants or btree_local_moves > 0)
-                    ),
+                    )
+                    + max(0, btree_beam - 1) * (1 + int(btree_dual_axis)),
                     "family_router": family_router,
                     "contact_synthesis_seeds": contact_synthesis_seeds,
+                    "dense_patch_candidates": dense_patch_candidates,
+                    "boundary_skeleton_candidates": boundary_skeleton_candidates,
+                    "region_assignment_seeds": region_assignment_seeds,
                     "island_relocation": island_relocation,
                     "baseline_selection_margin": baseline_selection_margin,
                     "ranker_selection_experiment": False,
@@ -492,6 +542,24 @@ def _environment(name: str, value: str | None):
             os.environ.pop(name, None)
         else:
             os.environ[name] = previous
+
+
+@contextmanager
+def _environment_group(values: dict[str, str | None]):
+    previous = {name: os.environ.get(name) for name in values}
+    for name, value in values.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 if __name__ == "__main__":

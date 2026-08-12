@@ -6,6 +6,7 @@ import torch
 from hcfp.btree import (
     BStarTree,
     contact_aware_vertical_orders,
+    decode_connectivity_btree_beam,
     decode_btree_logits,
     local_tree_variants,
 )
@@ -32,7 +33,9 @@ def test_btree_preloads_preplaced_obstacles_into_contour() -> None:
     boxes = tree.pack_with_preplaced(
         torch.tensor(((2.0, 2.0), (2.0, 2.0), (2.0, 2.0))),
         torch.tensor((False, True, False)),
-        torch.tensor(((0.0, 0.0, 2.0, 2.0), (2.0, 3.0, 2.0, 2.0), (0.0, 0.0, 2.0, 2.0))),
+        torch.tensor(
+            ((0.0, 0.0, 2.0, 2.0), (2.0, 3.0, 2.0, 2.0), (0.0, 0.0, 2.0, 2.0))
+        ),
     )
     assert boxes[1].tolist() == [2.0, 3.0, 2.0, 2.0]
     assert boxes[0, 1] == 0.0
@@ -93,3 +96,43 @@ def test_logit_decoder_always_builds_a_valid_binary_tree() -> None:
     assert tree.block_count == 7
     assert tree.edges().shape == (6, 3)
     assert BStarTree.from_edges(tree.edges(), 7) == tree
+
+
+def test_connectivity_beam_is_valid_deterministic_and_keeps_base() -> None:
+    root = torch.zeros(5)
+    edges = torch.zeros((5, 5, 2))
+    weights = torch.zeros((5, 5))
+    weights[3, 4] = weights[4, 3] = 100.0
+    groups = torch.tensor([[False, False, False, True, True]])
+    boundary = torch.zeros((5, 4), dtype=torch.bool)
+    boundary[3, 0] = True
+    boundary[4, 1] = True
+
+    first = decode_connectivity_btree_beam(
+        root,
+        edges,
+        b2b_weight=weights,
+        group_membership=groups,
+        boundary_bits=boundary,
+        beam_width=4,
+        connectivity_weight=0.3,
+    )
+    second = decode_connectivity_btree_beam(
+        root,
+        edges,
+        b2b_weight=weights,
+        group_membership=groups,
+        boundary_bits=boundary,
+        beam_width=4,
+        connectivity_weight=0.3,
+    )
+
+    assert first == second
+    assert first[0] == decode_btree_logits(root, edges)
+    assert len(first) > 1
+    assert any(
+        {int(parent), int(child)} == {3, 4}
+        for tree in first[1:]
+        for parent, child, _ in tree.edges().tolist()
+    )
+    assert all(BStarTree.from_edges(tree.edges(), 5) == tree for tree in first)

@@ -125,6 +125,15 @@ def _load_default_solver() -> Solver | None:
             contact_synthesis_seeds = int(
                 os.environ.get("HCFP_CONTACT_SYNTHESIS_SEEDS", "0")
             )
+            dense_patch_candidates = int(
+                os.environ.get("HCFP_DENSE_PATCH_CANDIDATES", "0")
+            )
+            boundary_skeleton_candidates = int(
+                os.environ.get("HCFP_BOUNDARY_SKELETON_CANDIDATES", "0")
+            )
+            region_assignment_seeds = int(
+                os.environ.get("HCFP_REGION_ASSIGNMENT_SEEDS", "0")
+            )
             btree_dual_axis = os.environ.get("HCFP_BTREE_DUAL_AXIS", "").lower() in {
                 "1",
                 "true",
@@ -135,6 +144,10 @@ def _load_default_solver() -> Solver | None:
                 "HCFP_BTREE_SHAPE_VARIANTS", ""
             ).lower() in {"1", "true", "yes", "on"}
             btree_local_moves = int(os.environ.get("HCFP_BTREE_LOCAL_MOVES", "0"))
+            btree_beam = int(os.environ.get("HCFP_BTREE_BEAM", "1"))
+            btree_connectivity_weight = float(
+                os.environ.get("HCFP_BTREE_CONNECTIVITY_WEIGHT", "0.0")
+            )
             family_router = os.environ.get("HCFP_FAMILY_ROUTER", "").lower() in {
                 "1",
                 "true",
@@ -167,8 +180,13 @@ def _load_default_solver() -> Solver | None:
                     btree_dual_axis=btree_dual_axis,
                     btree_shape_variants=btree_shape_variants,
                     btree_local_moves=btree_local_moves,
+                    btree_beam=btree_beam,
+                    btree_connectivity_weight=btree_connectivity_weight,
                     family_router=family_router,
                     contact_synthesis_seeds=contact_synthesis_seeds,
+                    dense_patch_candidates=dense_patch_candidates,
+                    boundary_skeleton_candidates=boundary_skeleton_candidates,
+                    region_assignment_seeds=region_assignment_seeds,
                     island_relocation=island_relocation,
                     baseline_selection_margin=baseline_selection_margin,
                 )

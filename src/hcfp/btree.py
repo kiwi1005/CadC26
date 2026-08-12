@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import heapq
 
 import torch
 
@@ -732,3 +733,117 @@ def decode_btree_logits(root_logits: Tensor, edge_logits: Tensor) -> BStarTree:
         connected.add(child)
         remaining.remove(child)
     return BStarTree.from_edges(torch.tensor(rows, dtype=torch.long), n)
+
+
+def decode_connectivity_btree_beam(
+    root_logits: Tensor,
+    edge_logits: Tensor,
+    *,
+    b2b_weight: Tensor,
+    group_membership: Tensor,
+    boundary_bits: Tensor,
+    beam_width: int = 4,
+    connectivity_weight: float = 0.3,
+) -> tuple[BStarTree, ...]:
+    """Decode a small valid-tree beam with runtime-visible obligation rewards."""
+
+    if beam_width <= 0:
+        raise ValueError("beam_width must be positive")
+    if not torch.isfinite(torch.tensor(connectivity_weight)) or connectivity_weight < 0:
+        raise ValueError("connectivity_weight must be finite and non-negative")
+    root_scores = torch.as_tensor(root_logits).detach().double().cpu().reshape(-1)
+    edge_scores = torch.as_tensor(edge_logits).detach().double().cpu()
+    n = int(root_scores.numel())
+    weights = torch.as_tensor(b2b_weight).detach().double().cpu()
+    groups = torch.as_tensor(group_membership, dtype=torch.bool, device="cpu")
+    bits = torch.as_tensor(boundary_bits, dtype=torch.bool, device="cpu")
+    if edge_scores.shape != (n, n, 2) or weights.shape != (n, n):
+        raise ValueError("B*-Tree and connectivity tensors do not match")
+    if groups.ndim != 2 or groups.shape[1] != n or bits.shape != (n, 4):
+        raise ValueError("group/boundary tensors do not match B*-Tree logits")
+
+    adjusted = edge_scores.clone()
+    if connectivity_weight:
+        symmetric = torch.maximum(weights, weights.T).clamp_min(0.0)
+        adjusted += connectivity_weight * torch.log1p(symmetric)[:, :, None]
+        if groups.numel():
+            same_group = (groups.T.to(torch.int32) @ groups.to(torch.int32)) > 0
+            adjusted += connectivity_weight * same_group[:, :, None]
+        boundary_reward = adjusted.new_zeros((n, n, 2))
+        boundary_reward[:, :, 0] = bits[:, 1, None].double() + bits[None, :, 0].double()
+        boundary_reward[:, :, 1] = bits[:, 2, None].double() + bits[None, :, 3].double()
+        adjusted += 0.5 * connectivity_weight * boundary_reward
+        root_scores = root_scores + 0.5 * connectivity_weight * (
+            bits[:, 0].double() + bits[:, 3].double()
+        )
+
+    # State: cumulative score, root, left children, right children, connected.
+    roots = sorted(range(n), key=lambda node: (-float(root_scores[node]), node))[
+        :beam_width
+    ]
+    states = [
+        (
+            float(root_scores[root]),
+            root,
+            tuple([-1] * n),
+            tuple([-1] * n),
+            frozenset((root,)),
+        )
+        for root in roots
+    ]
+    for _ in range(n - 1):
+        expanded = []
+        for score, root, left, right, connected in states:
+            remaining = tuple(node for node in range(n) if node not in connected)
+            choices = (
+                (
+                    float(adjusted[child, parent, side]),
+                    -parent,
+                    -child,
+                    -side,
+                )
+                for parent in sorted(connected)
+                for side, branch in enumerate((left, right))
+                if branch[parent] < 0
+                for child in remaining
+            )
+            for edge_score, parent_neg, child_neg, side_neg in heapq.nlargest(
+                beam_width, choices
+            ):
+                parent, child, side = -parent_neg, -child_neg, -side_neg
+                next_left, next_right = list(left), list(right)
+                (next_left if side == 0 else next_right)[parent] = child
+                expanded.append(
+                    (
+                        score + edge_score,
+                        root,
+                        tuple(next_left),
+                        tuple(next_right),
+                        connected | {child},
+                    )
+                )
+        states = sorted(
+            expanded,
+            key=lambda state: (
+                -state[0],
+                state[1],
+                state[2],
+                state[3],
+            ),
+        )[:beam_width]
+
+    trees: list[BStarTree] = []
+    seen: set[tuple[tuple[int, ...], tuple[int, ...]]] = set()
+    baseline = decode_btree_logits(root_logits, edge_logits)
+    for tree in (
+        baseline,
+        *(_tree_from_children(list(state[2]), list(state[3])) for state in states),
+    ):
+        key = (tree.left, tree.right)
+        if key in seen:
+            continue
+        seen.add(key)
+        trees.append(tree)
+        if len(trees) == beam_width:
+            break
+    return tuple(trees)

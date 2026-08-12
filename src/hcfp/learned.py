@@ -25,6 +25,7 @@ from hcfp.case import FloorplanCase, from_official
 from hcfp.btree import (
     btree_dimension_variants,
     contact_aware_vertical_orders,
+    decode_connectivity_btree_beam,
     decode_btree_logits,
     subtree_move_variants,
 )
@@ -34,10 +35,14 @@ from hcfp.baseline_router import (
     approximate_local_cost,
     conservative_promotion,
 )
+from hcfp.boundary_skeleton import (
+    boundary_skeleton_candidates as generate_boundary_skeleton_candidates,
+)
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
 from hcfp.collective_runtime import CollectiveForceController
 from hcfp.contact_synthesis import apply_contact_obligations
+from hcfp.contact_patch import dense_contact_patch_candidates
 from hcfp.constraints.construction import connect_groups, construct_constraint_variants
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
@@ -52,6 +57,7 @@ from hcfp.ranker_features import (
     RANKER_FEATURE_VERSION,
     repair_aware_ranker_features,
 )
+from hcfp.region_assignment import obstacle_region_candidates
 from hcfp.topology import (
     adapt_preplaced_topology,
     anchor_safe_order_variants,
@@ -134,8 +140,13 @@ class LearnedConfig:
     btree_dual_axis: bool = False
     btree_shape_variants: bool = False
     btree_local_moves: int = 0
+    btree_beam: int = 1
+    btree_connectivity_weight: float = 0.0
     family_router: bool = False
     contact_synthesis_seeds: int = 0
+    dense_patch_candidates: int = 0
+    boundary_skeleton_candidates: int = 0
+    region_assignment_seeds: int = 0
     island_relocation: bool = False
     baseline_selection_margin: float | None = None
     collective_steps: int = 0
@@ -168,10 +179,24 @@ class LearnedConfig:
             raise ValueError("btree_shape_variants must be boolean")
         if self.btree_local_moves < 0:
             raise ValueError("btree_local_moves must be non-negative")
+        if self.btree_beam <= 0:
+            raise ValueError("btree_beam must be positive")
+        if not math.isfinite(self.btree_connectivity_weight) or (
+            self.btree_connectivity_weight < 0.0
+        ):
+            raise ValueError(
+                "btree_connectivity_weight must be finite and non-negative"
+            )
         if type(self.family_router) is not bool:
             raise ValueError("family_router must be boolean")
         if self.contact_synthesis_seeds < 0:
             raise ValueError("contact_synthesis_seeds must be non-negative")
+        if self.dense_patch_candidates < 0:
+            raise ValueError("dense_patch_candidates must be non-negative")
+        if self.boundary_skeleton_candidates < 0:
+            raise ValueError("boundary_skeleton_candidates must be non-negative")
+        if self.region_assignment_seeds < 0:
+            raise ValueError("region_assignment_seeds must be non-negative")
         if type(self.island_relocation) is not bool:
             raise ValueError("island_relocation must be boolean")
         if self.baseline_selection_margin is not None and not (
@@ -580,7 +605,30 @@ def select_official_from_analysis(
                 placements,
                 baseline_margin=_learned_config(config).baseline_selection_margin,
             )
-        if _learned_config(config).island_relocation:
+        placements = _raw_connectivity_btree_guard(
+            source,
+            case,
+            analysis,
+            placements,
+        )
+        learned_config = _learned_config(config)
+        if learned_config.dense_patch_candidates:
+            placements = _dense_contact_patch_guard(
+                source,
+                case,
+                analysis,
+                placements,
+                max_candidates=learned_config.dense_patch_candidates,
+            )
+        if learned_config.boundary_skeleton_candidates:
+            placements = _boundary_skeleton_guard(
+                source,
+                case,
+                analysis,
+                placements,
+                max_candidates=learned_config.boundary_skeleton_candidates,
+            )
+        if learned_config.island_relocation:
             placements = _island_relocation_guard(source, case, placements)
         _record_ranker_selection_counterfactual(
             source,
@@ -625,6 +673,12 @@ def select_official_from_analysis(
                     candidate,
                     baseline_margin=_learned_config(config).baseline_selection_margin,
                 )
+            candidate = _raw_connectivity_btree_guard(
+                source,
+                case,
+                analysis,
+                candidate,
+            )
             if index == 0:
                 break
             _record_ranker_selection_counterfactual(
@@ -666,9 +720,22 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
                 os.environ.get("HCFP_BTREE_SHAPE_VARIANTS")
             ),
             btree_local_moves=int(os.environ.get("HCFP_BTREE_LOCAL_MOVES", "0")),
+            btree_beam=int(os.environ.get("HCFP_BTREE_BEAM", "1")),
+            btree_connectivity_weight=float(
+                os.environ.get("HCFP_BTREE_CONNECTIVITY_WEIGHT", "0.0")
+            ),
             family_router=_truthy_env(os.environ.get("HCFP_FAMILY_ROUTER")),
             contact_synthesis_seeds=int(
                 os.environ.get("HCFP_CONTACT_SYNTHESIS_SEEDS", "0")
+            ),
+            dense_patch_candidates=int(
+                os.environ.get("HCFP_DENSE_PATCH_CANDIDATES", "0")
+            ),
+            boundary_skeleton_candidates=int(
+                os.environ.get("HCFP_BOUNDARY_SKELETON_CANDIDATES", "0")
+            ),
+            region_assignment_seeds=int(
+                os.environ.get("HCFP_REGION_ASSIGNMENT_SEEDS", "0")
             ),
             island_relocation=_truthy_env(os.environ.get("HCFP_ISLAND_RELOCATION")),
             baseline_selection_margin=(
@@ -743,7 +810,7 @@ def _merge_tail_analyses(
     area = telemetry.bbox_area.detach().to(device="cpu", dtype=torch.float64)
     hpwl = telemetry.hpwl.detach().to(device="cpu", dtype=torch.float64)
     soft = telemetry.soft_violation.detach().to(device="cpu", dtype=torch.float64)
-    treemap_indices: set[int] = set()
+    excluded_challenger_indices: set[int] = set()
     if topology_provenance and bool(
         topology_provenance.get("treemap_seed_accepted", False)
     ):
@@ -755,8 +822,26 @@ def _merge_tail_analyses(
             except (KeyError, TypeError, ValueError):
                 continue
             if 0 <= learned_index < learned_count:
-                treemap_indices.add(1 + analytic_count + learned_index)
-                treemap_indices.add(
+                excluded_challenger_indices.add(1 + analytic_count + learned_index)
+                excluded_challenger_indices.add(
+                    1 + analytic_count + learned_count + analytic_count + learned_index
+                )
+    if topology_provenance and bool(
+        topology_provenance.get("btree_seed_accepted", False)
+    ):
+        for record in tuple(topology_provenance.get("btree_seed_records", ())):
+            if (
+                not isinstance(record, dict)
+                or record.get("variant") != "connectivity_beam"
+            ):
+                continue
+            try:
+                learned_index = int(record["residual_index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= learned_index < learned_count:
+                excluded_challenger_indices.add(1 + analytic_count + learned_index)
+                excluded_challenger_indices.add(
                     1 + analytic_count + learned_count + analytic_count + learned_index
                 )
 
@@ -764,7 +849,7 @@ def _merge_tail_analyses(
         indices = [
             index
             for index in torch.nonzero(mask, as_tuple=False).reshape(-1).tolist()
-            if index not in treemap_indices
+            if index not in excluded_challenger_indices
         ]
         return (
             min(
@@ -1488,7 +1573,11 @@ def _candidate_funnel_proxy_guard(
 
     snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
     candidates: list[tuple[int, str, Tensor]] = []
-    raw = analysis.analytic.raw_candidates
+    raw = getattr(
+        analysis.analytic,
+        "raw_candidates",
+        analysis.analytic.projected_candidates,
+    )
     projected = analysis.analytic.projected_candidates
     for name, boxes in (
         ("constraint_seed_provenance", projected),
@@ -1499,6 +1588,11 @@ def _candidate_funnel_proxy_guard(
         records = snapshot.get(name, ())
         for record in records if isinstance(records, (tuple, list)) else ():
             if not isinstance(record, dict) or record.get("stage") != "initial":
+                continue
+            if (
+                name == "btree_seed_provenance"
+                and record.get("variant") == "connectivity_beam"
+            ):
                 continue
             index = _candidate_index(record.get("source"))
             if index is not None and 0 <= index < boxes.shape[0]:
@@ -1587,6 +1681,74 @@ def _candidate_funnel_proxy_guard(
     winner = min(admitted, key=lambda item: item[:5])
     snapshot["candidate_funnel_proxy_source"] = f"candidate_{winner[4]}"
     return winner[5]
+
+
+def _raw_connectivity_btree_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    current: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Admit connectivity-beam trees only when every exact objective improves."""
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    records = tuple(snapshot.get("btree_seed_provenance", ()))
+    if not records:
+        return current
+    try:
+        current_metrics = _raw_quality(source, case, current)
+    except (TypeError, ValueError):
+        return current
+    raw = getattr(
+        analysis.analytic,
+        "raw_candidates",
+        analysis.analytic.projected_candidates,
+    )
+    admitted = []
+    audit_records = []
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or record.get("stage") != "initial"
+            or record.get("variant") != "connectivity_beam"
+        ):
+            continue
+        index = _candidate_index(record.get("source"))
+        if index is None or not 0 <= index < raw.shape[0]:
+            continue
+        placement = to_official_placements(
+            source,
+            case,
+            raw[index].detach().to(device="cpu", dtype=torch.float32),
+        )
+        if not verify_feasible(source, placement):
+            continue
+        try:
+            metrics = _raw_quality(source, case, placement)
+        except (TypeError, ValueError):
+            continue
+        accepted = _dominates(metrics, current_metrics)
+        audit_records.append(
+            {
+                "source": str(record.get("source")),
+                "candidate_index": index,
+                "accepted": accepted,
+                "soft": metrics[0],
+                "bbox_area": metrics[1],
+                "hpwl": metrics[2],
+            }
+        )
+        if accepted:
+            admitted.append(
+                (metrics[0], metrics[1] + 0.05 * metrics[2], index, placement)
+            )
+    snapshot["connectivity_btree_guard_records"] = tuple(audit_records)
+    if not admitted:
+        snapshot["connectivity_btree_guard_source"] = None
+        return current
+    winner = min(admitted, key=lambda item: item[:3])
+    snapshot["connectivity_btree_guard_source"] = f"candidate_{winner[2]}"
+    return winner[3]
 
 
 def _predicted_baseline_interval(
@@ -1809,6 +1971,156 @@ def _post_tail_group_repair(
     except (RuntimeError, TypeError, ValueError):
         pass
     return placements
+
+
+def _dense_contact_patch_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    placements: list[tuple[float, float, float, float]],
+    *,
+    max_candidates: int,
+) -> list[tuple[float, float, float, float]]:
+    """Try exact fixed-frame group repacks only on dense incumbents."""
+
+    if max_candidates <= 0:
+        return placements
+    boxes = torch.as_tensor(placements, dtype=torch.float64, device="cpu")
+    occupied = float((boxes[:, 2] * boxes[:, 3]).sum())
+    utilization = occupied / max(bbox_area(boxes), torch.finfo(torch.float64).eps)
+    if utilization < 0.90:
+        return placements
+    try:
+        incumbent = _raw_quality(source, case, placements)
+        candidates = dense_contact_patch_candidates(
+            case,
+            boxes,
+            verify_case=source,
+            max_candidates=max_candidates,
+        )
+    except (RuntimeError, TypeError, ValueError):
+        return placements
+
+    records: list[dict[str, object]] = []
+    admitted: list[
+        tuple[
+            float,
+            tuple[float, float, float],
+            int,
+            list[tuple[float, float, float, float]],
+        ]
+    ] = []
+    for index, candidate in enumerate(candidates):
+        challenger = [
+            tuple(float(value) for value in row) for row in candidate.placement.tolist()
+        ]
+        try:
+            metrics = _raw_quality(source, case, challenger)
+        except (RuntimeError, TypeError, ValueError):
+            continue
+        delta = _relative_candidate_proxy_delta(metrics, incumbent)
+        records.append(
+            {
+                "candidate_index": index,
+                "group_index": candidate.group_index,
+                "bridge_member": candidate.bridge_member,
+                "anchor_member": candidate.anchor_member,
+                "members": candidate.members,
+                "side": candidate.side,
+                "grouping_before": candidate.grouping_before,
+                "grouping_after": candidate.grouping_after,
+                "proxy_delta": delta,
+                "soft": metrics[0],
+                "bbox_area": metrics[1],
+                "hpwl": metrics[2],
+            }
+        )
+        if delta < -1.0e-6:
+            admitted.append((delta, metrics, index, challenger))
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", None)
+    if isinstance(snapshot, dict):
+        snapshot["dense_patch_records"] = tuple(records)
+    if not admitted:
+        return placements
+    winner = min(admitted, key=lambda item: (item[0], item[1], item[2]))
+    if isinstance(snapshot, dict):
+        snapshot["dense_patch_source"] = f"dense_patch_{winner[2]}"
+    return winner[3]
+
+
+def _boundary_skeleton_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    placements: list[tuple[float, float, float, float]],
+    *,
+    max_candidates: int,
+) -> list[tuple[float, float, float, float]]:
+    """Try exact fixed-frame boundary-witness repacks on dense incumbents."""
+
+    if max_candidates <= 0:
+        return placements
+    boxes = torch.as_tensor(placements, dtype=torch.float64, device="cpu")
+    occupied = float((boxes[:, 2] * boxes[:, 3]).sum())
+    utilization = occupied / max(bbox_area(boxes), torch.finfo(torch.float64).eps)
+    if utilization < 0.90:
+        return placements
+    try:
+        incumbent = _raw_quality(source, case, placements)
+        candidates = generate_boundary_skeleton_candidates(
+            case.to(device="cpu"),
+            boxes,
+            verify_case=source,
+            max_candidates=max_candidates,
+        )
+    except (RuntimeError, TypeError, ValueError):
+        return placements
+
+    records: list[dict[str, object]] = []
+    admitted: list[
+        tuple[
+            float,
+            tuple[float, float, float],
+            int,
+            list[tuple[float, float, float, float]],
+        ]
+    ] = []
+    for index, candidate in enumerate(candidates):
+        challenger = [
+            tuple(float(value) for value in row) for row in candidate.placement.tolist()
+        ]
+        try:
+            metrics = _raw_quality(source, case, challenger)
+        except (RuntimeError, TypeError, ValueError):
+            continue
+        delta = _relative_candidate_proxy_delta(metrics, incumbent)
+        records.append(
+            {
+                "candidate_index": index,
+                "block": candidate.block,
+                "required_sides": candidate.required_sides,
+                "members": candidate.members,
+                "missing_before": candidate.missing_before,
+                "missing_after": candidate.missing_after,
+                "proxy_delta": delta,
+                "soft": metrics[0],
+                "bbox_area": metrics[1],
+                "hpwl": metrics[2],
+            }
+        )
+        if delta < -1.0e-6:
+            admitted.append((delta, metrics, index, challenger))
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", None)
+    if isinstance(snapshot, dict):
+        snapshot["boundary_skeleton_records"] = tuple(records)
+    if not admitted:
+        return placements
+    winner = min(admitted, key=lambda item: (item[0], item[1], item[2]))
+    if isinstance(snapshot, dict):
+        snapshot["boundary_skeleton_source"] = f"boundary_skeleton_{winner[2]}"
+    return winner[3]
 
 
 def _island_relocation_guard(
@@ -2383,6 +2695,8 @@ def _learned_population(
                 dual_axis=config.btree_dual_axis,
                 shape_variants=config.btree_shape_variants,
                 local_moves=config.btree_local_moves,
+                beam_width=config.btree_beam,
+                connectivity_weight=config.btree_connectivity_weight,
                 route_dual_axis=config.family_router,
                 baseline_trained=bool(
                     provenance is not None
@@ -2420,6 +2734,63 @@ def _learned_population(
         except (RuntimeError, TypeError, ValueError) as exc:
             if provenance is not None:
                 provenance["btree_seed_failure_reason"] = f"{type(exc).__name__}: {exc}"
+    if provenance is not None:
+        provenance.setdefault(
+            "region_assignment_seed_attempted", config.region_assignment_seeds > 0
+        )
+        provenance.setdefault("region_assignment_seed_accepted", False)
+        provenance.setdefault("region_assignment_seed_count", 0)
+    if config.region_assignment_seeds:
+        try:
+            hypotheses = (
+                tuple(infer_outline_hypotheses(case))
+                if infer_outline_hypotheses is not None
+                else ()
+            )
+            regions, records = obstacle_region_candidates(
+                case,
+                topology_sources[0],
+                hypotheses,
+                count=config.region_assignment_seeds,
+            )
+            if regions.numel():
+                tail_count = int(constraints.shape[0] + topology.shape[0])
+                structured_end = int(learned_boxes.shape[0]) - tail_count
+                learned_boxes = torch.cat(
+                    (
+                        learned_boxes[:structured_end],
+                        regions.to(learned_boxes),
+                        learned_boxes[structured_end:],
+                    ),
+                    dim=0,
+                )
+                if provenance is not None:
+                    provenance.update(
+                        {
+                            "region_assignment_seed_accepted": True,
+                            "region_assignment_seed_count": int(regions.shape[0]),
+                            "region_assignment_seed_records": tuple(
+                                {
+                                    "hypothesis_id": record.hypothesis_id,
+                                    "axis_mode": record.axis_mode,
+                                    "split_members": record.split_members,
+                                    "split_axis": record.split_axis,
+                                    "split_cut": record.split_cut,
+                                    "region_count": record.region_count,
+                                    "residual_index": structured_end + index,
+                                    "candidate_sha256": _tensor_sha256(candidate),
+                                }
+                                for index, (record, candidate) in enumerate(
+                                    zip(records, regions, strict=True)
+                                )
+                            ),
+                        }
+                    )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            if provenance is not None:
+                provenance["region_assignment_seed_failure_reason"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
     if provenance is not None:
         provenance.setdefault(
             "contact_synthesis_seed_attempted",
@@ -2525,6 +2896,8 @@ def _btree_seed_candidates(
     dual_axis: bool = False,
     shape_variants: bool = False,
     local_moves: int = 0,
+    beam_width: int = 1,
+    connectivity_weight: float = 0.0,
     route_dual_axis: bool = False,
     baseline_trained: bool = False,
 ) -> tuple[Tensor, tuple[dict[str, object], ...]]:
@@ -2532,7 +2905,19 @@ def _btree_seed_candidates(
         return source_boxes.new_empty((0, case.n, 4)), ()
     if output.btree_root_logits is None or output.btree_edge_logits is None:
         raise ValueError("checkpoint does not expose B*-Tree logits")
-    tree = decode_btree_logits(output.btree_root_logits, output.btree_edge_logits)
+    trees = (
+        decode_connectivity_btree_beam(
+            output.btree_root_logits,
+            output.btree_edge_logits,
+            b2b_weight=case.b2b_weight,
+            group_membership=case.group_membership,
+            boundary_bits=case.boundary_bits,
+            beam_width=beam_width,
+            connectivity_weight=connectivity_weight,
+        )
+        if beam_width > 1 or connectivity_weight > 0.0
+        else (decode_btree_logits(output.btree_root_logits, output.btree_edge_logits),)
+    )
     sources = source_boxes.detach().to(device="cpu", dtype=torch.float32)
     hypotheses = (
         tuple(infer_outline_hypotheses(case))
@@ -2545,8 +2930,11 @@ def _btree_seed_candidates(
     ) or ((0.0, 0.0, "origin"),)
     x_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
     y_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
+    connectivity_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
     challenger_pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
     for source_index, source in enumerate(sources[: max(1, count)]):
+        tree_index = 0
+        tree = trees[0]
         dims = source[:, 2:4]
         base_order = torch.argsort(centers_from_xywh(source)[:, 1], stable=True)
         orders = contact_aware_vertical_orders(
@@ -2577,6 +2965,9 @@ def _btree_seed_candidates(
                             "vertical_order_source": order_name,
                             "compaction_axis": "x",
                             "predicted_root": tree.root,
+                            "tree_beam_index": tree_index,
+                            "tree_beam_width": beam_width,
+                            "connectivity_weight": connectivity_weight,
                         },
                     )
                 )
@@ -2620,10 +3011,14 @@ def _btree_seed_candidates(
                                 "horizontal_order_source": order_name,
                                 "compaction_axis": "y",
                                 "predicted_root": tree.root,
+                                "tree_beam_index": tree_index,
+                                "tree_beam_width": beam_width,
+                                "connectivity_weight": connectivity_weight,
                             },
                         )
                     )
         if source_index == 0 and (shape_variants or local_moves):
+            tree = trees[0]
             x0, y0, outline_id = origins[0]
             x_order_name, x_order = orders[0]
             horizontal_base = torch.argsort(
@@ -2729,6 +3124,89 @@ def _btree_seed_candidates(
                         variant=move_name,
                         order_name=y_order_name,
                     )
+
+    for tree_index, tree in enumerate(trees[1:], start=1):
+        source_index = (tree_index - 1) % min(count, len(sources))
+        source = sources[source_index]
+        dims = source[:, 2:4]
+        base_order = torch.argsort(centers_from_xywh(source)[:, 1], stable=True)
+        order_name, order = contact_aware_vertical_orders(
+            base_order,
+            case.boundary_bits,
+            case.group_membership,
+        )[0]
+        x_options = []
+        for x0, y0, outline_id in origins:
+            candidate = tree.pack_x_compacted(
+                dims,
+                order,
+                case.preplaced_mask,
+                case.target,
+                origin=(x0, y0),
+            ).float()
+            hard = verify_feasible(case, candidate)
+            soft = soft_violation_normalized(case, candidate).raw_total
+            quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
+            x_options.append(
+                (
+                    (not hard, soft, quality, tree_index, outline_id),
+                    candidate,
+                    {
+                        "source_type": "btree",
+                        "shape_source_index": source_index,
+                        "outline_hypothesis": outline_id,
+                        "vertical_order_source": order_name,
+                        "compaction_axis": "x",
+                        "variant": "connectivity_beam",
+                        "predicted_root": tree.root,
+                        "tree_beam_index": tree_index,
+                        "tree_beam_width": beam_width,
+                        "connectivity_weight": connectivity_weight,
+                    },
+                )
+            )
+        connectivity_pool.append(min(x_options, key=lambda item: item[0]))
+        if dual_axis:
+            horizontal_base = torch.argsort(
+                centers_from_xywh(source)[:, 0], stable=True
+            )
+            horizontal_name, horizontal_order = contact_aware_vertical_orders(
+                horizontal_base,
+                case.boundary_bits[:, (2, 3, 1, 0)],
+                case.group_membership,
+            )[0]
+            y_options = []
+            for x0, y0, outline_id in origins:
+                candidate = tree.pack_y_compacted(
+                    dims,
+                    horizontal_order,
+                    case.preplaced_mask,
+                    case.target,
+                    origin=(x0, y0),
+                ).float()
+                hard = verify_feasible(case, candidate)
+                soft = soft_violation_normalized(case, candidate).raw_total
+                quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
+                y_options.append(
+                    (
+                        (not hard, soft, quality, tree_index, outline_id),
+                        candidate,
+                        {
+                            "source_type": "btree",
+                            "shape_source_index": source_index,
+                            "outline_hypothesis": outline_id,
+                            "horizontal_order_source": horizontal_name,
+                            "compaction_axis": "y",
+                            "variant": "connectivity_beam",
+                            "predicted_root": tree.root,
+                            "tree_beam_index": tree_index,
+                            "tree_beam_width": beam_width,
+                            "connectivity_weight": connectivity_weight,
+                        },
+                    )
+                )
+            connectivity_pool.append(min(y_options, key=lambda item: item[0]))
+
     selected: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
     seen: set[str] = set()
 
@@ -2760,6 +3238,7 @@ def _btree_seed_candidates(
             baseline_trained=baseline_trained,
         )
     append_pool(y_pool, dual_axis_count)
+    append_pool(connectivity_pool, len(connectivity_pool))
     append_pool(
         challenger_pool,
         count if shape_variants or local_moves else 0,
