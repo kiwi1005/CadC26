@@ -9,6 +9,7 @@ from typing import Any, Sequence
 import torch
 
 from hcfp.case import FloorplanCase
+from hcfp.constraints.mib_shapes import resolve_mib_shapes
 
 
 Tensor = torch.Tensor
@@ -69,7 +70,7 @@ def exact_treemap_candidates(
         if min(right - left, top - bottom) <= 0.0 or outline_area + _EPS < block_area:
             continue
         for whitespace_side, axis_mode in variants:
-            candidate, whitespace_area, obstacle_aware = _pack_candidate(
+            candidate, whitespace_area, obstacle_aware, mib_groups = _pack_candidate(
                 case,
                 reference,
                 bounds,
@@ -88,6 +89,7 @@ def exact_treemap_candidates(
                     "whitespace_area": whitespace_area,
                     "axis_mode": axis_mode,
                     "obstacle_aware": obstacle_aware,
+                    "mib_constructed_groups": mib_groups,
                 }
             )
             if len(candidates) >= count:
@@ -104,7 +106,7 @@ def _pack_candidate(
     *,
     whitespace_side: str,
     axis_mode: str,
-) -> tuple[Tensor, float, bool]:
+) -> tuple[Tensor, float, bool, tuple[int, ...]]:
     centers = reference[:, :2] + 0.5 * reference[:, 2:4]
     areas = case.area.detach().to(device="cpu", dtype=torch.float64)
     centers_cpu = centers.detach().to(device="cpu", dtype=torch.float64)
@@ -112,23 +114,43 @@ def _pack_candidate(
     left, bottom, right, top = bounds
     whitespace_area = max(0.0, (right - left) * (top - bottom) - float(areas.sum()))
     hard = (case.fixed_mask | case.preplaced_mask).detach().to(device="cpu")
-    obstacles = _place_hard_obstacles(case, reference, bounds)
+    constrained = _place_constraint_obstacles(case, reference, bounds)
+    if constrained is None:
+        obstacles = _place_hard_obstacles(case, reference, bounds)
+        occupied = hard
+        mib_groups: tuple[int, ...] = ()
+    else:
+        obstacles, occupied, mib_groups = constrained
 
-    if obstacles is not None and bool(hard.any()):
+    if obstacles is not None and bool(occupied.any()):
         free = _free_rectangles(
             bounds,
-            obstacles[hard],
+            obstacles[occupied],
             transpose=axis_mode == "y",
         )
-        movable = ~hard
+        movable = ~occupied
         items = _compound_items(case, movable, areas, centers_cpu)
-        allocation = _allocate_items(items, free)
+        allocation = _allocate_items(
+            items,
+            free,
+            boundary_bits=case.boundary_bits,
+            outline=bounds,
+        )
         if allocation is None:
             items = [
-                _item((int(index),), areas, centers_cpu)
+                _item(
+                    (int(index),),
+                    areas,
+                    centers_cpu,
+                )
                 for index in torch.nonzero(movable).reshape(-1)
             ]
-            allocation = _allocate_items(items, free)
+            allocation = _allocate_items(
+                items,
+                free,
+                boundary_bits=case.boundary_bits,
+                outline=bounds,
+            )
         if allocation is not None:
             rectangles: dict[int, tuple[float, float, float, float]] = {}
             for region, region_items in zip(free, allocation, strict=True):
@@ -145,11 +167,16 @@ def _pack_candidate(
             if len(rectangles) == int(movable.sum()):
                 candidate = reference.new_empty((case.n, 4))
                 for index in torch.nonzero(movable).reshape(-1).tolist():
-                    candidate[index] = _xywh_tensor(candidate, rectangles[index])
-                candidate[hard.to(device=candidate.device)] = obstacles[hard].to(
+                    candidate[index] = _xywh_tensor(
+                        candidate,
+                        rectangles[index],
+                        boundary_bits=case.boundary_bits[index],
+                        outline=bounds,
+                    )
+                candidate[occupied.to(device=candidate.device)] = obstacles[occupied].to(
                     device=candidate.device, dtype=candidate.dtype
                 )
-                return candidate, whitespace_area, True
+                return candidate, whitespace_area, True, mib_groups
 
     items = _compound_items(
         case,
@@ -185,7 +212,11 @@ def _pack_candidate(
             rectangles[item.members[0]] = rectangle
             continue
         member_items = [
-            _item((index,), areas, centers_cpu)
+            _item(
+                (index,),
+                areas,
+                centers_cpu,
+            )
             for index in item.members
         ]
         member_rectangles: dict[int, tuple[float, float, float, float]] = {}
@@ -202,7 +233,12 @@ def _pack_candidate(
 
     candidate = reference.new_empty((case.n, 4))
     for index in range(case.n):
-        candidate[index] = _xywh_tensor(candidate, rectangles[index])
+        candidate[index] = _xywh_tensor(
+            candidate,
+            rectangles[index],
+            boundary_bits=case.boundary_bits[index],
+            outline=bounds,
+        )
 
     hard_shape = (case.fixed_mask | case.preplaced_mask).to(device=candidate.device)
     if bool(hard_shape.any()):
@@ -225,7 +261,150 @@ def _pack_candidate(
         candidate[preplaced] = case.target.to(
             device=candidate.device, dtype=candidate.dtype
         )[preplaced]
-    return candidate, whitespace_area, False
+    return candidate, whitespace_area, False, ()
+
+
+def _place_constraint_obstacles(
+    case: FloorplanCase,
+    reference: Tensor,
+    bounds: tuple[float, float, float, float],
+) -> tuple[Tensor, Tensor, tuple[int, ...]] | None:
+    """Place compatible MIB rows/columns before exact slicing."""
+
+    hard = (case.fixed_mask | case.preplaced_mask).detach().to(device="cpu")
+    preplaced = case.preplaced_mask.detach().to(device="cpu")
+    result = reference.detach().to(device="cpu", dtype=torch.float32).clone()
+    target = case.target.detach().to(device="cpu", dtype=torch.float32)
+    hard_wh = result[:, 2:4].clone()
+    hard_wh[hard] = target[hard, 2:4]
+    resolution = resolve_mib_shapes(
+        case.area,
+        case.mib_membership,
+        proposed_wh=result[:, 2:4],
+        hard_mask=hard,
+        hard_wh=hard_wh,
+    )
+    result[preplaced] = target[preplaced]
+    occupied = preplaced.clone()
+    placed = [result[index].clone() for index in torch.nonzero(preplaced).reshape(-1)]
+    if _boxes_overlap(placed):
+        return None
+
+    units: list[tuple[tuple[int, ...], int | None]] = []
+    mib_members: set[int] = set()
+    for group in resolution.groups:
+        if not group.compatible or any(bool(preplaced[index]) for index in group.members):
+            continue
+        units.append((group.members, group.group))
+        mib_members.update(group.members)
+        shape = resolution.shapes[group.members[0]]
+        result[list(group.members), 2:4] = shape
+    for index in torch.nonzero(hard & ~preplaced).reshape(-1).tolist():
+        if index not in mib_members:
+            result[index, 2:4] = target[index, 2:4]
+            units.append(((index,), None))
+
+    centers = reference[:, :2] + 0.5 * reference[:, 2:4]
+    units.sort(
+        key=lambda unit: (
+            -sum(float(result[index, 2] * result[index, 3]) for index in unit[0]),
+            unit[0],
+        )
+    )
+    constructed: list[int] = []
+    for members, group_index in units:
+        choice = _place_unit(case, result, centers, members, placed, bounds)
+        if choice is None:
+            return None
+        for index, box in choice.items():
+            result[index] = box
+            occupied[index] = True
+            placed.append(box.clone())
+        if group_index is not None:
+            constructed.append(group_index)
+    return result, occupied, tuple(constructed)
+
+
+def _place_unit(
+    case: FloorplanCase,
+    boxes: Tensor,
+    reference_centers: Tensor,
+    members: tuple[int, ...],
+    placed: list[Tensor],
+    bounds: tuple[float, float, float, float],
+) -> dict[int, Tensor] | None:
+    width = float(boxes[members[0], 2])
+    height = float(boxes[members[0], 3])
+    if len(members) == 1:
+        layouts = ((members, "row"),)
+    else:
+        x_order = tuple(sorted(members, key=lambda index: (float(reference_centers[index, 0]), index)))
+        y_order = tuple(sorted(members, key=lambda index: (float(reference_centers[index, 1]), index)))
+        layouts = tuple(dict.fromkeys(((x_order, "row"), (x_order[::-1], "row"), (y_order, "column"), (y_order[::-1], "column"))))
+
+    left, bottom, right, top = bounds
+    best: tuple[tuple[float, float, float], dict[int, Tensor]] | None = None
+    for order, orientation in layouts:
+        footprint_w = (
+            width * len(order) + _MICRO_GUTTER * (len(order) - 1)
+            if orientation == "row"
+            else width
+        )
+        footprint_h = (
+            height
+            if orientation == "row"
+            else height * len(order) + _MICRO_GUTTER * (len(order) - 1)
+        )
+        x_values = {left, right - footprint_w}
+        y_values = {bottom, top - footprint_h}
+        for obstacle in placed:
+            x_values.update(
+                (
+                    float(obstacle[0] - footprint_w - _MICRO_GUTTER),
+                    float(obstacle[0] + obstacle[2] + _MICRO_GUTTER),
+                )
+            )
+            y_values.update(
+                (
+                    float(obstacle[1] - footprint_h - _MICRO_GUTTER),
+                    float(obstacle[1] + obstacle[3] + _MICRO_GUTTER),
+                )
+            )
+        for x in x_values:
+            for y in y_values:
+                if x < left - _EPS or y < bottom - _EPS or x + footprint_w > right + _EPS or y + footprint_h > top + _EPS:
+                    continue
+                proposed: dict[int, Tensor] = {}
+                for offset, index in enumerate(order):
+                    px = x + (
+                        offset * (width + _MICRO_GUTTER)
+                        if orientation == "row"
+                        else 0.0
+                    )
+                    py = y + (
+                        offset * (height + _MICRO_GUTTER)
+                        if orientation == "column"
+                        else 0.0
+                    )
+                    proposed[index] = boxes.new_tensor((px, py, width, height))
+                if _proposed_overlaps(proposed.values(), placed):
+                    continue
+                boundary_miss = 0.0
+                distance = 0.0
+                for index, box in proposed.items():
+                    bits = case.boundary_bits[index].detach().to(device="cpu")
+                    boundary_miss += (
+                        float(bits[0]) * abs(float(box[0]) - left)
+                        + float(bits[1]) * abs(float(box[0] + box[2]) - right)
+                        + float(bits[2]) * abs(float(box[1] + box[3]) - top)
+                        + float(bits[3]) * abs(float(box[1]) - bottom)
+                    )
+                    distance += abs(float(box[0] + 0.5 * box[2]) - float(reference_centers[index, 0]))
+                    distance += abs(float(box[1] + 0.5 * box[3]) - float(reference_centers[index, 1]))
+                score = (boundary_miss, distance, x + y)
+                if best is None or score < best[0]:
+                    best = (score, proposed)
+    return None if best is None else best[1]
 
 
 def _place_hard_obstacles(
@@ -324,10 +503,22 @@ def _compound_items(
         if len(members) < 2:
             continue
         assigned.update(members)
-        items.append(_item(members, areas, centers))
+        items.append(
+            _item(
+                members,
+                areas,
+                centers,
+            )
+        )
     for index in torch.nonzero(eligible, as_tuple=False).reshape(-1).tolist():
         if index not in assigned:
-            items.append(_item((index,), areas, centers))
+            items.append(
+                _item(
+                    (index,),
+                    areas,
+                    centers,
+                )
+            )
     return items
 
 
@@ -365,7 +556,11 @@ def _place_items(
             rectangles[item.members[0]] = rectangle
             continue
         member_items = [
-            _item((member,), areas, centers)
+            _item(
+                (member,),
+                areas,
+                centers,
+            )
             for member in item.members
         ]
         member_rectangles: dict[int, tuple[float, float, float, float]] = {}
@@ -384,6 +579,9 @@ def _place_items(
 def _allocate_items(
     items: list[_Item],
     regions: list[tuple[float, float, float, float]],
+    *,
+    boundary_bits: Tensor | None = None,
+    outline: tuple[float, float, float, float] | None = None,
 ) -> list[list[_Item]] | None:
     remaining = [_rectangle_area(region) for region in regions]
     allocation: list[list[_Item]] = [[] for _ in regions]
@@ -398,6 +596,12 @@ def _allocate_items(
         best = min(
             eligible,
             key=lambda index: (
+                _boundary_region_misses(
+                    item,
+                    regions[index],
+                    boundary_bits=boundary_bits,
+                    outline=outline,
+                ),
                 _center_distance(item.center, regions[index]),
                 remaining[index] - item.area,
                 index,
@@ -406,6 +610,27 @@ def _allocate_items(
         allocation[best].append(item)
         remaining[best] -= item.area
     return allocation
+
+
+def _boundary_region_misses(
+    item: _Item,
+    region: tuple[float, float, float, float],
+    *,
+    boundary_bits: Tensor | None,
+    outline: tuple[float, float, float, float] | None,
+) -> int:
+    if boundary_bits is None or outline is None:
+        return 0
+    members = torch.tensor(item.members, dtype=torch.long)
+    bits = torch.as_tensor(boundary_bits, dtype=torch.bool, device="cpu")[members].any(dim=0)
+    return sum(
+        (
+            int(bool(bits[0]) and abs(region[0] - outline[0]) > _EPS),
+            int(bool(bits[1]) and abs(region[2] - outline[2]) > _EPS),
+            int(bool(bits[2]) and abs(region[3] - outline[3]) > _EPS),
+            int(bool(bits[3]) and abs(region[1] - outline[1]) > _EPS),
+        )
+    )
 
 
 def _free_rectangles(
@@ -482,6 +707,23 @@ def _boxes_overlap(boxes: list[Tensor]) -> bool:
     return False
 
 
+def _proposed_overlaps(proposed: Any, placed: list[Tensor]) -> bool:
+    boxes = list(proposed)
+    if _boxes_overlap(boxes):
+        return True
+    return any(_pair_overlaps(first, second) for first in boxes for second in placed)
+
+
+def _pair_overlaps(first: Tensor, second: Tensor) -> bool:
+    overlap_x = min(
+        float(first[0] + first[2]), float(second[0] + second[2])
+    ) - max(float(first[0]), float(second[0]))
+    overlap_y = min(
+        float(first[1] + first[3]), float(second[1] + second[3])
+    ) - max(float(first[1]), float(second[1]))
+    return overlap_x > _EPS and overlap_y > _EPS
+
+
 def _center_distance(
     center: tuple[float, float], bounds: tuple[float, float, float, float]
 ) -> float:
@@ -490,17 +732,37 @@ def _center_distance(
     )
 
 
-def _xywh_tensor(template: Tensor, bounds: tuple[float, float, float, float]) -> Tensor:
+def _xywh_tensor(
+    template: Tensor,
+    bounds: tuple[float, float, float, float],
+    *,
+    boundary_bits: Tensor | None = None,
+    outline: tuple[float, float, float, float] | None = None,
+) -> Tensor:
     edges = template.new_tensor(bounds)
-    origin = edges[0:2] + _MICRO_GUTTER
-    dimensions = (
-        edges[2:4] - edges[0:2] - 2.0 * _MICRO_GUTTER
-    ).clamp_min(_EPS)
+    lower = edges.new_full((2,), _MICRO_GUTTER)
+    upper = edges.new_full((2,), _MICRO_GUTTER)
+    if boundary_bits is not None and outline is not None:
+        bits = torch.as_tensor(boundary_bits, dtype=torch.bool, device="cpu")
+        if bool(bits[0]) and abs(bounds[0] - outline[0]) <= _EPS:
+            lower[0] = 0.0
+        if bool(bits[1]) and abs(bounds[2] - outline[2]) <= _EPS:
+            upper[0] = 0.0
+        if bool(bits[2]) and abs(bounds[3] - outline[3]) <= _EPS:
+            upper[1] = 0.0
+        if bool(bits[3]) and abs(bounds[1] - outline[1]) <= _EPS:
+            lower[1] = 0.0
+    origin = edges[0:2] + lower
+    dimensions = (edges[2:4] - edges[0:2] - lower - upper).clamp_min(_EPS)
     dimensions = torch.nextafter(dimensions, torch.zeros_like(dimensions))
     return torch.cat((origin, dimensions))
 
 
-def _item(members: tuple[int, ...], areas: Tensor, centers: Tensor) -> _Item:
+def _item(
+    members: tuple[int, ...],
+    areas: Tensor,
+    centers: Tensor,
+) -> _Item:
     index = torch.tensor(members, dtype=torch.long)
     member_area = areas[index]
     total = float(member_area.sum())

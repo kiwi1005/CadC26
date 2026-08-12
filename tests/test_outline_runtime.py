@@ -106,7 +106,7 @@ def test_runtime_contact_replaces_one_residual_slot_without_growing_budget(
     assert verify_feasible(case, population[0])
 
 
-def test_treemap_contact_replaces_residual_slot_without_growing_budget(
+def test_treemap_contact_preserves_residual_slots_as_an_explicit_challenger(
     monkeypatch,
 ) -> None:
     case = _case()
@@ -162,11 +162,12 @@ def test_treemap_contact_replaces_residual_slot_without_growing_budget(
         provenance=provenance,
     )
 
-    assert population.shape[0] == 3
+    assert population.shape[0] == 4
     assert provenance["treemap_seed_attempted"] is True
     assert provenance["treemap_seed_accepted"] is True
     assert provenance["treemap_seed_count"] == 1
-    assert torch.equal(population[1], treemap)
+    assert provenance["treemap_seed_records"][0]["residual_index"] == 2
+    assert torch.equal(population[2], treemap)
     assert torch.equal(population[-1], structured[0])
 
 

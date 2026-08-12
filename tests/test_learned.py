@@ -1237,6 +1237,100 @@ def test_split_tail_carries_normalized_infeasible_analytic_fast_source() -> None
     assert not bool(merged.telemetry.hard_feasible[1])
 
 
+def test_split_tail_maps_treemap_residual_provenance() -> None:
+    import hcfp.learned as learned
+
+    analytic = _synthetic_result((0.0, 1.0, 2.0))
+    standalone = _synthetic_result(
+        (0.0, 10.0, 20.0, 30.0, 40.0, 110.0, 120.0, 130.0, 140.0)
+    )
+    treemap_soft = standalone.telemetry.soft_violation.clone()
+    treemap_soft[1] = -10.0
+    standalone = replace(
+        standalone,
+        telemetry=replace(standalone.telemetry, soft_violation=treemap_soft),
+    )
+    provenance = {
+        "topology_seed_attempted": False,
+        "treemap_seed_accepted": True,
+        "treemap_seed_records": (
+            {
+                "residual_index": 0,
+                "candidate_sha256": _tensor_sha256(standalone.raw_candidates[1]),
+            },
+        ),
+    }
+
+    merged = learned._merge_tail_analyses(
+        _case(), analytic, standalone, topology_provenance=provenance
+    )
+
+    records = merged.incumbent_snapshot["treemap_seed_provenance"]
+    assert tuple(record["source"] for record in records) == (
+        "candidate_2",
+        "candidate_7",
+    )
+    assert records[0]["stage"] == "initial"
+    assert records[1]["stage"] == "post_relax"
+    assert merged.incumbent_snapshot["exact_source"] == "fallback"
+
+
+@pytest.mark.parametrize(
+    ("candidate_hpwl", "expected_x"),
+    ((90.0, 30.0), (101.0, 20.0)),
+)
+def test_raw_treemap_proxy_guard_requires_no_hpwl_loss(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_hpwl: float,
+    expected_x: float,
+) -> None:
+    import hcfp.learned as learned
+
+    source = _source()
+    case = from_official(
+        source.block_count,
+        source.area_targets,
+        source.b2b_connectivity,
+        source.p2b_connectivity,
+        source.pins_pos,
+        source.constraints,
+        source.target_positions,
+    )
+    analysis = _pareto_analysis(
+        analytic_source="candidate_2",
+        analytic_exact_source=None,
+        analytic_fast_source=None,
+    )
+    analysis.analytic.incumbent_snapshot["treemap_seed_provenance"] = (
+        {"source": "candidate_3", "stage": "initial"},
+    )
+    monkeypatch.setattr(
+        learned,
+        "to_official_placements",
+        lambda _source, _case, candidate: [
+            tuple(float(value) for value in row) for row in candidate.tolist()
+        ],
+    )
+    monkeypatch.setattr(learned, "verify_feasible", lambda *_args: True)
+    monkeypatch.setattr(
+        learned,
+        "_raw_quality",
+        lambda _source, _case, rows: {
+            20.0: (0.70, 100.0, 100.0),
+            30.0: (0.75, 8.2, candidate_hpwl),
+        }[rows[0][0]],
+    )
+
+    selected = learned._raw_treemap_proxy_guard(
+        source,
+        case,
+        analysis,
+        [(20.0, 0.0, 2.0, 2.0), (23.0, 0.0, 2.0, 2.0)],
+    )
+
+    assert selected[0][0] == expected_x
+
+
 def test_ranker_only_checkpoint_change_does_not_resample_candidate_pool(tmp_path: Path) -> None:
     first = tmp_path / "first.pt"
     second = tmp_path / "second.pt"

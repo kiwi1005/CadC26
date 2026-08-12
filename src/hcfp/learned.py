@@ -492,6 +492,21 @@ def select_official_from_analysis(
             analysis,
             placements,
         )
+        repaired_incumbent = placements
+        placements = _raw_treemap_proxy_guard(
+            source,
+            case,
+            analysis,
+            placements,
+        )
+        if placements is not repaired_incumbent:
+            placements = _post_tail_group_repair(source, case, placements)
+            placements = _legacy_mib_challenger_guard(
+                source,
+                case,
+                analysis,
+                placements,
+            )
         _record_ranker_selection_counterfactual(
             source,
             case,
@@ -629,9 +644,29 @@ def _merge_tail_analyses(
     area = telemetry.bbox_area.detach().to(device="cpu", dtype=torch.float64)
     hpwl = telemetry.hpwl.detach().to(device="cpu", dtype=torch.float64)
     soft = telemetry.soft_violation.detach().to(device="cpu", dtype=torch.float64)
+    treemap_indices: set[int] = set()
+    if topology_provenance and bool(
+        topology_provenance.get("treemap_seed_accepted", False)
+    ):
+        for record in tuple(topology_provenance.get("treemap_seed_records", ())):
+            if not isinstance(record, dict):
+                continue
+            try:
+                learned_index = int(record["residual_index"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if 0 <= learned_index < learned_count:
+                treemap_indices.add(1 + analytic_count + learned_index)
+                treemap_indices.add(
+                    1 + analytic_count + learned_count + analytic_count + learned_index
+                )
 
     def best_index(mask: Tensor) -> int | None:
-        indices = torch.nonzero(mask, as_tuple=False).reshape(-1).tolist()
+        indices = [
+            index
+            for index in torch.nonzero(mask, as_tuple=False).reshape(-1).tolist()
+            if index not in treemap_indices
+        ]
         return (
             min(
                 indices,
@@ -673,6 +708,10 @@ def _merge_tail_analyses(
         ),
         "rejections": rejections,
     }
+    initial_start = 1 + analytic_count
+    final_start = 1 + analytic_count + learned_count + analytic_count
+    if topology_provenance:
+        snapshot.update(topology_provenance)
     if topology_provenance and bool(
         topology_provenance.get("topology_seed_attempted", False)
     ):
@@ -681,8 +720,6 @@ def _merge_tail_analyses(
             learned_count,
         )
         topology_offset = learned_count - topology_count
-        initial_start = 1 + analytic_count
-        final_start = 1 + analytic_count + learned_count + analytic_count
         seed_orders = tuple(topology_provenance.get("topology_seed_orders", ()))
         if len(seed_orders) != topology_count:
             seed_orders = tuple({} for _ in range(topology_count))
@@ -694,7 +731,6 @@ def _merge_tail_analyses(
             count=topology_count,
             candidate_type="topology",
         )
-        snapshot.update(topology_provenance)
         snapshot["topology_seed_sources"] = tuple(
             str(candidate["source"]) for candidate in candidates
         )
@@ -729,6 +765,23 @@ def _merge_tail_analyses(
             snapshot["constraint_seed_provenance"] = constraint_candidates
             if stale_sources:
                 snapshot["constraint_seed_stale_sources"] = tuple(stale_sources)
+    if topology_provenance and bool(
+        topology_provenance.get("treemap_seed_accepted", False)
+    ):
+        treemap_candidates, stale_sources = _residual_seed_stage_records(
+            tuple(topology_provenance.get("treemap_seed_records", ())),
+            raw_candidates,
+            initial_start=initial_start,
+            final_start=final_start,
+            learned_count=learned_count,
+            candidate_type="treemap",
+        )
+        snapshot["treemap_seed_sources"] = tuple(
+            str(candidate["source"]) for candidate in treemap_candidates
+        )
+        snapshot["treemap_seed_provenance"] = treemap_candidates
+        if stale_sources:
+            snapshot["treemap_seed_stale_sources"] = tuple(stale_sources)
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -793,6 +846,58 @@ def _seed_stage_records(
                 "candidate_type": candidate_type,
                 "stage": "post_relax",
                 "transform": transform,
+                "parent_candidate_sha256": initial_hash,
+                "candidate_sha256": final_hash,
+            }
+        )
+    return tuple(candidates), tuple(stale_sources)
+
+
+def _residual_seed_stage_records(
+    records: tuple[object, ...],
+    raw_candidates: Tensor,
+    *,
+    initial_start: int,
+    final_start: int,
+    learned_count: int,
+    candidate_type: str,
+) -> tuple[tuple[dict[str, object], ...], tuple[str, ...]]:
+    candidates: list[dict[str, object]] = []
+    stale_sources: list[str] = []
+    for raw_record in records:
+        if not isinstance(raw_record, dict):
+            continue
+        record = dict(raw_record)
+        try:
+            residual_index = int(record["residual_index"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not 0 <= residual_index < learned_count:
+            continue
+        initial_index = initial_start + residual_index
+        final_index = final_start + residual_index
+        initial_source = f"candidate_{initial_index}"
+        initial_hash = _tensor_sha256(raw_candidates[initial_index])
+        if record.get("candidate_sha256") != initial_hash:
+            stale_sources.append(initial_source)
+            continue
+        candidates.append(
+            {
+                **record,
+                "source": initial_source,
+                "candidate_type": candidate_type,
+                "stage": "initial",
+            }
+        )
+        final_source = f"candidate_{final_index}"
+        final_hash = _tensor_sha256(raw_candidates[final_index])
+        candidates.append(
+            {
+                **record,
+                "source": final_source,
+                "candidate_type": candidate_type,
+                "stage": "post_relax",
+                "transform": "identity" if final_hash == initial_hash else "population_relaxation",
                 "parent_candidate_sha256": initial_hash,
                 "candidate_sha256": final_hash,
             }
@@ -1136,6 +1241,63 @@ def _raw_analytic_pareto_guard(
         if admitted
         else current
     )
+
+
+def _raw_treemap_proxy_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    current: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Admit dense treemaps when they improve the area/soft proxy without HPWL loss."""
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    records = tuple(snapshot.get("treemap_seed_provenance", ()))
+    if not records:
+        return current
+    try:
+        current_metrics = _raw_quality(source, case, current)
+    except (TypeError, ValueError):
+        return current
+    current_proxy = _treemap_proxy_score(case, current_metrics)
+    raw_candidates = getattr(
+        analysis.analytic,
+        "raw_candidates",
+        analysis.analytic.projected_candidates,
+    )
+    admitted = []
+    for record in records:
+        if not isinstance(record, dict) or record.get("stage") != "initial":
+            continue
+        index = _candidate_index(record.get("source"))
+        if index is None or not 0 <= index < raw_candidates.shape[0]:
+            continue
+        placement = to_official_placements(
+            source,
+            case,
+            raw_candidates[index].detach().to(device="cpu", dtype=torch.float32),
+        )
+        if not verify_feasible(source, placement):
+            continue
+        try:
+            metrics = _raw_quality(source, case, placement)
+        except (TypeError, ValueError):
+            continue
+        hpwl_tolerance = 1.0e-6 * max(1.0, current_metrics[2])
+        proxy = _treemap_proxy_score(case, metrics)
+        if metrics[2] <= current_metrics[2] + hpwl_tolerance and proxy < current_proxy - 1.0e-6:
+            admitted.append((proxy, metrics[2], metrics[1], index, placement))
+    return min(admitted, key=lambda item: item[:4])[4] if admitted else current
+
+
+def _treemap_proxy_score(
+    case: FloorplanCase,
+    metrics: tuple[float, float, float],
+) -> float:
+    soft, area, _hpwl = metrics
+    target_area = max(case.scale * case.scale, torch.finfo(torch.float64).eps)
+    area_excess = max(0.0, area / target_area - 1.0)
+    return math.log1p(0.5 * area_excess) + 2.0 * soft
 
 
 def _raw_constraint_pareto_guard(
@@ -1664,7 +1826,6 @@ def _learned_population(
         log_aspect,
         enforce_mib=enforce_mib,
     )
-    residual_slots = int(learned_boxes.shape[0])
     topology_sources = learned_boxes
     if config.tail_topk is not None and config.tail_topk < population:
         features = candidate_features(case, learned_boxes, fallback)
@@ -1672,6 +1833,7 @@ def _learned_population(
             scores = model.ranker(output.embedding, population, features)
         keep = torch.argsort(scores, stable=True)[: config.tail_topk]
         learned_boxes = learned_boxes[keep]
+    residual_slots = int(learned_boxes.shape[0])
     topology = learned_boxes.new_empty((0, case.n, 4))
     constraints = learned_boxes.new_empty((0, case.n, 4))
     failure_reason: str | None = None
@@ -1746,15 +1908,11 @@ def _learned_population(
                 if topology.numel()
                 else learned_boxes[0]
             )
-            start = 1 if bool(
-                provenance and provenance.get("outline_variant_accepted", False)
-            ) else 0
-            available = max(0, residual_slots - start)
             treemaps, records = exact_treemap_candidates(
                 case,
                 reference,
                 hypotheses,
-                count=min(config.treemap_seeds, available),
+                count=config.treemap_seeds,
             )
             if treemaps.numel():
                 raw_treemaps = treemaps
@@ -1790,9 +1948,11 @@ def _learned_population(
                     )[: int(raw_treemaps.shape[0])]
                     treemaps = pool[order]
                     records = tuple(pool_records[index] for index in order)
-                learned_boxes = learned_boxes.clone()
-                stop = start + int(treemaps.shape[0])
-                learned_boxes[start:stop] = treemaps
+                start = residual_slots
+                learned_boxes = torch.cat(
+                    (learned_boxes[:start], treemaps, learned_boxes[start:]),
+                    dim=0,
+                )
                 if provenance is not None:
                     provenance.update(
                         {
