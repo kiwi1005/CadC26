@@ -106,6 +106,70 @@ def test_runtime_contact_replaces_one_residual_slot_without_growing_budget(
     assert verify_feasible(case, population[0])
 
 
+def test_treemap_contact_replaces_residual_slot_without_growing_budget(
+    monkeypatch,
+) -> None:
+    case = _case()
+    model = HCFPModel(
+        ModelConfig(hidden_dim=16, encoder_layers=1, topology_enabled=True)
+    )
+    side = float(torch.sqrt(case.area[0]))
+    structured = torch.tensor(
+        [[[2.0, 0.0, side, side], [3.0, 0.0, side, side]]],
+        dtype=torch.float32,
+    )
+    treemap = torch.tensor(
+        [[-0.4, -0.4, side, side], [0.2, -0.4, side, side]],
+        dtype=torch.float32,
+    )
+
+    monkeypatch.setattr(
+        learned,
+        "_topology_seed_candidates",
+        lambda _case, _output, source_boxes, *, count, provenance=None: structured.to(
+            device=source_boxes.device
+        ),
+    )
+    monkeypatch.setattr(
+        learned,
+        "infer_outline_hypotheses",
+        lambda _case: (_hypothesis(),),
+    )
+    monkeypatch.setattr(
+        learned,
+        "exact_treemap_candidates",
+        lambda _case, _reference, _hypotheses, *, count: (
+            treemap.to(device=_reference.device).unsqueeze(0),
+            ({"kind": "test"},),
+        ),
+    )
+    config = LearnedConfig(
+        analytic=replace(
+            LearnedConfig().analytic,
+            dynamics=DynamicsConfig(population=2, steps=0),
+        ),
+        topology_seeds=1,
+        treemap_seeds=1,
+        seed=7,
+    )
+    provenance: dict[str, object] = {}
+
+    population = _learned_population(
+        case,
+        model,
+        config,
+        seed=7,
+        provenance=provenance,
+    )
+
+    assert population.shape[0] == 3
+    assert provenance["treemap_seed_attempted"] is True
+    assert provenance["treemap_seed_accepted"] is True
+    assert provenance["treemap_seed_count"] == 1
+    assert torch.equal(population[1], treemap)
+    assert torch.equal(population[-1], structured[0])
+
+
 def test_empty_or_uncertain_outline_beam_falls_back_cleanly(monkeypatch) -> None:
     case = _case()
     side0 = float(torch.sqrt(case.area[0]))

@@ -47,6 +47,7 @@ from hcfp.topology import (
     pack_sequence_pair_with_anchors,
     relation_mask_from_rectangles,
 )
+from hcfp.treemap import exact_treemap_candidates
 from hcfp.verify import (
     bbox_area,
     soft_violation_normalized,
@@ -87,6 +88,9 @@ class LearnedResult:
     outline_variant_attempted: bool = False
     outline_variant_accepted: bool = False
     outline_variant_count: int = 0
+    treemap_seed_attempted: bool = False
+    treemap_seed_accepted: bool = False
+    treemap_seed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,7 @@ class LearnedConfig:
     seed: int | None = None
     topology_seeds: int = 0
     constraint_seeds: int = 0
+    treemap_seeds: int = 0
     collective_steps: int = 0
     ranker_selection_experiment: bool = False
 
@@ -125,6 +130,8 @@ class LearnedConfig:
             raise ValueError("topology_seeds must be non-negative")
         if self.constraint_seeds < 0:
             raise ValueError("constraint_seeds must be non-negative")
+        if self.treemap_seeds < 0:
+            raise ValueError("treemap_seeds must be non-negative")
         if self.collective_steps < 0:
             raise ValueError("collective_steps must be non-negative")
         if self.constraint_seeds and not self.topology_seeds:
@@ -376,6 +383,15 @@ def analyze_case_with_checkpoint(
                 outline_variant_count=int(
                     topology_provenance.get("outline_variant_count", 0)
                 ),
+                treemap_seed_attempted=bool(
+                    topology_provenance.get("treemap_seed_attempted", False)
+                ),
+                treemap_seed_accepted=bool(
+                    topology_provenance.get("treemap_seed_accepted", False)
+                ),
+                treemap_seed_count=int(
+                    topology_provenance.get("treemap_seed_count", 0)
+                ),
                 collective_steps=learned_cfg.collective_steps,
                 collective_used=force_controller is not None,
                 collective_calls=(
@@ -544,6 +560,7 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             seed=int(seed) if seed is not None else None,
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
             constraint_seeds=int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "0")),
+            treemap_seeds=int(os.environ.get("HCFP_TREEMAP_SEEDS", "0")),
             collective_steps=int(os.environ.get("HCFP_COLLECTIVE_STEPS", "0")),
             ranker_selection_experiment=_truthy_env(
                 os.environ.get("HCFP_RANKER_SELECTION_EXPERIMENT")
@@ -1647,6 +1664,7 @@ def _learned_population(
         log_aspect,
         enforce_mib=enforce_mib,
     )
+    residual_slots = int(learned_boxes.shape[0])
     topology_sources = learned_boxes
     if config.tail_topk is not None and config.tail_topk < population:
         features = candidate_features(case, learned_boxes, fallback)
@@ -1710,6 +1728,93 @@ def _learned_population(
                 provenance["outline_variant_replaced_residual_index"] = 0
     elif provenance is not None:
         provenance["outline_variant_failure_reason"] = "no_structured_candidates"
+    if provenance is not None:
+        provenance.setdefault("treemap_seed_attempted", config.treemap_seeds > 0)
+        provenance.setdefault("treemap_seed_accepted", False)
+        provenance.setdefault("treemap_seed_count", 0)
+    if config.treemap_seeds:
+        try:
+            hypotheses = (
+                tuple(infer_outline_hypotheses(case))
+                if infer_outline_hypotheses is not None
+                else ()
+            )
+            reference = (
+                constraints[0]
+                if constraints.numel()
+                else topology[0]
+                if topology.numel()
+                else learned_boxes[0]
+            )
+            start = 1 if bool(
+                provenance and provenance.get("outline_variant_accepted", False)
+            ) else 0
+            available = max(0, residual_slots - start)
+            treemaps, records = exact_treemap_candidates(
+                case,
+                reference,
+                hypotheses,
+                count=min(config.treemap_seeds, available),
+            )
+            if treemaps.numel():
+                raw_treemaps = treemaps
+                raw_records = records
+                try:
+                    refined = _constraint_seed_candidates(
+                        case,
+                        output,
+                        treemaps,
+                        count=int(treemaps.shape[0]),
+                    )
+                except (RuntimeError, TypeError, ValueError):
+                    refined = treemaps.new_empty((0, case.n, 4))
+                if refined.numel():
+                    refined = refined.to(
+                        device=learned_boxes.device,
+                        dtype=learned_boxes.dtype,
+                    )
+                    pool = torch.cat((raw_treemaps, refined), dim=0)
+                    pool_records = raw_records + tuple(
+                        {"constraint_refined": True}
+                        for _ in range(int(refined.shape[0]))
+                    )
+                    order = sorted(
+                        range(int(pool.shape[0])),
+                        key=lambda index: (
+                            not verify_feasible(case, pool[index]),
+                            soft_violation_normalized(case, pool[index]).raw_total,
+                            bbox_area(pool[index])
+                            + 0.05 * total_hpwl(case, pool[index]),
+                            index,
+                        ),
+                    )[: int(raw_treemaps.shape[0])]
+                    treemaps = pool[order]
+                    records = tuple(pool_records[index] for index in order)
+                learned_boxes = learned_boxes.clone()
+                stop = start + int(treemaps.shape[0])
+                learned_boxes[start:stop] = treemaps
+                if provenance is not None:
+                    provenance.update(
+                        {
+                            "treemap_seed_accepted": True,
+                            "treemap_seed_count": int(treemaps.shape[0]),
+                            "treemap_seed_records": tuple(
+                                {
+                                    **record,
+                                    "residual_index": start + index,
+                                    "candidate_sha256": _tensor_sha256(candidate),
+                                }
+                                for index, (record, candidate) in enumerate(
+                                    zip(records, treemaps, strict=True)
+                                )
+                            ),
+                        }
+                    )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            if provenance is not None:
+                provenance["treemap_seed_failure_reason"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
     if provenance is not None:
         topology_count = int(topology.shape[0])
         provenance.update(
