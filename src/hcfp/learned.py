@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 import hashlib
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -57,6 +58,15 @@ from hcfp.verify import (
 Tensor = torch.Tensor
 
 
+_OUTLINE_MIN_CONFIDENCE = 0.50
+_OUTLINE_EPS = 1.0e-6
+
+try:
+    from hcfp.outline_inference import infer_outline_hypotheses
+except ImportError:  # pragma: no cover - the optional runtime contact is fail-closed.
+    infer_outline_hypotheses = None  # type: ignore[assignment]
+
+
 @dataclass(frozen=True)
 class LearnedResult:
     selected: Tensor
@@ -74,6 +84,9 @@ class LearnedResult:
     collective_steps: int = 0
     collective_used: bool = False
     collective_calls: int = 0
+    outline_variant_attempted: bool = False
+    outline_variant_accepted: bool = False
+    outline_variant_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -353,6 +366,15 @@ def analyze_case_with_checkpoint(
                 ),
                 constraint_seed_count=int(
                     topology_provenance.get("constraint_seed_count", 0)
+                ),
+                outline_variant_attempted=bool(
+                    topology_provenance.get("outline_variant_attempted", False)
+                ),
+                outline_variant_accepted=bool(
+                    topology_provenance.get("outline_variant_accepted", False)
+                ),
+                outline_variant_count=int(
+                    topology_provenance.get("outline_variant_count", 0)
                 ),
                 collective_steps=learned_cfg.collective_steps,
                 collective_used=force_controller is not None,
@@ -1408,6 +1430,155 @@ def _dominates(candidate: tuple[float, ...], incumbent: tuple[float, ...]) -> bo
     )
 
 
+def _condition_candidate_inside_outline(
+    case: FloorplanCase,
+    candidate: Tensor,
+    hypothesis: object,
+) -> Tensor | None:
+    """Fit one structured candidate to a latent outline without changing sizes."""
+
+    try:
+        bounds = tuple(float(value) for value in hypothesis.bounds)  # type: ignore[attr-defined]
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if len(bounds) != 4:
+        return None
+    left, bottom, right, top = bounds
+    width, height = right - left, top - bottom
+    if not all(math.isfinite(value) for value in bounds) or min(width, height) <= 0.0:
+        return None
+
+    work = torch.as_tensor(
+        candidate,
+        dtype=torch.float32,
+        device=case.area.device,
+    ).clone()
+    original = work.clone()
+    if work.shape != (case.n, 4) or not bool(torch.isfinite(work).all()):
+        return None
+    if not bool((work[:, 2:4] > 0.0).all()):
+        return None
+
+    preplaced = case.preplaced_mask.to(device=work.device)
+    if bool(preplaced.any()):
+        targets = case.target.to(device=work.device, dtype=work.dtype)
+        target_boxes = targets[preplaced]
+        if not bool(
+            (
+                (target_boxes[:, 0] >= left - _OUTLINE_EPS)
+                & (target_boxes[:, 1] >= bottom - _OUTLINE_EPS)
+                & (target_boxes[:, 0] + target_boxes[:, 2] <= right + _OUTLINE_EPS)
+                & (target_boxes[:, 1] + target_boxes[:, 3] <= top + _OUTLINE_EPS)
+            ).all()
+        ):
+            return None
+        work[preplaced] = target_boxes
+
+    movable = ~preplaced
+    if not bool(movable.any()):
+        return None
+    movable_boxes = work[movable]
+    max_width = float(movable_boxes[:, 2].max())
+    max_height = float(movable_boxes[:, 3].max())
+    if max_width > width + _OUTLINE_EPS or max_height > height + _OUTLINE_EPS:
+        return None
+
+    def fit_axis(values: Tensor, lower: float, upper: float, max_size: float) -> Tensor:
+        target_lower = lower
+        target_upper = upper - max_size
+        source_lower = float(values.min())
+        source_upper = float(values.max())
+        source_span = source_upper - source_lower
+        target_span = max(0.0, target_upper - target_lower)
+        if source_span <= _OUTLINE_EPS:
+            offset = 0.5 * (target_lower + target_upper) - source_lower
+            return values + values.new_tensor(offset)
+        if source_span <= target_span + _OUTLINE_EPS:
+            offset = (
+                0.5 * (target_lower + target_upper)
+                - 0.5 * (source_lower + source_upper)
+            )
+            return values + values.new_tensor(offset)
+        return target_lower + (values - source_lower) * (target_span / source_span)
+
+    work[movable, 0] = fit_axis(movable_boxes[:, 0], left, right, max_width)
+    work[movable, 1] = fit_axis(movable_boxes[:, 1], bottom, top, max_height)
+    if bool(preplaced.any()):
+        work[preplaced] = case.target.to(device=work.device, dtype=work.dtype)[preplaced]
+
+    inside = (
+        (work[:, 0] >= left - _OUTLINE_EPS)
+        & (work[:, 1] >= bottom - _OUTLINE_EPS)
+        & (work[:, 0] + work[:, 2] <= right + _OUTLINE_EPS)
+        & (work[:, 1] + work[:, 3] <= top + _OUTLINE_EPS)
+    )
+    if not bool(inside.all()) or bool(torch.allclose(work, original, rtol=1.0e-6, atol=1.0e-7)):
+        return None
+    try:
+        return work if verify_feasible(case, work) else None
+    except (RuntimeError, TypeError, ValueError):
+        return None
+
+
+def _outline_conditioned_variant(
+    case: FloorplanCase,
+    structured: Tensor,
+) -> tuple[Tensor | None, dict[str, object]]:
+    """Generate one exact-safe outline variant, or return a fail-closed record."""
+
+    base: dict[str, object] = {
+        "outline_variant_attempted": True,
+        "outline_variant_accepted": False,
+        "outline_variant_count": 0,
+    }
+    if infer_outline_hypotheses is None:
+        base["outline_variant_failure_reason"] = "inference_unavailable"
+        return None, base
+    try:
+        hypotheses = tuple(infer_outline_hypotheses(case))
+    except Exception:  # A diagnostic contact must never disable the learned lane.
+        base["outline_variant_failure_reason"] = "hypothesis_inference_failed"
+        return None, base
+    if not hypotheses:
+        base["outline_variant_failure_reason"] = "empty_hypotheses"
+        return None, base
+
+    considered = 0
+    for hypothesis in hypotheses:
+        try:
+            confidence = float(getattr(hypothesis, "confidence"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if not math.isfinite(confidence) or confidence < _OUTLINE_MIN_CONFIDENCE:
+            continue
+        considered += 1
+        variant = _condition_candidate_inside_outline(case, structured, hypothesis)
+        if variant is None:
+            continue
+        base.update(
+            {
+                "outline_variant_accepted": True,
+                "outline_variant_count": 1,
+                "outline_variant_hypothesis_id": str(
+                    getattr(hypothesis, "hypothesis_id", "unknown")
+                ),
+                "outline_variant_source": str(
+                    getattr(hypothesis, "source", "unknown")
+                ),
+                "outline_variant_confidence": confidence,
+                "outline_variant_bounds": tuple(
+                    float(value) for value in hypothesis.bounds  # type: ignore[attr-defined]
+                ),
+                "outline_variant_candidate_sha256": _tensor_sha256(variant),
+            }
+        )
+        return variant, base
+    base["outline_variant_failure_reason"] = (
+        "uncertain_hypotheses" if considered == 0 else "no_exact_inside_variant"
+    )
+    return None, base
+
+
 def _learned_population(
     case: FloorplanCase,
     model,
@@ -1517,6 +1688,28 @@ def _learned_population(
             learned_boxes = torch.cat(
                 (learned_boxes, constraints, topology), dim=0
             )
+    if provenance is not None:
+        provenance.setdefault("outline_variant_attempted", False)
+        provenance.setdefault("outline_variant_accepted", False)
+        provenance.setdefault("outline_variant_count", 0)
+    structured = topology if topology.numel() else constraints
+    if structured.numel():
+        outline_variant, outline_provenance = _outline_conditioned_variant(
+            case,
+            structured[0],
+        )
+        if provenance is not None:
+            provenance.update(outline_provenance)
+        if outline_variant is not None:
+            # Keep the structured seed and analytic incumbent intact.  The
+            # variant replaces one residual slot, so the configured budget is
+            # unchanged even when outline conditioning succeeds.
+            learned_boxes = learned_boxes.clone()
+            learned_boxes[0] = outline_variant
+            if provenance is not None:
+                provenance["outline_variant_replaced_residual_index"] = 0
+    elif provenance is not None:
+        provenance["outline_variant_failure_reason"] = "no_structured_candidates"
     if provenance is not None:
         topology_count = int(topology.shape[0])
         provenance.update(

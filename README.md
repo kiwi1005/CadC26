@@ -169,6 +169,9 @@ The approved next-stage task DAG for latent-outline recovery, exact-area
 treemaps, `tree_sol`-supervised B*-Trees, mask/TTO refinement, near-cap replay,
 and submission freeze is tracked in
 [`docs/research/hcfp5090_latent_outline_exact_packing_plan_2026-08-12.md`](docs/research/hcfp5090_latent_outline_exact_packing_plan_2026-08-12.md).
+The completed P0 bbox/cap evidence and the P1 training-only outline-recovery
+audit are recorded in
+[`docs/research/hcfp5090_p0_p1_outline_results_2026-08-12.md`](docs/research/hcfp5090_p0_p1_outline_results_2026-08-12.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,

@@ -2,7 +2,7 @@
 
 日期：2026-08-12
 
-狀態：已採納，待依序執行
+狀態：P0、P1 完成；P2 可開始
 
 基準 commit：`891c191`
 
@@ -16,11 +16,14 @@
 | --- | ---: | ---: |
 | Hard feasible | 15/15 | 15/15 |
 | Weighted capped cost | 9.999999 | 8.822391 |
-| 穿過 cap | 0/15 | 7/15 |
+| 穿過 exact cap | 0/15 | 8/15 |
 | Runtime p50 | 0.390 s | 6.015 s |
 | Runtime p95 | 0.799 s | 7.803 s |
 
-已穿過 cap 的 cases 為 `85, 87, 91, 92, 95, 96, 99`。本階段不再擴大
+已穿過 exact cap 的 cases 為 `85, 87, 91, 92, 95, 96, 97, 99`。先前
+`cost >= 9.99` 的保守 competitiveness threshold 將 case 99 算在 cap-side，
+因此舊報告顯示 7/15；本計畫以 evaluator 的 `9.999999` exact cap 為準。
+本階段不再擴大
 模型、增加 random flow samples 或做 constraint-only fine-tune；主線改為：
 
 ```text
@@ -76,7 +79,7 @@ whitespace`，由確定性幾何 decoder 保證 area、non-overlap 與緊密 pac
 
 ```text
 large15 hard feasible = 15/15
-目前 7 個 uncapped cases 不得退回 cap
+目前 8 個 exact-uncapped cases 不得退回 cap
 任何新 candidate family 失敗時仍可回傳既有 incumbent
 candidate count <= 32
 ```
@@ -167,13 +170,13 @@ dominant blocker
 
 ### P0 驗收
 
-- [ ] exact attribution 可重建 official local cost，逐 case 誤差在既有 parity tolerance
+- [x] exact attribution 可重建 official local cost，逐 case 誤差在既有 parity tolerance
   內。
-- [ ] 15/15 cases 均有唯一 primary blocker 與 secondary contributions。
-- [ ] 圖上每一種 bbox／outline 都有圖例與不同 stroke style。
-- [ ] `official_candidate_bbox` 永遠等於輸出 blocks extrema。
-- [ ] 產出 `artifacts/benchmarks/hcfp5090-large15-attribution-v2.json`。
-- [ ] 重新產出 15 張逐 case PNG。
+- [x] 15/15 cases 均有唯一 primary blocker 與 secondary contributions。
+- [x] 圖上每一種 bbox／outline 都有圖例與不同 stroke style。
+- [x] `official_candidate_bbox` 永遠等於輸出 blocks extrema。
+- [x] 產出 `artifacts/benchmarks/hcfp5090-large15-attribution-v2.json`。
+- [x] 重新產出 15 張逐 case PNG。
 
 P0 未完成前，不啟動新 checkpoint training。
 
@@ -238,12 +241,12 @@ tie-break 必須 deterministic。
 
 ### P1 驗收
 
-- [ ] 100k large audit 無 validation／visible path。
-- [ ] oracle@K outline area relative error median `< 1%`、p95 `< 3%`。
-- [ ] 四邊 recovery `>= 95%`；若 top-1 未達但 oracle@K 達標，保留 beam。
-- [ ] deterministic hypothesis IDs 與 byte-stable audit summary。
-- [ ] 所有 preplaced rectangles 位於被接受的 hypothesis 內。
-- [ ] 產出 `artifacts/benchmarks/hcfp5090-outline-recovery-large100k.json`。
+- [x] 100k large audit 無 validation／visible path。
+- [x] oracle@K outline area relative error median `< 1%`、p95 `< 3%`。
+- [x] 四邊 recovery `>= 95%`；top-1 未達、oracle@K 達標，因此保留 beam。
+- [x] deterministic hypothesis IDs 與 byte-stable audit summary。
+- [x] 所有 preplaced rectangles 位於被接受的 hypothesis 內。
+- [x] 產出 `artifacts/benchmarks/hcfp5090-outline-recovery-large100k.json`。
 
 若 oracle@K 仍未達 gate，先修 inference／audit，不讓錯誤 outline 成為 hard
 envelope，也不提前開始 outline-conditioned training。

@@ -324,3 +324,129 @@ def test_cli_can_select_one_benchmark_lane(tmp_path: Path) -> None:
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["summary"]["cases"] == 1
     assert report["cases"][0]["lane"] == "learned"
+
+
+def test_cli_adds_large_case_evidence_aliases_and_primary_blocker(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "large15.json"
+    output = tmp_path / "attribution.json"
+    source.write_text(
+        json.dumps(
+            {
+                "lanes": {
+                    "learned": [
+                        {
+                            "test_id": 85,
+                            "block_count": 106,
+                            "source": "learned_initial",
+                            "is_feasible": True,
+                            "hpwl_gap": 0.0,
+                            "area_gap": 20.0,
+                            "boundary_violations": 0,
+                            "grouping_violations": 0,
+                            "mib_violations": 0,
+                            "max_soft_violations": 0,
+                            "positions": [
+                                [0.0, 0.0, 2.0, 2.0],
+                                [2.0, 0.0, 2.0, 2.0],
+                            ],
+                            "raw_cap_margin": 0.4,
+                            "projected_cap_margin": -0.2,
+                            "final_cap_margin": -0.2,
+                            "projection_displacement": 1.5,
+                        }
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/report_cap_sources.py",
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--lane",
+            "learned",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    case = json.loads(output.read_text(encoding="utf-8"))["cases"][0]
+    assert case["hard_feasible"]
+    assert case["quality_factor"] == pytest.approx(11.0)
+    assert case["boundary_violations"] == 0
+    assert case["grouping_violations"] == 0
+    assert case["mib_violations"] == 0
+    assert case["max_possible_violations"] == 0
+    assert case["uncapped_cost"] == pytest.approx(11.0)
+    assert case["capped_cost"] == pytest.approx(9.999999)
+    assert case["raw_cap_margin"] == pytest.approx(0.4)
+    assert case["projected_cap_margin"] == pytest.approx(-0.2)
+    assert case["final_cap_margin"] == pytest.approx(-0.2)
+    assert case["projection_dominated"]
+    assert case["utilization"] == pytest.approx(1.0)
+    assert case["projection_displacement"] == pytest.approx(1.5)
+    assert case["candidate_source"] == "learned_initial"
+    assert case["primary_blocker"] == "area"
+    assert case["primary_blocker_classification"] == "area"
+
+
+def test_cli_reconstructs_large15_soft_breakdown_from_case_metadata(
+    tmp_path: Path,
+) -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "artifacts/benchmarks/"
+        / "hcfp5090-q2-structure-large-s3000-seed6501-"
+        "constraints16-official-large15-exact.json"
+    )
+    if not source.is_file():
+        pytest.skip("large15 benchmark artifact is not present")
+    output = tmp_path / "large15-attribution.json"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/report_cap_sources.py",
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--lane",
+            "learned",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["summary"]["cases"] == 15
+    assert report["summary"]["soft_breakdown_available_cases"] == 15
+    assert not any(
+        str(item).startswith("Some inputs expose only violations_relative")
+        for item in report["schema_limitations"]
+    )
+    cases = {case["test_id"]: case for case in report["cases"]}
+    case = cases[85]
+    assert case["primary_blocker_classification"] == "none"
+    assert (case["boundary_violations"], case["grouping_violations"], case["mib_violations"]) == (
+        23,
+        2,
+        0,
+    )
+    assert case["max_possible_violations"] == 64
+    assert case["violations_relative"] == pytest.approx(25 / 64)
+    assert case["soft_breakdown_source"] == "case_metadata"
+    assert case["candidate_source"] == "learned"
+    assert case["utilization"] == pytest.approx(0.23511499, abs=1.0e-7)

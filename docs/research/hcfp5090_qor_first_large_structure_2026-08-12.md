@@ -59,11 +59,15 @@ Results:
 | --- | ---: | ---: |
 | Hard feasible | 15/15 | 15/15 |
 | Weighted capped cost | 9.999999 | 8.822391 |
-| Cases below cap | 0 | 7 |
+| Cases below exact evaluator cap | 0 | 8 |
 | Runtime p50 | 0.390 s | 6.015 s |
 | Runtime p95 | 0.799 s | 7.803 s |
 
-The seven uncapped learned cases were 85, 87, 91, 92, 95, 96, and 99.
+The eight mathematically uncapped learned cases were 85, 87, 91, 92, 95, 96,
+97, and 99. The earlier benchmark summary reported seven because it used a
+conservative `cost >= 9.99` competitiveness threshold; case 99 has exact cost
+`9.9910749`, so it is below the evaluator cap even though it fails that older
+threshold.
 Case 96 reached the best observed cost in this batch at `5.511786`.
 
 ## Per-case placement visualizations
@@ -97,7 +101,8 @@ geometry bottleneck.
 
 With topology seeds but no constraint seeds, the same checkpoint remained
 capped on 14/15 cases and had weighted cost `9.998999`. Enabling constraint
-seeds reduced the soft-violation ratio enough to cross the cap on seven cases.
+seeds reduced the soft-violation ratio enough to cross the exact cap on eight
+cases (seven under the older `9.99` competitiveness threshold).
 
 The absolute-initializer experiment learned target centers successfully, but
 its large-case topology oracle remained behind the Q2 topology checkpoint.
