@@ -15,6 +15,7 @@ from hcfp.fallback import safe_shelf
 from hcfp.learned import (
     LearnedConfig,
     _attach_ranker_shadow_snapshot,
+    _btree_seed_candidates,
     _learned_population,
     _merge_energy_history,
     _tensor_sha256,
@@ -101,6 +102,22 @@ def test_absolute_initializer_runtime_uses_normalized_centers_and_hard_anchors()
     assert torch.allclose(centers[0, ~case.preplaced_mask], expected_soft.expand(3, -1))
     assert torch.equal(centers[0, case.preplaced_mask], expected_preplaced)
     assert torch.equal(boxes[0, case.preplaced_mask], case.target[case.preplaced_mask])
+
+
+def test_btree_seed_candidates_are_additive_and_hard_feasible() -> None:
+    case = _case()
+    model = HCFPModel(
+        ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True)
+    )
+    source = safe_shelf(case).unsqueeze(0).repeat(2, 1, 1)
+    output = model(case, population=2)
+
+    candidates, records = _btree_seed_candidates(case, output, source, count=2)
+
+    assert candidates.shape == (2, case.n, 4)
+    assert len(records) == 2
+    assert all(record["source_type"] == "btree" for record in records)
+    assert all(verify_feasible(case, candidate) for candidate in candidates)
 
 
 def _source() -> SimpleNamespace:
@@ -691,6 +708,9 @@ def test_ranker_shadow_uses_exact_replay_initial_slice_and_provenance(
 
     monkeypatch.setattr(learned, "repair_aware_ranker_features", features)
     analysis = _shadow_analysis()
+    analysis.incumbent_snapshot["btree_seed_provenance"] = (
+        {"source": "candidate_3", "stage": "initial"},
+    )
 
     shadowed = _attach_ranker_shadow_snapshot(
         _case(),
@@ -708,7 +728,7 @@ def test_ranker_shadow_uses_exact_replay_initial_slice_and_provenance(
     assert torch.equal(captured["raw"], analysis.raw_candidates[3:7])
     assert torch.equal(captured["post_bdp"], analysis.projected_candidates[3:7])
     assert torch.equal(captured["anchor"], safe_shelf(_case()))
-    assert captured["kinds"] == ("learned", "constraint", "topology", "topology")
+    assert captured["kinds"] == ("btree", "constraint", "topology", "topology")
     assert captured["stage"] == "initial"
     assert snapshot["ranker_shadow_candidate_kinds"] == captured["kinds"]
     assert tuple(row["source"] for row in snapshot["ranker_shadow_top4"]) == (
@@ -2044,3 +2064,16 @@ def test_require_checkpoint_failure_does_not_scan_pool_or_replay_analytic(
 
     with pytest.raises(RuntimeError, match="checkpoint unavailable"):
         learned.solve(_source(), checkpoint=tmp_path / "model.pt", require_checkpoint=True)
+
+
+def test_candidate_funnel_proxy_can_trade_small_geometry_cost_for_soft_gain() -> None:
+    import hcfp.learned as learned
+
+    assert learned._relative_candidate_proxy_delta(
+        (0.50, 108.0, 115.0),
+        (0.75, 100.0, 100.0),
+    ) < 0.0
+    assert learned._relative_candidate_proxy_delta(
+        (0.75, 108.0, 115.0),
+        (0.75, 100.0, 100.0),
+    ) > 0.0

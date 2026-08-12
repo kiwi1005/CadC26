@@ -21,6 +21,7 @@ from hcfp.topology import antisymmetry_loss, partial_label_nll, relation_mask_fr
 Tensor = torch.Tensor
 TRAINING_STAGES = (
     "structure",
+    "btree",
     "constraints",
     "initializer",
     "flow",
@@ -152,9 +153,10 @@ def supervised_loss(
 
     structure = zero
     constraint = zero
-    if stage in {"structure", "constraints", "all"}:
+    if stage in {"structure", "btree", "constraints", "all"}:
         precedence = zero
         outline = zero
+        tree_loss = zero
         if stage in {"structure", "all"}:
             allowed = relation_mask_from_rectangles(
                 labels.rectangles,
@@ -170,29 +172,65 @@ def supervised_loss(
                     output.negative_permutation,
                 )
                 precedence += partial_label_nll(topology_logits, allowed, pair_mask=valid)
+            if (
+                sample.tree_edges is not None
+                and output.btree_root_logits is not None
+                and output.btree_edge_logits is not None
+            ):
+                root_target, child_mask, edge_target = _btree_targets(
+                    sample.tree_edges,
+                    case.n,
+                    device,
+                )
+                tree_loss = F.cross_entropy(
+                    output.btree_root_logits.unsqueeze(0),
+                    root_target.unsqueeze(0),
+                )
+                tree_loss += F.cross_entropy(
+                    output.btree_edge_logits.reshape(case.n, -1)[child_mask],
+                    edge_target[child_mask],
+                )
             outline = F.smooth_l1_loss(output.outline, labels.outline)
-        if output.contact_logits is not None:
+        elif stage == "btree":
+            if (
+                sample.tree_edges is None
+                or output.btree_root_logits is None
+                or output.btree_edge_logits is None
+            ):
+                raise ValueError("btree stage requires tree labels and btree_enabled model")
+            root_target, child_mask, edge_target = _btree_targets(
+                sample.tree_edges,
+                case.n,
+                device,
+            )
+            tree_loss = F.cross_entropy(
+                output.btree_root_logits.unsqueeze(0), root_target.unsqueeze(0)
+            ) + F.cross_entropy(
+                output.btree_edge_logits.reshape(case.n, -1)[child_mask],
+                edge_target[child_mask],
+            )
+        if stage != "btree" and output.contact_logits is not None:
             contact_target, contact_mask = _contact_targets(case, labels)
             if bool(contact_mask.any()):
                 constraint = constraint + F.cross_entropy(
                     output.contact_logits[contact_mask],
                     contact_target[contact_mask],
                 )
-        if output.boundary_order_scores is not None:
+        if stage != "btree" and output.boundary_order_scores is not None:
             boundary_target, boundary_mask = _boundary_order_targets(case, labels)
             if bool(boundary_mask.any()):
                 constraint = constraint + F.smooth_l1_loss(
                     torch.sigmoid(output.boundary_order_scores[boundary_mask]),
                     boundary_target[boundary_mask],
                 )
-        if output.mib_log_aspect is not None:
+        if stage != "btree" and output.mib_log_aspect is not None:
             mib_target, mib_mask = _mib_log_aspect_targets(case, labels)
             if bool(mib_mask.any()):
                 constraint = constraint + F.smooth_l1_loss(
                     output.mib_log_aspect[mib_mask],
                     mib_target[mib_mask],
                 )
-        structure = precedence + outline + constraint
+        structure = precedence + outline + constraint + tree_loss
 
     initializer = zero
     if stage in {"initializer", "all"}:
@@ -454,6 +492,26 @@ def _labels_to(labels: SolutionLabels, device: torch.device) -> SolutionLabels:
         baseline_area=labels.baseline_area.to(device=device),
         baseline_hpwl=labels.baseline_hpwl.to(device=device),
     )
+
+
+def _btree_targets(
+    edges: Tensor,
+    block_count: int,
+    device: torch.device,
+) -> tuple[Tensor, Tensor, Tensor]:
+    rows = torch.as_tensor(edges, dtype=torch.long, device=device)
+    if rows.shape != (block_count - 1, 3):
+        raise ValueError("tree labels must have shape [N-1,3]")
+    parents = torch.full((block_count,), -1, dtype=torch.long, device=device)
+    sides = torch.full((block_count,), -1, dtype=torch.long, device=device)
+    parents[rows[:, 1]] = rows[:, 0]
+    sides[rows[:, 1]] = rows[:, 2]
+    roots = torch.nonzero(parents < 0, as_tuple=False).reshape(-1)
+    if roots.numel() != 1:
+        raise ValueError("tree labels must have one root")
+    mask = parents >= 0
+    target = parents.clamp_min(0) * 2 + sides.clamp_min(0)
+    return roots[0], mask, target
 
 
 def _contact_targets(case, labels: SolutionLabels) -> tuple[Tensor, Tensor]:

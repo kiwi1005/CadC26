@@ -119,6 +119,7 @@ def _load_default_solver() -> Solver | None:
             large_min_blocks = int(os.environ.get("HCFP_STRUCTURED_MIN_BLOCKS", "106"))
             topology_seeds = int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "16"))
             constraint_seeds = int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "16"))
+            btree_seeds = int(os.environ.get("HCFP_BTREE_SEEDS", "0"))
 
             def solve_learned(case: SolveCase):
                 if case.block_count < large_min_blocks:
@@ -126,6 +127,7 @@ def _load_default_solver() -> Solver | None:
                 config = learned.LearnedConfig(
                     topology_seeds=topology_seeds,
                     constraint_seeds=constraint_seeds,
+                    btree_seeds=btree_seeds,
                 )
                 return learned.solve(case, checkpoint=large_checkpoint, config=config)
 

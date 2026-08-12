@@ -54,6 +54,12 @@ def main(argv: list[str] | None = None) -> int:
         help="opt in to typed membership messages and the dual-permutation head",
     )
     parser.add_argument(
+        "--btree",
+        action="store_true",
+        default=None,
+        help="opt in to tree_sol-supervised B*-Tree root/edge heads",
+    )
+    parser.add_argument(
         "--constraints",
         action="store_true",
         default=None,
@@ -157,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
                 else args.absolute_initializer
             ),
             topology_enabled=topology_enabled,
+            btree_enabled=(
+                loaded.config.btree_enabled if args.btree is None else args.btree
+            ),
             constraint_enabled=(
                 loaded.config.constraint_enabled
                 if args.constraints is None
@@ -172,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         incompatible = model.load_state_dict(loaded.state_dict(), strict=False)
         allowed_missing_prefixes = (
             "topology.",
+            "btree.",
             "encoder.group_message.",
             "encoder.mib_message.",
             "constraints.",
@@ -201,6 +211,7 @@ def main(argv: list[str] | None = None) -> int:
                 initializer_absolute=bool(args.absolute_initializer),
                 compute_dtype=compute_dtype,
                 topology_enabled=bool(args.topology),
+                btree_enabled=bool(args.btree),
                 constraint_enabled=bool(args.constraints),
                 collective_enabled=bool(args.collective),
             )
@@ -290,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
         "device": str(device),
         "compute_dtype": compute_dtype,
         "topology_enabled": model.config.topology_enabled,
+        "btree_enabled": model.config.btree_enabled,
         "constraint_enabled": model.config.constraint_enabled,
         "collective_enabled": model.config.collective_enabled,
         "trainable_parameter_names": trainable_parameter_names,
@@ -346,8 +358,12 @@ def _training_checkpoint_metadata(
         trained_heads.add("structure")
         if config.topology_enabled:
             trained_heads.add("topology")
+        if config.btree_enabled:
+            trained_heads.add("btree")
         if config.constraint_enabled:
             trained_heads.add("constraints")
+    if stage == "btree":
+        trained_heads.add("btree")
     if stage == "constraints":
         trained_heads.add("constraints")
     if stage in {"initializer", "all"}:
@@ -382,7 +398,8 @@ def _training_checkpoint_metadata(
 
 def _select_trainable_parameters(model: HCFPModel, stage: str) -> list[str]:
     prefixes = {
-        "structure": ("encoder.", "structure.", "topology.", "constraints."),
+        "structure": ("encoder.", "structure.", "topology.", "btree.", "constraints."),
+        "btree": ("btree.",),
         "constraints": ("constraints.",),
         "initializer": ("initializer.",),
         "flow": ("flow.",),

@@ -14,12 +14,12 @@ from hcfp.geometry import centers_from_xywh
 
 Tensor = torch.Tensor
 STORED_RANKER_FEATURE_VERSION = "stored_candidate_features_v1"
-RANKER_FEATURE_VERSION = "repair_aware_ranker_features_v4_device_parity"
-RANKER_FEATURE_DIM = 26
+RANKER_FEATURE_VERSION = "repair_aware_ranker_features_v5_family_identity"
+RANKER_FEATURE_DIM = 28
 KIND_FEATURE_OFFSET = 18
-PROXY_FEATURE_OFFSET = 21
-STAGE_FEATURE_INDEX = 24
-PROJECTION_OK_FEATURE_INDEX = 25
+PROXY_FEATURE_OFFSET = 23
+STAGE_FEATURE_INDEX = 26
+PROJECTION_OK_FEATURE_INDEX = 27
 RANKER_FEATURE_NAMES = (
     *(f"raw_{index}" for index in range(8)),
     *(f"post_bdp_{index}" for index in range(8)),
@@ -28,13 +28,21 @@ RANKER_FEATURE_NAMES = (
     "kind_learned",
     "kind_constraint",
     "kind_topology",
+    "kind_treemap",
+    "kind_btree",
     "post_bdp_boundary_proxy",
     "post_bdp_group_proxy",
     "post_bdp_mib_proxy",
     "stage_post_relax",
     "projection_ok",
 )
-_KIND_TO_INDEX = {"learned": 0, "constraint": 1, "topology": 2}
+_KIND_TO_INDEX = {
+    "learned": 0,
+    "constraint": 1,
+    "topology": 2,
+    "treemap": 3,
+    "btree": 4,
+}
 
 
 def repair_aware_ranker_features(
@@ -45,7 +53,7 @@ def repair_aware_ranker_features(
     candidate_kinds: Sequence[str],
     candidate_stage: str,
 ) -> Tensor:
-    """Build a [C,26] repair-aware ranker feature tensor."""
+    """Build repair-aware candidate features with explicit family identity."""
 
     raw_boxes = _boxes(raw, case, "raw")
     post_boxes = _boxes(post_bdp, case, "post_bdp")
@@ -118,8 +126,8 @@ def _kind_one_hot(kinds: Sequence[str], count: int, device: torch.device) -> Ten
     try:
         indices = torch.tensor([_KIND_TO_INDEX[str(kind)] for kind in kinds], dtype=torch.long, device=device)
     except KeyError as exc:
-        raise ValueError("candidate_kinds must be learned, constraint, or topology") from exc
-    return torch.nn.functional.one_hot(indices, num_classes=3).to(dtype=torch.float32)
+        raise ValueError("candidate_kinds contains an unsupported family") from exc
+    return torch.nn.functional.one_hot(indices, num_classes=5).to(dtype=torch.float32)
 
 
 def _projection_ok_from_geometry(case: FloorplanCase, raw: Tensor, post: Tensor) -> Tensor:

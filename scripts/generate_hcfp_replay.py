@@ -56,6 +56,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collective-steps", type=_non_negative_int, default=0)
     parser.add_argument("--topology-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--constraint-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--treemap-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--btree-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--flow-seed", type=int, default=0)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--score-aware", action="store_true")
@@ -109,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         seed=args.flow_seed,
         topology_seeds=args.topology_seeds,
         constraint_seeds=args.constraint_seeds,
+        treemap_seeds=args.treemap_seeds,
+        btree_seeds=args.btree_seeds,
     )
     excluded_ids = {
         record.sample.sample_id
@@ -127,6 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         "collective_steps": collective_steps,
         "topology_seeds": args.topology_seeds,
         "constraint_seeds": args.constraint_seeds,
+        "treemap_seeds": args.treemap_seeds,
+        "btree_seeds": args.btree_seeds,
         "flow_seed": args.flow_seed,
         "record_stage": args.record_stage,
     }

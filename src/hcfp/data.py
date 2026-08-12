@@ -64,6 +64,7 @@ class DataSample:
     sample_id: str
     case: FloorplanCase
     labels: SolutionLabels
+    tree_edges: torch.Tensor | None = None
 
 
 def extract_labels(
@@ -169,6 +170,7 @@ def transform_sample(sample: DataSample, name: str) -> DataSample:
             baseline_area=sample.labels.baseline_area,
             baseline_hpwl=sample.labels.baseline_hpwl,
         ),
+        None,
     )
 
 
@@ -267,11 +269,14 @@ def file_sha256(path: str | Path) -> str:
 
 
 def sample_to_payload(sample: DataSample) -> dict[str, Any]:
-    return {
+    payload = {
         "sample_id": sample.sample_id,
         "case": case_to_payload(sample.case),
         "labels": labels_to_payload(sample.labels),
     }
+    if sample.tree_edges is not None:
+        payload["tree_edges"] = sample.tree_edges.detach().cpu().tolist()
+    return payload
 
 
 def sample_from_payload(payload: dict[str, Any]) -> DataSample:
@@ -280,6 +285,11 @@ def sample_from_payload(payload: dict[str, Any]) -> DataSample:
         str(payload["sample_id"]),
         case,
         labels_from_payload(payload["labels"], case=case),
+        (
+            torch.as_tensor(payload["tree_edges"], dtype=torch.long)
+            if "tree_edges" in payload
+            else None
+        ),
     )
     validate_sample(sample)
     return sample
@@ -375,6 +385,10 @@ def validate_sample(sample: DataSample) -> None:
     """Reject stale or malformed precomputed labels before training."""
 
     case, labels = sample.case, sample.labels
+    if sample.tree_edges is not None:
+        from hcfp.btree import BStarTree
+
+        BStarTree.from_edges(sample.tree_edges, case.n)
     if labels.rectangles.shape != (case.n, 4):
         raise ValueError("label rectangles must have shape [N,4]")
     _baseline_scalar("baseline_area", labels.baseline_area, labels.rectangles.device)

@@ -28,7 +28,7 @@ def _layout_payload() -> list[torch.Tensor]:
     b2b = torch.tensor([[[0.0, 1.0, 2.0], [1.0, 2.0, 1.0]]])
     p2b = torch.tensor([[[-1.0, -1.0, -1.0]]])
     pins = torch.tensor([[[-1.0, -1.0]]])
-    tree = torch.zeros(1, 2, 3)
+    tree = torch.tensor([[[0, 1, 0], [0, 2, 1]]])
     fp_sol = torch.tensor([[[2.0, 2.0, 0.0, 0.0], [3.0, 3.0, 3.0, 0.0], [4.0, 4.0, 0.0, 4.0]]])
     metrics = torch.tensor([[120.0, 0.0, 0.0, 0.0, 0.0, 0.0, 7.0, 3.0]])
     return [area_constraints, b2b, p2b, pins, tree, fp_sol, metrics]
@@ -98,10 +98,12 @@ def test_direct_training_stream_loads_layouts_without_creating_shards(tmp_path: 
     assert [sample.sample_id for sample in samples] == ["worker_0/layouts_0.pth:0"]
     assert samples[0].labels.baseline_area.item() == pytest.approx(120.0)
     assert samples[0].labels.baseline_hpwl.item() == pytest.approx(10.0)
+    assert torch.equal(samples[0].tree_edges, payload := _layout_payload()[4][0].long())
     assert not list(tmp_path.rglob("*.tar"))
 
     sourced = list(iter_floorset_lite_with_source(tmp_path, limit=1))
     assert sourced[0][0].sample_id == samples[0].sample_id
+    assert torch.equal(sourced[0][1]["tree_sol_edges"], payload)
     assert torch.equal(sourced[0][1]["target_positions"][0], torch.tensor([0.0, 0.0, 2.0, 2.0]))
 
 

@@ -23,8 +23,8 @@ def test_repair_aware_ranker_features_shape_finite_and_deterministic() -> None:
     first = repair_aware_ranker_features(case, raw, post, anchor, kinds, "initial")
     second = repair_aware_ranker_features(case, raw, post, anchor, kinds, "initial")
 
-    assert RANKER_FEATURE_VERSION == "repair_aware_ranker_features_v4_device_parity"
-    assert len(RANKER_FEATURE_NAMES) == RANKER_FEATURE_DIM == 26
+    assert RANKER_FEATURE_VERSION == "repair_aware_ranker_features_v5_family_identity"
+    assert len(RANKER_FEATURE_NAMES) == RANKER_FEATURE_DIM == 28
     assert first.shape == (2, RANKER_FEATURE_DIM)
     assert torch.isfinite(first).all()
     torch.testing.assert_close(first, second, rtol=0.0, atol=0.0)
@@ -51,6 +51,24 @@ def test_repair_aware_ranker_features_encode_source_kind_one_hot() -> None:
     torch.testing.assert_close(
         features[:, PROJECTION_OK_FEATURE_INDEX],
         torch.tensor([1.0, 0.0, 0.0]),
+    )
+
+
+def test_repair_aware_ranker_features_keep_structured_families_distinct() -> None:
+    case = _case()
+    raw, post = _candidates()
+    features = repair_aware_ranker_features(
+        case,
+        raw,
+        post,
+        _anchor(),
+        ("treemap", "btree"),
+        "initial",
+    )
+
+    torch.testing.assert_close(
+        features[:, KIND_FEATURE_OFFSET : KIND_FEATURE_OFFSET + 5],
+        torch.eye(5)[3:],
     )
 
 

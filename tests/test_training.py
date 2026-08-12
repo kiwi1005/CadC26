@@ -24,6 +24,14 @@ def _sample() -> DataSample:
     return DataSample("train-0", case, extract_labels(case, safe_shelf(case), normalized=True))
 
 
+def _tree_sample() -> DataSample:
+    sample = _sample()
+    edges = torch.tensor(
+        [(index // 2, index + 1, index % 2) for index in range(sample.case.n - 1)]
+    )
+    return DataSample(sample.sample_id, sample.case, sample.labels, edges)
+
+
 def _constraint_sample() -> DataSample:
     case = from_official(
         4,
@@ -88,6 +96,21 @@ def test_all_supervised_heads_train_with_finite_losses() -> None:
     history = train_steps(model, [_sample()], optimizer, steps=2, population=2, seed=8)
     assert len(history) == 2
     assert all(torch.isfinite(torch.tensor(step["total"])) for step in history)
+
+
+def test_btree_supervision_reaches_tree_heads() -> None:
+    model = HCFPModel(
+        ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True)
+    )
+    report = supervised_loss(model, _tree_sample(), population=2, stage="btree")
+    report.total.backward()
+
+    assert torch.isfinite(report.total)
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for name, parameter in model.named_parameters()
+        if name.startswith("btree.")
+    )
 
 
 def test_absolute_initializer_supervises_normalized_geometry_without_shelf_offset() -> None:

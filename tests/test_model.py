@@ -74,6 +74,19 @@ def test_constraint_heads_are_optional_and_candidate_independent() -> None:
     assert output.mib_log_aspect.shape == (case.mib_membership.shape[0],)
 
 
+def test_btree_heads_are_optional_and_score_parent_branches() -> None:
+    case = _case()
+    output = HCFPModel(
+        ModelConfig(hidden_dim=24, encoder_layers=1, btree_enabled=True)
+    )(case, population=2)
+
+    assert output.btree_root_logits is not None
+    assert output.btree_edge_logits is not None
+    assert output.btree_root_logits.shape == (case.n,)
+    assert output.btree_edge_logits.shape == (case.n, case.n, 2)
+    assert torch.all(output.btree_edge_logits.diagonal(dim1=0, dim2=1) < -1.0e20)
+
+
 def test_model_takes_one_optimizer_step() -> None:
     torch.manual_seed(11)
     case = _case()

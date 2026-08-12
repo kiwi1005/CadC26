@@ -20,6 +20,7 @@ from hcfp.fallback import safe_shelf
 from hcfp.geometry import centers_from_xywh
 from hcfp.model import HCFPModel, ModelConfig
 from hcfp.profile import synthetic_case
+from hcfp.ranker_features import RANKER_FEATURE_DIM, RANKER_FEATURE_VERSION
 from hcfp.replay import (
     OFFICIAL_TARGET_KIND,
     RANKER_OBJECTIVES,
@@ -196,14 +197,14 @@ def test_v3_replay_derives_repair_aware_ranker_feature_view() -> None:
     )
     repair_aware = ranker_features_for_record(
         record,
-        expected_dim=26,
-        expected_version="repair_aware_ranker_features_v4_device_parity",
+        expected_dim=RANKER_FEATURE_DIM,
+        expected_version=RANKER_FEATURE_VERSION,
     )
 
     assert torch.equal(stored, record.candidate_features)
-    assert repair_aware.shape == (len(record.target_score), 26)
+    assert repair_aware.shape == (len(record.target_score), RANKER_FEATURE_DIM)
     assert torch.isfinite(repair_aware).all()
-    torch.testing.assert_close(repair_aware[:, 18:21], torch.eye(3))
+    torch.testing.assert_close(repair_aware[:, 18:23], torch.eye(5)[:3])
 
 
 def test_repair_aware_features_do_not_read_post_repair_targets() -> None:
@@ -217,13 +218,13 @@ def test_repair_aware_features_do_not_read_post_repair_targets() -> None:
 
     original = ranker_features_for_record(
         record,
-        expected_dim=26,
-        expected_version="repair_aware_ranker_features_v4_device_parity",
+        expected_dim=RANKER_FEATURE_DIM,
+        expected_version=RANKER_FEATURE_VERSION,
     )
     changed = ranker_features_for_record(
         changed_targets,
-        expected_dim=26,
-        expected_version="repair_aware_ranker_features_v4_device_parity",
+        expected_dim=RANKER_FEATURE_DIM,
+        expected_version=RANKER_FEATURE_VERSION,
     )
 
     torch.testing.assert_close(changed, original, rtol=0.0, atol=0.0)
@@ -233,8 +234,8 @@ def test_ranker_loss_reuses_prepared_repair_aware_features() -> None:
     record = _v3_record()
     prepared = ranker_features_for_record(
         record,
-        expected_dim=26,
-        expected_version="repair_aware_ranker_features_v4_device_parity",
+        expected_dim=RANKER_FEATURE_DIM,
+        expected_version=RANKER_FEATURE_VERSION,
     )
     prepared_record = replace(
         record,
@@ -246,8 +247,8 @@ def test_ranker_loss_reuses_prepared_repair_aware_features() -> None:
         ModelConfig(
             hidden_dim=16,
             encoder_layers=1,
-            candidate_metric_dim=26,
-            ranker_feature_version="repair_aware_ranker_features_v4_device_parity",
+            candidate_metric_dim=RANKER_FEATURE_DIM,
+            ranker_feature_version=RANKER_FEATURE_VERSION,
         )
     )
 
@@ -260,15 +261,15 @@ def test_candidate_only_ranker_loss_skips_scene_encoder() -> None:
     record = _v3_record()
     prepared = ranker_features_for_record(
         record,
-        expected_dim=26,
-        expected_version="repair_aware_ranker_features_v4_device_parity",
+        expected_dim=RANKER_FEATURE_DIM,
+        expected_version=RANKER_FEATURE_VERSION,
     )
     model = HCFPModel(
         ModelConfig(
             hidden_dim=16,
             encoder_layers=1,
-            candidate_metric_dim=26,
-            ranker_feature_version="repair_aware_ranker_features_v4_device_parity",
+            candidate_metric_dim=RANKER_FEATURE_DIM,
+            ranker_feature_version=RANKER_FEATURE_VERSION,
             ranker_use_scene_embedding=False,
         )
     )
@@ -1185,7 +1186,7 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
     assert metadata["trained_heads"] == ["encoder", "flow", "ranker"]
     assert metadata["training_objective_version"] == "ranker_post_repair_listwise_v3_feasibility_shadow"
     assert metadata["parent_state_hash"] == source_hash
-    assert loaded.config.candidate_metric_dim == 26
+    assert loaded.config.candidate_metric_dim == RANKER_FEATURE_DIM
     assert report["listwise_records"] == 1
     assert report["candidate_stage_filter"] == "initial"
     assert report["replays"] == [
@@ -1197,17 +1198,17 @@ def test_ranker_training_upgrades_features_but_keeps_runtime_shadowed(tmp_path: 
             "samples": 1,
         }
     ]
-    assert report["candidate_feature_dim"] == 26
+    assert report["candidate_feature_dim"] == RANKER_FEATURE_DIM
     assert report["ranker_use_scene_embedding"] is False
     assert report["ranker_initialization"] == "reset_from_non_ranker_source"
-    assert report["candidate_feature_version"] == "repair_aware_ranker_features_v4_device_parity"
+    assert report["candidate_feature_version"] == RANKER_FEATURE_VERSION
     assert (
         report["candidate_feature_normalization"]["kind"]
         == "global_zscore_constant_identity_v2"
     )
     assert report["candidate_feature_normalization"]["source"] == "training_replay"
-    assert len(report["candidate_feature_normalization"]["mean"]) == 26
-    assert len(report["candidate_feature_normalization"]["scale"]) == 26
+    assert len(report["candidate_feature_normalization"]["mean"]) == RANKER_FEATURE_DIM
+    assert len(report["candidate_feature_normalization"]["scale"]) == RANKER_FEATURE_DIM
     assert min(report["candidate_feature_normalization"]["scale"]) > 1.0e-6
     assert report["loss_window_records"] == 1
     assert report["first_window_mean_loss"] == report["first_loss"]

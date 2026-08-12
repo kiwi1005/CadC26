@@ -152,6 +152,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--component-reset-limit", type=int, default=2)
     parser.add_argument("--topology-seeds", type=int, default=0)
     parser.add_argument("--constraint-seeds", type=int, default=0)
+    parser.add_argument("--treemap-seeds", type=int, default=0)
+    parser.add_argument("--btree-seeds", type=int, default=0)
     parser.add_argument("--flow-steps", type=int, default=0)
     parser.add_argument("--collective-steps", type=int, default=0)
     parser.add_argument("--tail-topk", type=int)
@@ -179,7 +181,15 @@ def _validate_args(args: argparse.Namespace) -> None:
     ):
         if int(getattr(args, name)) <= 0:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
-    for name in ("dynamics_steps", "topology_seeds", "constraint_seeds", "flow_steps", "collective_steps"):
+    for name in (
+        "dynamics_steps",
+        "topology_seeds",
+        "constraint_seeds",
+        "treemap_seeds",
+        "btree_seeds",
+        "flow_steps",
+        "collective_steps",
+    ):
         if int(getattr(args, name)) < 0:
             raise ValueError(f"--{name.replace('_', '-')} must be non-negative")
 
@@ -434,6 +444,8 @@ def _learned_config(args: argparse.Namespace, seed: int) -> LearnedConfig:
         seed=seed,
         topology_seeds=args.topology_seeds,
         constraint_seeds=args.constraint_seeds,
+        treemap_seeds=args.treemap_seeds,
+        btree_seeds=args.btree_seeds,
         ranker_selection_experiment=True,
     )
 
@@ -497,6 +509,8 @@ def _config_payload(
         "component_reset_limit": args.component_reset_limit,
         "topology_seeds": args.topology_seeds,
         "constraint_seeds": args.constraint_seeds,
+        "treemap_seeds": args.treemap_seeds,
+        "btree_seeds": args.btree_seeds,
         "flow_steps": args.flow_steps,
         "collective_steps": args.collective_steps,
         "tail_topk": args.tail_topk,

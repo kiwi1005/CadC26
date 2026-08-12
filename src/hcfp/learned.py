@@ -22,6 +22,7 @@ from hcfp.analytic import (
     to_official_placements,
 )
 from hcfp.case import FloorplanCase, from_official
+from hcfp.btree import contact_aware_vertical_orders, decode_btree_logits
 from hcfp.candidates import candidate_features
 from hcfp.checkpoint import RUNTIME_NORMALIZATION, load_checkpoint
 from hcfp.collective_runtime import CollectiveForceController
@@ -29,7 +30,7 @@ from hcfp.constraints.construction import connect_groups, construct_constraint_v
 from hcfp.constraints.raw_repair import repair_raw_constraints
 from hcfp.dynamics import initialize_population
 from hcfp.fallback import safe_fallback, safe_shelf
-from hcfp.geometry import initializer_anchor, xywh_from_state
+from hcfp.geometry import centers_from_xywh, initializer_anchor, xywh_from_state
 from hcfp.model import soft_sequence_pair_relation_logits
 from hcfp.projection import ComponentBDPConfig
 from hcfp.projection_guidance import build_population_guidance
@@ -91,6 +92,9 @@ class LearnedResult:
     treemap_seed_attempted: bool = False
     treemap_seed_accepted: bool = False
     treemap_seed_count: int = 0
+    btree_seed_attempted: bool = False
+    btree_seed_accepted: bool = False
+    btree_seed_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,7 @@ class LearnedConfig:
     topology_seeds: int = 0
     constraint_seeds: int = 0
     treemap_seeds: int = 0
+    btree_seeds: int = 0
     collective_steps: int = 0
     ranker_selection_experiment: bool = False
 
@@ -132,6 +137,8 @@ class LearnedConfig:
             raise ValueError("constraint_seeds must be non-negative")
         if self.treemap_seeds < 0:
             raise ValueError("treemap_seeds must be non-negative")
+        if self.btree_seeds < 0:
+            raise ValueError("btree_seeds must be non-negative")
         if self.collective_steps < 0:
             raise ValueError("collective_steps must be non-negative")
         if self.constraint_seeds and not self.topology_seeds:
@@ -392,6 +399,15 @@ def analyze_case_with_checkpoint(
                 treemap_seed_count=int(
                     topology_provenance.get("treemap_seed_count", 0)
                 ),
+                btree_seed_attempted=bool(
+                    topology_provenance.get("btree_seed_attempted", False)
+                ),
+                btree_seed_accepted=bool(
+                    topology_provenance.get("btree_seed_accepted", False)
+                ),
+                btree_seed_count=int(
+                    topology_provenance.get("btree_seed_count", 0)
+                ),
                 collective_steps=learned_cfg.collective_steps,
                 collective_used=force_controller is not None,
                 collective_calls=(
@@ -507,6 +523,13 @@ def select_official_from_analysis(
                 analysis,
                 placements,
             )
+        if _truthy_env(os.environ.get("HCFP_CANDIDATE_FUNNEL_PROXY")):
+            placements = _candidate_funnel_proxy_guard(
+                source,
+                case,
+                analysis,
+                placements,
+            )
         _record_ranker_selection_counterfactual(
             source,
             case,
@@ -542,6 +565,13 @@ def select_official_from_analysis(
             f"candidate_{index}",
         )
         if verify_feasible(source, candidate):
+            if _truthy_env(os.environ.get("HCFP_CANDIDATE_FUNNEL_PROXY")):
+                candidate = _candidate_funnel_proxy_guard(
+                    source,
+                    case,
+                    analysis,
+                    candidate,
+                )
             if index == 0:
                 break
             _record_ranker_selection_counterfactual(
@@ -576,6 +606,7 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
             topology_seeds=int(os.environ.get("HCFP_TOPOLOGY_SEEDS", "0")),
             constraint_seeds=int(os.environ.get("HCFP_CONSTRAINT_SEEDS", "0")),
             treemap_seeds=int(os.environ.get("HCFP_TREEMAP_SEEDS", "0")),
+            btree_seeds=int(os.environ.get("HCFP_BTREE_SEEDS", "0")),
             collective_steps=int(os.environ.get("HCFP_COLLECTIVE_STEPS", "0")),
             ranker_selection_experiment=_truthy_env(
                 os.environ.get("HCFP_RANKER_SELECTION_EXPERIMENT")
@@ -782,6 +813,23 @@ def _merge_tail_analyses(
         snapshot["treemap_seed_provenance"] = treemap_candidates
         if stale_sources:
             snapshot["treemap_seed_stale_sources"] = tuple(stale_sources)
+    if topology_provenance and bool(
+        topology_provenance.get("btree_seed_accepted", False)
+    ):
+        btree_candidates, stale_sources = _residual_seed_stage_records(
+            tuple(topology_provenance.get("btree_seed_records", ())),
+            raw_candidates,
+            initial_start=initial_start,
+            final_start=final_start,
+            learned_count=learned_count,
+            candidate_type="btree",
+        )
+        snapshot["btree_seed_sources"] = tuple(
+            str(candidate["source"]) for candidate in btree_candidates
+        )
+        snapshot["btree_seed_provenance"] = btree_candidates
+        if stale_sources:
+            snapshot["btree_seed_stale_sources"] = tuple(stale_sources)
     status = analytic.projection_status
     if learned.projection_status != status:
         status = f"analytic={status};learned={learned.projection_status}"
@@ -938,10 +986,12 @@ def _attach_ranker_shadow_snapshot(
         post_bdp = analysis.projected_candidates[initial_start:initial_stop]
         if raw.shape[0] != learned_count or post_bdp.shape[0] != learned_count:
             raise ValueError("learned initial slice does not align with merged tail")
-        kinds = _learned_candidate_kinds(
+        kinds = _ranker_candidate_kinds(
+            snapshot,
             residual_count=residual_count,
             constraint_count=constraint_count,
             topology_count=topology_count,
+            initial_start=initial_start,
         )
         features = repair_aware_ranker_features(
             case,
@@ -1040,6 +1090,35 @@ def _learned_candidate_kinds(
         + ("constraint",) * constraint_count
         + ("topology",) * topology_count
     )
+
+
+def _ranker_candidate_kinds(
+    snapshot: dict[str, object],
+    *,
+    residual_count: int,
+    constraint_count: int,
+    topology_count: int,
+    initial_start: int,
+) -> tuple[str, ...]:
+    kinds = list(
+        _learned_candidate_kinds(
+            residual_count=residual_count,
+            constraint_count=constraint_count,
+            topology_count=topology_count,
+        )
+    )
+    for candidate_type in ("treemap", "btree"):
+        records = snapshot.get(f"{candidate_type}_seed_provenance", ())
+        if not isinstance(records, tuple):
+            continue
+        for record in records:
+            if not isinstance(record, dict) or record.get("stage") != "initial":
+                continue
+            index = _candidate_index(str(record.get("source", "")))
+            relative = -1 if index is None else index - initial_start
+            if 0 <= relative < len(kinds):
+                kinds[relative] = candidate_type
+    return tuple(kinds)
 
 
 def _merge_energy_history(first: Tensor, second: Tensor) -> Tensor:
@@ -1298,6 +1377,94 @@ def _treemap_proxy_score(
     target_area = max(case.scale * case.scale, torch.finfo(torch.float64).eps)
     area_excess = max(0.0, area / target_area - 1.0)
     return math.log1p(0.5 * area_excess) + 2.0 * soft
+
+
+def _candidate_funnel_proxy_guard(
+    source: Any,
+    case: FloorplanCase,
+    analysis: LearnedAnalysis,
+    current: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Try provenance candidates after repair using a relative soft/area/HPWL proxy."""
+
+    snapshot = getattr(analysis.analytic, "incumbent_snapshot", {})
+    candidates: list[tuple[int, str, Tensor]] = []
+    raw = analysis.analytic.raw_candidates
+    projected = analysis.analytic.projected_candidates
+    for name, boxes in (
+        ("constraint_seed_provenance", projected),
+        ("treemap_seed_provenance", raw),
+        ("btree_seed_provenance", raw),
+    ):
+        records = snapshot.get(name, ())
+        for record in records if isinstance(records, (tuple, list)) else ():
+            if not isinstance(record, dict) or record.get("stage") != "initial":
+                continue
+            index = _candidate_index(record.get("source"))
+            if index is not None and 0 <= index < boxes.shape[0]:
+                candidates.append((index, str(record.get("source")), boxes[index]))
+    if not candidates:
+        return current
+    try:
+        current_metrics = _raw_quality(source, case, current)
+    except (TypeError, ValueError):
+        return current
+    admitted = []
+    audit_records = []
+    for index, candidate_source, candidate in candidates:
+        placement = to_official_placements(
+            source,
+            case,
+            candidate.detach().to(device="cpu", dtype=torch.float32),
+        )
+        placement = _repair_constraint_candidate(
+            source,
+            case,
+            placement,
+            snapshot,
+            candidate_source,
+        )
+        placement = _post_tail_group_repair(source, case, placement)
+        if not verify_feasible(source, placement):
+            continue
+        try:
+            metrics = _raw_quality(source, case, placement)
+        except (TypeError, ValueError):
+            continue
+        delta = _relative_candidate_proxy_delta(metrics, current_metrics)
+        audit_records.append(
+            {
+                "source": candidate_source,
+                "candidate_index": index,
+                "proxy_delta": delta,
+                "soft": metrics[0],
+                "bbox_area": metrics[1],
+                "hpwl": metrics[2],
+            }
+        )
+        if delta < -1.0e-6:
+            admitted.append((delta, metrics[0], metrics[1], metrics[2], index, placement))
+    snapshot["candidate_funnel_proxy_records"] = tuple(audit_records)
+    if not admitted:
+        snapshot["candidate_funnel_proxy_source"] = None
+        return current
+    winner = min(admitted, key=lambda item: item[:5])
+    snapshot["candidate_funnel_proxy_source"] = f"candidate_{winner[4]}"
+    return winner[5]
+
+
+def _relative_candidate_proxy_delta(
+    candidate: tuple[float, float, float],
+    incumbent: tuple[float, float, float],
+) -> float:
+    soft, area, hpwl = candidate
+    incumbent_soft, incumbent_area, incumbent_hpwl = incumbent
+    eps = torch.finfo(torch.float64).eps
+    return (
+        2.0 * (soft - incumbent_soft)
+        + 0.5 * math.log(max(area, eps) / max(incumbent_area, eps))
+        + 0.5 * math.log(max(hpwl, eps) / max(incumbent_hpwl, eps))
+    )
 
 
 def _raw_constraint_pareto_guard(
@@ -1976,6 +2143,51 @@ def _learned_population(
                     f"{type(exc).__name__}: {exc}"
                 )
     if provenance is not None:
+        provenance.setdefault("btree_seed_attempted", config.btree_seeds > 0)
+        provenance.setdefault("btree_seed_accepted", False)
+        provenance.setdefault("btree_seed_count", 0)
+    if config.btree_seeds:
+        try:
+            btrees, records = _btree_seed_candidates(
+                case,
+                output,
+                topology_sources,
+                count=config.btree_seeds,
+            )
+            if btrees.numel():
+                treemap_count = int(
+                    provenance.get("treemap_seed_count", 0)
+                    if provenance is not None
+                    else 0
+                )
+                start = residual_slots + treemap_count
+                learned_boxes = torch.cat(
+                    (learned_boxes[:start], btrees, learned_boxes[start:]),
+                    dim=0,
+                )
+                if provenance is not None:
+                    provenance.update(
+                        {
+                            "btree_seed_accepted": True,
+                            "btree_seed_count": int(btrees.shape[0]),
+                            "btree_seed_records": tuple(
+                                {
+                                    **record,
+                                    "residual_index": start + index,
+                                    "candidate_sha256": _tensor_sha256(candidate),
+                                }
+                                for index, (record, candidate) in enumerate(
+                                    zip(records, btrees, strict=True)
+                                )
+                            ),
+                        }
+                    )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            if provenance is not None:
+                provenance["btree_seed_failure_reason"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+    if provenance is not None:
         topology_count = int(topology.shape[0])
         provenance.update(
             {
@@ -1990,6 +2202,82 @@ def _learned_population(
         if failure_reason is not None:
             provenance["topology_seed_failure_reason"] = failure_reason
     return learned_boxes
+
+
+def _btree_seed_candidates(
+    case: FloorplanCase,
+    output: Any,
+    source_boxes: Tensor,
+    *,
+    count: int,
+) -> tuple[Tensor, tuple[dict[str, object], ...]]:
+    if count <= 0:
+        return source_boxes.new_empty((0, case.n, 4)), ()
+    if output.btree_root_logits is None or output.btree_edge_logits is None:
+        raise ValueError("checkpoint does not expose B*-Tree logits")
+    tree = decode_btree_logits(output.btree_root_logits, output.btree_edge_logits)
+    sources = source_boxes.detach().to(device="cpu", dtype=torch.float32)
+    hypotheses = (
+        tuple(infer_outline_hypotheses(case))
+        if infer_outline_hypotheses is not None
+        else ()
+    )
+    origins = (
+        tuple((outline.x_left, outline.y_bottom, outline.hypothesis_id) for outline in hypotheses)
+        or ((0.0, 0.0, "origin"),)
+    )
+    pool: list[tuple[tuple[float, ...], Tensor, dict[str, object]]] = []
+    for source_index, source in enumerate(sources[: max(1, count)]):
+        dims = source[:, 2:4]
+        base_order = torch.argsort(centers_from_xywh(source)[:, 1], stable=True)
+        orders = contact_aware_vertical_orders(
+            base_order,
+            case.boundary_bits,
+            case.group_membership,
+        )[:2]
+        for order_name, order in orders:
+            for x0, y0, outline_id in origins:
+                candidate = tree.pack_x_compacted(
+                    dims,
+                    order,
+                    case.preplaced_mask,
+                    case.target,
+                    origin=(x0, y0),
+                ).float()
+                hard = verify_feasible(case, candidate)
+                soft = soft_violation_normalized(case, candidate).raw_total
+                quality = bbox_area(candidate) + 0.05 * total_hpwl(case, candidate)
+                pool.append(
+                    (
+                        (not hard, soft, quality, source_index, outline_id, order_name),
+                        candidate,
+                        {
+                            "source_type": "btree",
+                            "shape_source_index": source_index,
+                            "outline_hypothesis": outline_id,
+                            "vertical_order_source": order_name,
+                            "predicted_root": tree.root,
+                        },
+                    )
+                )
+    selected = []
+    seen: set[str] = set()
+    for item in sorted(pool, key=lambda item: item[0]):
+        digest = _tensor_sha256(item[1])
+        if digest in seen:
+            continue
+        seen.add(digest)
+        selected.append(item)
+        if len(selected) == count:
+            break
+    if not selected:
+        raise ValueError("B*-Tree candidate generation produced no candidates")
+    return (
+        torch.stack([item[1] for item in selected]).to(
+            device=source_boxes.device, dtype=source_boxes.dtype
+        ),
+        tuple(item[2] for item in selected),
+    )
 
 
 def _needs_legacy_mib_challenger(case: FloorplanCase) -> bool:

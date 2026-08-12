@@ -37,6 +37,7 @@ class ModelConfig:
     ranker_use_scene_embedding: bool = True
     compute_dtype: str = "float32"
     topology_enabled: bool = False
+    btree_enabled: bool = False
     constraint_enabled: bool = False
     collective_enabled: bool = False
     collective_message_dim: int = 128
@@ -58,6 +59,8 @@ class ModelConfig:
             raise ValueError("compute_dtype must be float32 or bfloat16")
         if type(self.ranker_use_scene_embedding) is not bool:
             raise ValueError("ranker_use_scene_embedding must be boolean")
+        if type(self.btree_enabled) is not bool:
+            raise ValueError("btree_enabled must be boolean")
         if not isinstance(self.ranker_feature_version, str) or not self.ranker_feature_version:
             raise ValueError("ranker_feature_version must be a non-empty string")
         if self.collective_message_dim <= 0 or self.collective_passes <= 0:
@@ -97,6 +100,8 @@ class ModelOutput:
     contact_logits: Tensor | None = None
     boundary_order_scores: Tensor | None = None
     mib_log_aspect: Tensor | None = None
+    btree_root_logits: Tensor | None = None
+    btree_edge_logits: Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -512,6 +517,29 @@ class ConstraintHeads(nn.Module):
         return contact, boundary, mib
 
 
+class BTreeHeads(nn.Module):
+    """Root and joint parent/branch scores for a hard B*-Tree decoder."""
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.child = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        self.parent = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+        self.root = nn.Linear(config.hidden_dim, 1)
+        self.edge = nn.Linear(config.hidden_dim, 2)
+
+    def forward(self, embedding: Tensor) -> tuple[Tensor, Tensor]:
+        pair = torch.tanh(
+            self.child(embedding)[:, None, :]
+            + self.parent(embedding)[None, :, :]
+        )
+        edge = self.edge(pair).float()
+        diagonal = torch.eye(
+            embedding.shape[0], dtype=torch.bool, device=embedding.device
+        )
+        edge[diagonal] = torch.finfo(edge.dtype).min
+        return self.root(embedding).squeeze(-1).float(), edge
+
+
 class HCFPModel(nn.Module):
     def __init__(self, config: ModelConfig | None = None):
         super().__init__()
@@ -524,6 +552,8 @@ class HCFPModel(nn.Module):
         self.ranker = RepairAwareRanker(self.config)
         if self.config.topology_enabled:
             self.topology = DualPermutationHead(self.config.hidden_dim)
+        if self.config.btree_enabled:
+            self.btree = BTreeHeads(self.config)
         if self.config.constraint_enabled:
             self.constraints = ConstraintHeads(self.config)
         if self.config.collective_enabled:
@@ -548,6 +578,10 @@ class HCFPModel(nn.Module):
             negative: Tensor | None = None
             if self.config.topology_enabled:
                 positive, negative = self.topology(embedding, case.block_mask)
+            btree_root: Tensor | None = None
+            btree_edge: Tensor | None = None
+            if self.config.btree_enabled:
+                btree_root, btree_edge = self.btree(embedding)
             contact_logits: Tensor | None = None
             boundary_scores: Tensor | None = None
             mib_log_aspect: Tensor | None = None
@@ -571,4 +605,6 @@ class HCFPModel(nn.Module):
             contact_logits=(contact_logits.float() if contact_logits is not None else None),
             boundary_order_scores=(boundary_scores.float() if boundary_scores is not None else None),
             mib_log_aspect=(mib_log_aspect.float() if mib_log_aspect is not None else None),
+            btree_root_logits=(btree_root.float() if btree_root is not None else None),
+            btree_edge_logits=(btree_edge.float() if btree_edge is not None else None),
         )

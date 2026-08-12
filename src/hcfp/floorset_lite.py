@@ -60,6 +60,7 @@ def sample_from_lite_tensors(
     pins_pos: Tensor,
     fp_sol: Tensor,
     metrics_sol: Tensor | None = None,
+    tree_sol: Tensor | None = None,
 ) -> DataSample:
     sample, _ = sample_with_source_from_lite_tensors(
         sample_id,
@@ -69,6 +70,7 @@ def sample_from_lite_tensors(
         pins_pos,
         fp_sol,
         metrics_sol,
+        tree_sol,
     )
     return sample
 
@@ -81,6 +83,7 @@ def sample_with_source_from_lite_tensors(
     pins_pos: Tensor,
     fp_sol: Tensor,
     metrics_sol: Tensor | None = None,
+    tree_sol: Tensor | None = None,
 ) -> tuple[DataSample, dict[str, Any]]:
     """Return a sample plus its exact official-coordinate runtime source."""
 
@@ -105,6 +108,11 @@ def sample_with_source_from_lite_tensors(
     baseline_area = baseline_hpwl = None
     if metrics_sol is not None:
         baseline_area, baseline_hpwl = _metrics_baselines(metrics_sol)
+    tree_edges = (
+        torch.as_tensor(tree_sol, dtype=torch.long)[: block_count - 1].clone()
+        if tree_sol is not None
+        else None
+    )
     sample = DataSample(
         sample_id,
         case,
@@ -114,6 +122,7 @@ def sample_with_source_from_lite_tensors(
             baseline_area=baseline_area,
             baseline_hpwl=baseline_hpwl,
         ),
+        tree_edges,
     )
     source = {
         "normalized": False,
@@ -131,6 +140,8 @@ def sample_with_source_from_lite_tensors(
         "mib_membership": case.mib_membership,
         "raw_preplaced_validated": True,
     }
+    if tree_edges is not None:
+        source["tree_sol_edges"] = tree_edges
     return sample, source
 
 
@@ -254,7 +265,8 @@ def _iter_floorset_lite_with_source(
                 payload[2][layout_index],
                 payload[3][layout_index],
                 payload[5][layout_index],
-                payload[6][layout_index] if len(payload) > 6 else None,
+                metrics_sol=payload[6][layout_index] if len(payload) > 6 else None,
+                tree_sol=payload[4][layout_index],
             )
             yielded += 1
             if limit is not None and yielded >= limit:

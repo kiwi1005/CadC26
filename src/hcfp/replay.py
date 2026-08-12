@@ -46,6 +46,8 @@ _VALID_CANDIDATE_KINDS = {
     "reconfigured",
     "projected",
     "learned",
+    "treemap",
+    "btree",
 }
 _VALID_CANDIDATE_SOURCE_TYPES = {
     "safe",
@@ -58,6 +60,8 @@ _VALID_CANDIDATE_SOURCE_TYPES = {
     "projected",
     "learned",
     "post_repair",
+    "treemap",
+    "btree",
 }
 _VALID_FEASIBILITY_TIERS = {0, 1, 2}
 _HEX = set("0123456789abcdef")
@@ -1229,6 +1233,35 @@ def _validated_stage_catalog(
             catalog[key] = raw
         if tuple(record_sources) != sources:
             raise ValueError(f"malformed {prefix} provenance sources")
+    for prefix, candidate_type in (
+        ("treemap_seed", "treemap"),
+        ("btree_seed", "btree"),
+    ):
+        sources_raw = snapshot.get(f"{prefix}_sources", ())
+        records_raw = snapshot.get(f"{prefix}_provenance", ())
+        if not isinstance(sources_raw, (tuple, list)) or not isinstance(records_raw, (tuple, list)):
+            raise ValueError(f"malformed {prefix} provenance")
+        sources = tuple(str(value) for value in sources_raw)
+        if len(records_raw) != len(sources):
+            raise ValueError(f"malformed {prefix} provenance length")
+        for source, raw in zip(sources, records_raw, strict=True):
+            if not isinstance(raw, dict):
+                raise ValueError(f"malformed {prefix} provenance record")
+            index = _candidate_index(source)
+            stage = str(raw.get("stage", ""))
+            if (
+                str(raw.get("source", "")) != source
+                or index is None
+                or not 0 <= index < int(raw_candidates.shape[0])
+                or stage not in {"initial", "post_relax"}
+                or raw.get("candidate_type") != candidate_type
+                or raw.get("candidate_sha256") != _lineage_tensor_sha256(raw_candidates[index])
+            ):
+                raise ValueError(f"malformed {prefix} provenance record")
+            key = (stage, source)
+            if key in catalog:
+                raise ValueError("duplicate candidate provenance source")
+            catalog[key] = raw
     return catalog
 
 

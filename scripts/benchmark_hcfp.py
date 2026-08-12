@@ -44,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--topology-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--constraint-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--treemap-seeds", type=_non_negative_int, default=0)
+    parser.add_argument("--btree-seeds", type=_non_negative_int, default=0)
     parser.add_argument("--ranker-selection-experiment", action="store_true")
     parser.add_argument("--tail-topk", type=int)
     parser.add_argument(
@@ -83,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
             args.topology_seeds,
             args.constraint_seeds,
             args.treemap_seeds,
+            args.btree_seeds,
             args.ranker_selection_experiment,
         )
         mode = "optimizer"
@@ -107,6 +109,7 @@ def main(argv: list[str] | None = None) -> int:
                 "topology_seeds": args.topology_seeds,
                 "constraint_seeds": args.constraint_seeds,
                 "treemap_seeds": args.treemap_seeds,
+                "btree_seeds": args.btree_seeds,
                 "tail_topk": args.tail_topk,
                 "ranker_selection_experiment": args.ranker_selection_experiment,
             },
@@ -173,6 +176,7 @@ def _run_optimizers(
     topology_seeds: int = 0,
     constraint_seeds: int = 0,
     treemap_seeds: int = 0,
+    btree_seeds: int = 0,
     ranker_selection_experiment: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any], dict[str, Any]]:
     evaluator_module = _load_evaluator(data_path)
@@ -187,6 +191,7 @@ def _run_optimizers(
         _environment("HCFP_TOPOLOGY_SEEDS", str(topology_seeds)),
         _environment("HCFP_CONSTRAINT_SEEDS", str(constraint_seeds)),
         _environment("HCFP_TREEMAP_SEEDS", str(treemap_seeds)),
+        _environment("HCFP_BTREE_SEEDS", str(btree_seeds)),
         _environment(
             "HCFP_RANKER_SELECTION_EXPERIMENT",
             "1" if ranker_selection_experiment else None,
@@ -222,6 +227,7 @@ def _run_optimizers(
                     "topology_seeds": topology_seeds,
                     "constraint_seeds": constraint_seeds,
                     "treemap_seeds": treemap_seeds,
+                    "btree_seeds": btree_seeds,
                     "ranker_selection_experiment": ranker_selection_experiment,
                 }
             else:
@@ -233,6 +239,7 @@ def _run_optimizers(
                     "topology_seeds": topology_seeds,
                     "constraint_seeds": constraint_seeds,
                     "treemap_seeds": treemap_seeds,
+                    "btree_seeds": btree_seeds,
                     "ranker_selection_experiment": False,
                 }
             with (
