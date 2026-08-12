@@ -162,6 +162,9 @@ remaining median-runtime gate are recorded in
 The training-only activation replay, shadow policy result, held-out failure,
 and explicit no-promotion decision are recorded in
 [`docs/research/hcfp5090_activation_shadow_results_2026-08-02.md`](docs/research/hcfp5090_activation_shadow_results_2026-08-02.md).
+The current large-case QoR-first checkpoint, exact 15-case result, runtime
+policy, and per-case analytic/learned PNG comparisons are recorded in
+[`docs/research/hcfp5090_qor_first_large_structure_2026-08-12.md`](docs/research/hcfp5090_qor_first_large_structure_2026-08-12.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,

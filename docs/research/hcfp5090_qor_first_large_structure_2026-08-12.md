@@ -66,6 +66,33 @@ Results:
 The seven uncapped learned cases were 85, 87, 91, 92, 95, 96, and 99.
 Case 96 reached the best observed cost in this batch at `5.511786`.
 
+## Per-case placement visualizations
+
+Each PNG compares the analytic placement (left) with the selected learned
+structured placement (right). The title line records the exact official cost;
+the metric line records HPWL gap, area gap, and relative soft violations.
+
+| Cases | Comparisons |
+| --- | --- |
+| 85 / 86 | [case 85](../assets/hcfp5090-qor-large15/case_85_comparison.png) · [case 86](../assets/hcfp5090-qor-large15/case_86_comparison.png) |
+| 87 / 88 | [case 87](../assets/hcfp5090-qor-large15/case_87_comparison.png) · [case 88](../assets/hcfp5090-qor-large15/case_88_comparison.png) |
+| 89 / 90 | [case 89](../assets/hcfp5090-qor-large15/case_89_comparison.png) · [case 90](../assets/hcfp5090-qor-large15/case_90_comparison.png) |
+| 91 / 92 | [case 91](../assets/hcfp5090-qor-large15/case_91_comparison.png) · [case 92](../assets/hcfp5090-qor-large15/case_92_comparison.png) |
+| 93 / 94 | [case 93](../assets/hcfp5090-qor-large15/case_93_comparison.png) · [case 94](../assets/hcfp5090-qor-large15/case_94_comparison.png) |
+| 95 / 96 | [case 95](../assets/hcfp5090-qor-large15/case_95_comparison.png) · [case 96](../assets/hcfp5090-qor-large15/case_96_comparison.png) |
+| 97 / 98 | [case 97](../assets/hcfp5090-qor-large15/case_97_comparison.png) · [case 98](../assets/hcfp5090-qor-large15/case_98_comparison.png) |
+| 99 | [case 99](../assets/hcfp5090-qor-large15/case_99_comparison.png) |
+
+Representative cap-cross result (case 96):
+
+![Case 96 analytic versus learned structured placement](../assets/hcfp5090-qor-large15/case_96_comparison.png)
+
+The pictures show the current learned tendency clearly: topology seeds pack
+movable blocks into a dense cluster while fixed/preplaced anchors and pins can
+stretch the global bounding box. Constraint construction substantially lowers
+soft violations, but bbox compaction around distant anchors remains the next
+geometry bottleneck.
+
 ## Ablation result
 
 With topology seeds but no constraint seeds, the same checkpoint remained
