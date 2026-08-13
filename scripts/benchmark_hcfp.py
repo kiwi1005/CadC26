@@ -75,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
         metavar="LANE=PATH",
         help="hash-verified checkpoint for a learned optimizer lane",
     )
+    parser.add_argument(
+        "--btree-specialist-checkpoint",
+        action="append",
+        metavar="LANE=PATH",
+        help="optional pressure-routed B*-Tree challenger checkpoint",
+    )
     parser.add_argument("--output", required=True)
     parser.add_argument("--visualize-dir")
     parser.add_argument("--visualize-cases", default="")
@@ -87,12 +93,21 @@ def main(argv: list[str] | None = None) -> int:
 
     specs = _assignments(args.optimizer or args.result or [])
     checkpoints = _assignments(args.checkpoint or [])
+    specialist_checkpoints = _assignments(args.btree_specialist_checkpoint or [])
     if checkpoints and not args.optimizer:
         raise ValueError("--checkpoint requires --optimizer mode")
+    if specialist_checkpoints and not args.optimizer:
+        raise ValueError("--btree-specialist-checkpoint requires --optimizer mode")
     unknown_checkpoint_lanes = checkpoints.keys() - specs.keys()
     if unknown_checkpoint_lanes:
         raise ValueError(
             f"checkpoint lanes are missing optimizers: {sorted(unknown_checkpoint_lanes)}"
+        )
+    unknown_specialist_lanes = specialist_checkpoints.keys() - specs.keys()
+    if unknown_specialist_lanes:
+        raise ValueError(
+            "specialist checkpoint lanes are missing optimizers: "
+            f"{sorted(unknown_specialist_lanes)}"
         )
     if args.optimizer:
         lanes, case_metadata, lane_metadata = _run_optimizers(
@@ -101,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             _case_ids(args.cases),
             args.device,
             checkpoints,
+            specialist_checkpoints,
             args.flow_steps,
             args.collective_steps,
             args.flow_seed,
@@ -162,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
                 "baseline_selection_margin": args.baseline_selection_margin,
                 "tail_topk": args.tail_topk,
                 "ranker_selection_experiment": args.ranker_selection_experiment,
+                "btree_specialist_lanes": sorted(specialist_checkpoints),
             },
         ),
         case_metadata=case_metadata,
@@ -233,6 +250,7 @@ def _run_optimizers(
     test_ids: list[int] | None,
     device: str,
     checkpoints: dict[str, Path],
+    specialist_checkpoints: dict[str, Path],
     flow_steps: int,
     collective_steps: int,
     flow_seed: int,
@@ -302,6 +320,7 @@ def _run_optimizers(
     ):
         for name, path in specs.items():
             checkpoint = checkpoints.get(name)
+            specialist_checkpoint = specialist_checkpoints.get(name)
             lane_collective_steps = 0
             if checkpoint is not None:
                 model, checkpoint_metadata = load_checkpoint(
@@ -385,12 +404,37 @@ def _run_optimizers(
                     "baseline_selection_margin": baseline_selection_margin,
                     "ranker_selection_experiment": False,
                 }
-            with (
-                _environment(
-                    "HCFP_CHECKPOINT",
-                    str(checkpoint) if checkpoint is not None else None,
-                ),
-                _environment("HCFP_COLLECTIVE_STEPS", str(lane_collective_steps)),
+            if specialist_checkpoint is not None:
+                _, specialist_metadata = load_checkpoint(
+                    specialist_checkpoint,
+                    expected_normalization=RUNTIME_NORMALIZATION,
+                    map_location="cpu",
+                )
+                lane_metadata[name].update(
+                    {
+                        "btree_specialist_checkpoint": str(specialist_checkpoint),
+                        "btree_specialist_checkpoint_hash": specialist_metadata[
+                            "state_hash"
+                        ],
+                        "btree_specialist_router": {
+                            "violations_relative_min": 0.60,
+                            "utilization_max_exclusive": 0.50,
+                            "admission": "exact_soft_area_hpwl_dominance",
+                        },
+                    }
+                )
+            with _environment_group(
+                {
+                    "HCFP_CHECKPOINT": (
+                        str(checkpoint) if checkpoint is not None else None
+                    ),
+                    "HCFP_COLLECTIVE_STEPS": str(lane_collective_steps),
+                    "HCFP_BTREE_SPECIALIST_CHECKPOINT": (
+                        str(specialist_checkpoint)
+                        if specialist_checkpoint is not None
+                        else None
+                    ),
+                }
             ):
                 evaluator = evaluator_module.ContestEvaluator(
                     str(data_path), verbose=False

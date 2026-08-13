@@ -21,6 +21,8 @@ from hcfp.learned import (
     LearnedConfig,
     _attach_ranker_shadow_snapshot,
     _btree_seed_candidates,
+    _btree_specialist_candidates,
+    _btree_specialist_pressure,
     _dual_axis_seed_budget,
     _learned_population,
     _merge_energy_history,
@@ -229,6 +231,57 @@ def test_dual_axis_router_uses_sparse_geometry_and_skips_dense_square() -> None:
         )
         == 4
     )
+
+
+def test_btree_specialist_pressure_routes_fragmented_incumbent() -> None:
+    case = from_official(
+        4,
+        [4.0, 4.0, 4.0, 4.0],
+        [],
+        [],
+        [],
+        [[0, 0, -1, -1, 0]] * 4,
+        [[-1.0] * 4] * 4,
+    )
+    dense = torch.tensor(
+        [
+            [0.0, 0.0, 2.0, 2.0],
+            [2.0, 0.0, 2.0, 2.0],
+            [0.0, 2.0, 2.0, 2.0],
+            [2.0, 2.0, 2.0, 2.0],
+        ]
+    )
+    sparse = dense.clone()
+    sparse[3, 0] = 20.0
+
+    assert _btree_specialist_pressure(case, dense)[0] is False
+    assert _btree_specialist_pressure(case, sparse)[0] is True
+
+
+def test_btree_specialist_skips_unrelated_population_families(monkeypatch) -> None:
+    import hcfp.learned as learned_module
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("unrelated population family was constructed")
+
+    monkeypatch.setattr(learned_module, "_topology_seed_candidates", unexpected)
+    monkeypatch.setattr(learned_module, "_constraint_seed_candidates", unexpected)
+    monkeypatch.setattr(learned_module, "exact_treemap_candidates", unexpected)
+    case = _case()
+    model = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, btree_enabled=True))
+    config = LearnedConfig(
+        analytic=_config(),
+        topology_seeds=2,
+        constraint_seeds=2,
+        treemap_seeds=1,
+        btree_seeds=2,
+        btree_dual_axis=True,
+    )
+
+    candidates = _btree_specialist_candidates(case, model, config)
+
+    assert candidates.shape[0] >= 2
+    assert all(verify_feasible(case, candidate) for candidate in candidates)
 
 
 def test_predicted_baseline_interval_requires_trained_capability() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
+from functools import lru_cache
 import hashlib
 import math
 import os
@@ -529,12 +530,24 @@ def solve(
         result = analysis.result
         if require_checkpoint and not result.used_checkpoint:
             raise RuntimeError(result.failure_reason or "checkpoint was not used")
-        return select_official_from_analysis(
+        placements = select_official_from_analysis(
             source,
             case,
             analysis,
             config=config,
             device=device,
+        )
+        specialist = os.environ.get("HCFP_BTREE_SPECIALIST_CHECKPOINT")
+        return (
+            _btree_specialist_guard(
+                source,
+                case,
+                placements,
+                specialist,
+                config=config,
+            )
+            if specialist
+            else placements
         )
     except Exception:
         if require_checkpoint:
@@ -755,6 +768,114 @@ def _learned_config(config: AnalyticConfig | LearnedConfig | None) -> LearnedCon
 
 def _truthy_env(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _btree_specialist_pressure(
+    case: FloorplanCase,
+    placement: Tensor,
+) -> tuple[bool, float, float]:
+    """Route only visibly soft-heavy or spatially fragmented incumbents."""
+
+    boxes = placement.detach().to(device="cpu", dtype=torch.float64)
+    soft = soft_violation_normalized(
+        {
+            "normalized": False,
+            "boundary_bits": case.boundary_bits.detach().to(device="cpu"),
+            "group_membership": case.group_membership.detach().to(device="cpu"),
+            "mib_membership": case.mib_membership.detach().to(device="cpu"),
+        },
+        boxes,
+    ).total
+    occupied = float((boxes[:, 2] * boxes[:, 3]).sum())
+    utilization = occupied / max(
+        bbox_area(boxes), torch.finfo(torch.float64).eps
+    )
+    return soft >= 0.60 or utilization < 0.50, soft, utilization
+
+
+@lru_cache(maxsize=2)
+def _load_btree_specialist(checkpoint: str) -> tuple[Any, dict[str, Any]]:
+    return load_checkpoint(
+        checkpoint,
+        expected_normalization=RUNTIME_NORMALIZATION,
+        map_location="cpu",
+    )
+
+
+def _btree_specialist_candidates(
+    case: FloorplanCase,
+    model: Any,
+    config: LearnedConfig,
+) -> Tensor:
+    """Forward once and decode only the specialist B*-Tree head."""
+
+    population = config.analytic.dynamics.population
+    fallback = safe_shelf(case).to(device=case.area.device, dtype=torch.float32)
+    base = initialize_population(case, config.analytic.dynamics, fallback)
+    anchor_center, anchor_aspect = initializer_anchor(
+        case,
+        base.center,
+        base.log_aspect,
+        absolute=model.config.initializer_absolute,
+    )
+    with torch.inference_mode():
+        output = model(case, population=population)
+    source_boxes = xywh_from_state(
+        case,
+        anchor_center + output.center_residual,
+        (anchor_aspect + output.log_aspect_residual).clamp(-4.0, 4.0),
+    )
+    candidates, _ = _btree_seed_candidates(
+        case,
+        output,
+        source_boxes,
+        count=config.btree_seeds,
+        dual_axis=config.btree_dual_axis,
+        shape_variants=config.btree_shape_variants,
+        local_moves=config.btree_local_moves,
+        beam_width=config.btree_beam,
+        connectivity_weight=config.btree_connectivity_weight,
+        route_dual_axis=config.family_router,
+        baseline_trained=False,
+    )
+    return candidates
+
+
+def _btree_specialist_guard(
+    source: Any,
+    case: FloorplanCase,
+    current: list[tuple[float, float, float, float]],
+    checkpoint: str | Path,
+    *,
+    config: AnalyticConfig | LearnedConfig | None,
+) -> list[tuple[float, float, float, float]]:
+    """Admit raw specialist trees only when they exactly dominate P8."""
+
+    try:
+        routed, _, _ = _btree_specialist_pressure(
+            case,
+            torch.as_tensor(current, dtype=torch.float64),
+        )
+        if not routed:
+            return current
+        model, _ = _load_btree_specialist(str(Path(checkpoint).resolve()))
+        model = model.to(device=case.area.device).eval()
+        learned_cfg = _learned_config(config)
+        population = _btree_specialist_candidates(case, model, learned_cfg)
+        incumbent = _raw_quality(source, case, current)
+        admitted = []
+        for index, candidate in enumerate(population):
+            placement = to_official_placements(source, case, candidate)
+            if not verify_feasible(source, placement):
+                continue
+            metrics = _raw_quality(source, case, placement)
+            if _dominates(metrics, incumbent):
+                admitted.append(
+                    (metrics[0], metrics[1] + 0.05 * metrics[2], index, placement)
+                )
+        return min(admitted, key=lambda item: item[:3])[3] if admitted else current
+    except Exception:  # Specialist failure must leave the guarded P8 result intact.
+        return current
 
 
 def _merge_tail_analyses(
