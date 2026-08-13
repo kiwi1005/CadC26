@@ -11,6 +11,7 @@ import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from hcfp.case import FloorplanCase
 from hcfp.collective import PAIR_FEATURES
@@ -25,6 +26,9 @@ _NODE_FEATURES = 22
 class ModelConfig:
     hidden_dim: int = 128
     encoder_layers: int = 3
+    encoder_kind: str = "message"
+    attention_heads: int = 8
+    transformer_ffn_multiplier: int = 4
     population_embed_dim: int = 8
     residual_bound: float = 0.10
     aspect_residual_bound: float = 0.25
@@ -50,6 +54,15 @@ class ModelConfig:
     def __post_init__(self) -> None:
         if self.hidden_dim <= 0 or self.encoder_layers <= 0:
             raise ValueError("hidden_dim and encoder_layers must be positive")
+        if self.encoder_kind not in {"message", "graph_transformer"}:
+            raise ValueError("encoder_kind must be message or graph_transformer")
+        if self.attention_heads <= 0 or self.transformer_ffn_multiplier <= 0:
+            raise ValueError("transformer dimensions must be positive")
+        if (
+            self.encoder_kind == "graph_transformer"
+            and self.hidden_dim % self.attention_heads
+        ):
+            raise ValueError("hidden_dim must be divisible by attention_heads")
         if (
             self.population_embed_dim <= 0
             or self.force_channels <= 0
@@ -170,6 +183,45 @@ def _mlp(width: int, layers: int) -> nn.Sequential:
     return nn.Sequential(*blocks)
 
 
+_STATIC_PAIR_FEATURES = 8
+
+
+class PairBiasedTransformerBlock(nn.Module):
+    """Dense block attention with typed FloorSet pair bias."""
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        width = config.hidden_dim
+        self.heads = config.attention_heads
+        self.head_dim = width // self.heads
+        self.norm1 = nn.LayerNorm(width)
+        self.qkv = nn.Linear(width, 3 * width, bias=False)
+        self.pair_bias = nn.Linear(_STATIC_PAIR_FEATURES, self.heads, bias=False)
+        self.projection = nn.Linear(width, width, bias=False)
+        self.norm2 = nn.LayerNorm(width)
+        expanded = width * config.transformer_ffn_multiplier
+        self.ffn = nn.Sequential(
+            nn.Linear(width, expanded),
+            nn.SiLU(),
+            nn.Linear(expanded, width),
+        )
+
+    def forward(self, hidden: Tensor, pair_features: Tensor) -> Tensor:
+        n, width = hidden.shape
+        qkv = self.qkv(self.norm1(hidden)).reshape(n, 3, self.heads, self.head_dim)
+        query, key, value = qkv.unbind(dim=1)
+        query = query.permute(1, 0, 2).unsqueeze(0)
+        key = key.permute(1, 0, 2).unsqueeze(0)
+        value = value.permute(1, 0, 2).unsqueeze(0)
+        bias = self.pair_bias(pair_features).permute(2, 0, 1).unsqueeze(0)
+        attended = F.scaled_dot_product_attention(
+            query, key, value, attn_mask=bias, dropout_p=0.0
+        )
+        attended = attended.squeeze(0).permute(1, 0, 2).reshape(n, width)
+        hidden = hidden + self.projection(attended)
+        return hidden + self.ffn(self.norm2(hidden))
+
+
 class SceneEncoder(nn.Module):
     """Dense static encoder over one normalized FloorplanCase."""
 
@@ -177,19 +229,30 @@ class SceneEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.input = nn.Linear(_NODE_FEATURES, config.hidden_dim)
-        self.message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
-        if config.topology_enabled:
-            self.group_message = nn.Linear(
-                config.hidden_dim, config.hidden_dim, bias=False
+        if config.encoder_kind == "graph_transformer":
+            self.transformer = nn.ModuleList(
+                PairBiasedTransformerBlock(config) for _ in range(config.encoder_layers)
             )
-            self.mib_message = nn.Linear(
-                config.hidden_dim, config.hidden_dim, bias=False
-            )
-        self.layers = _mlp(config.hidden_dim, config.encoder_layers)
+            self.output_norm = nn.LayerNorm(config.hidden_dim)
+        else:
+            self.message = nn.Linear(config.hidden_dim, config.hidden_dim, bias=False)
+            if config.topology_enabled:
+                self.group_message = nn.Linear(
+                    config.hidden_dim, config.hidden_dim, bias=False
+                )
+                self.mib_message = nn.Linear(
+                    config.hidden_dim, config.hidden_dim, bias=False
+                )
+            self.layers = _mlp(config.hidden_dim, config.encoder_layers)
 
     def forward(self, case: FloorplanCase) -> Tensor:
         features = self._features(case)
         hidden = self.input(features)
+        if self.config.encoder_kind == "graph_transformer":
+            pair_features = self._pair_features(case, hidden.dtype)
+            for layer in self.transformer:
+                hidden = layer(hidden, pair_features)
+            return self.output_norm(hidden).float()
         weights = case.b2b_weight.to(device=hidden.device, dtype=hidden.dtype)
         weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(1.0)
         if self.config.topology_enabled:
@@ -213,6 +276,50 @@ class SceneEncoder(nn.Module):
                 hidden = hidden + message
             hidden = layer(hidden)
         return hidden.float()
+
+    @staticmethod
+    def _pair_features(case: FloorplanCase, dtype: torch.dtype) -> Tensor:
+        device = case.area.device
+        weights = torch.log1p(case.b2b_weight.to(device=device, dtype=dtype))
+        weights = weights / weights.amax().clamp_min(1.0)
+
+        def same_membership(membership: Tensor) -> Tensor:
+            if not membership.numel():
+                return torch.zeros((case.n, case.n), dtype=dtype, device=device)
+            active = membership.to(device=device, dtype=dtype)
+            return (active.transpose(0, 1) @ active > 0).to(dtype=dtype)
+
+        group = same_membership(case.group_membership)
+        mib = same_membership(case.mib_membership)
+        fixed = case.fixed_mask.to(device=device, dtype=dtype)
+        preplaced = case.preplaced_mask.to(device=device, dtype=dtype)
+        same_boundary = (
+            case.boundary_bits.to(device=device, dtype=dtype)
+            @ case.boundary_bits.to(device=device, dtype=dtype).transpose(0, 1)
+            > 0
+        ).to(dtype=dtype)
+        target = case.target[:, :2].to(device=device, dtype=dtype)
+        target_valid = case.target_valid_mask.to(device=device)
+        target_distance = torch.cdist(target, target, p=1)
+        valid_pair = target_valid[:, None] & target_valid[None, :]
+        target_distance = torch.where(
+            valid_pair, target_distance, torch.zeros_like(target_distance)
+        )
+        target_distance = target_distance / target_distance.amax().clamp_min(1.0)
+        pair = torch.stack(
+            (
+                weights,
+                group,
+                mib,
+                fixed[:, None].expand(-1, case.n),
+                fixed[None, :].expand(case.n, -1),
+                preplaced[:, None].expand(-1, case.n),
+                preplaced[None, :].expand(case.n, -1),
+                same_boundary - target_distance,
+            ),
+            dim=-1,
+        )
+        return pair
 
     @staticmethod
     def _features(case: FloorplanCase) -> Tensor:

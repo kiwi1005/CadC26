@@ -49,6 +49,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--encoder-layers", type=int, default=3)
     parser.add_argument(
+        "--encoder-kind",
+        choices=("message", "graph_transformer"),
+        help="static scene encoder; defaults to the checkpoint kind or message",
+    )
+    parser.add_argument("--attention-heads", type=int)
+    parser.add_argument("--transformer-ffn-multiplier", type=int)
+    parser.add_argument(
         "--absolute-initializer",
         action="store_true",
         default=None,
@@ -165,6 +172,11 @@ def main(argv: list[str] | None = None) -> int:
         topology_enabled = (
             loaded.config.topology_enabled if args.topology is None else args.topology
         )
+        if (
+            args.encoder_kind is not None
+            and args.encoder_kind != loaded.config.encoder_kind
+        ):
+            raise ValueError("changing encoder kind requires a cold-start training run")
         config = replace(
             loaded.config,
             compute_dtype=compute_dtype,
@@ -202,6 +214,16 @@ def main(argv: list[str] | None = None) -> int:
                 if args.baseline_head is None
                 else args.baseline_head
             ),
+            attention_heads=(
+                loaded.config.attention_heads
+                if args.attention_heads is None
+                else args.attention_heads
+            ),
+            transformer_ffn_multiplier=(
+                loaded.config.transformer_ffn_multiplier
+                if args.transformer_ffn_multiplier is None
+                else args.transformer_ffn_multiplier
+            ),
         )
         model = HCFPModel(config)
         incompatible = model.load_state_dict(loaded.state_dict(), strict=False)
@@ -229,6 +251,9 @@ def main(argv: list[str] | None = None) -> int:
             ModelConfig(
                 hidden_dim=args.hidden_dim,
                 encoder_layers=args.encoder_layers,
+                encoder_kind=args.encoder_kind or "message",
+                attention_heads=args.attention_heads or 8,
+                transformer_ffn_multiplier=args.transformer_ffn_multiplier or 4,
                 residual_bound=(
                     0.10 if args.center_bound is None else args.center_bound
                 ),

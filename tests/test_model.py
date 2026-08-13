@@ -15,7 +15,12 @@ def _case():
         [[0, 0, 2.0], [1, 3, 4.0]],
         [[1.0, 2.0], [8.0, 1.0]],
         [[0, 1, 0, 1, 1], [1, 0, 0, 1, 0], [0, 0, 7, 0, 2], [0, 0, 7, 0, 4]],
-        [[0.0, 0.0, 2.0, 2.0], [4.0, 0.0, 3.0, 3.0], [-1.0, -1.0, -1.0, -1.0], [-1.0, -1.0, -1.0, -1.0]],
+        [
+            [0.0, 0.0, 2.0, 2.0],
+            [4.0, 0.0, 3.0, 3.0],
+            [-1.0, -1.0, -1.0, -1.0],
+            [-1.0, -1.0, -1.0, -1.0],
+        ],
     )
 
 
@@ -33,8 +38,15 @@ def _free_case():
 def test_model_outputs_are_bounded_and_honor_hard_masks() -> None:
     torch.manual_seed(7)
     case = _case()
-    cfg = ModelConfig(hidden_dim=32, residual_bound=0.125, aspect_residual_bound=0.25, force_channels=7)
-    output = HCFPModel(cfg)(case, population=5, candidate_metrics=torch.zeros(5, cfg.candidate_metric_dim))
+    cfg = ModelConfig(
+        hidden_dim=32,
+        residual_bound=0.125,
+        aspect_residual_bound=0.25,
+        force_channels=7,
+    )
+    output = HCFPModel(cfg)(
+        case, population=5, candidate_metrics=torch.zeros(5, cfg.candidate_metric_dim)
+    )
 
     assert output.embedding.shape == (4, 32)
     assert output.precedence_logits.shape == (4, 4, 5)
@@ -47,17 +59,70 @@ def test_model_outputs_are_bounded_and_honor_hard_masks() -> None:
     assert output.center_residual.dtype == torch.float32
     assert output.log_aspect_residual.dtype == torch.float32
     assert float(output.center_residual.detach().abs().amax()) <= cfg.residual_bound
-    assert float(output.log_aspect_residual.detach().abs().amax()) <= cfg.aspect_residual_bound
-    assert torch.equal(output.center_residual[:, case.preplaced_mask], torch.zeros(5, 1, 2))
-    assert torch.equal(output.log_aspect_residual[:, case.fixed_mask | case.preplaced_mask], torch.zeros(5, 2))
-    assert torch.equal(output.flow_velocity[:, case.preplaced_mask, :2], torch.zeros(5, 1, 2))
-    assert torch.equal(output.flow_velocity[:, case.fixed_mask | case.preplaced_mask, 2], torch.zeros(5, 2))
+    assert (
+        float(output.log_aspect_residual.detach().abs().amax())
+        <= cfg.aspect_residual_bound
+    )
+    assert torch.equal(
+        output.center_residual[:, case.preplaced_mask], torch.zeros(5, 1, 2)
+    )
+    assert torch.equal(
+        output.log_aspect_residual[:, case.fixed_mask | case.preplaced_mask],
+        torch.zeros(5, 2),
+    )
+    assert torch.equal(
+        output.flow_velocity[:, case.preplaced_mask, :2], torch.zeros(5, 1, 2)
+    )
+    assert torch.equal(
+        output.flow_velocity[:, case.fixed_mask | case.preplaced_mask, 2],
+        torch.zeros(5, 2),
+    )
     assert torch.all(output.force_gates > 0.0)
     assert 0.45 < float(output.outline[2].detach()) < 0.95
     assert output.contact_logits is None
     assert output.boundary_order_scores is None
     assert output.mib_log_aspect is None
-    assert not any(name.startswith("constraints.") for name in HCFPModel(cfg).state_dict())
+    assert not any(
+        name.startswith("constraints.") for name in HCFPModel(cfg).state_dict()
+    )
+
+
+def test_graph_transformer_encoder_preserves_output_contract() -> None:
+    case = _case()
+    cfg = ModelConfig(
+        hidden_dim=24,
+        encoder_layers=2,
+        encoder_kind="graph_transformer",
+        attention_heads=4,
+        transformer_ffn_multiplier=2,
+        topology_enabled=True,
+        btree_enabled=True,
+        constraint_enabled=True,
+    )
+    model = HCFPModel(cfg)
+    output = model(case, population=2)
+    loss = output.btree_edge_logits.square().mean()
+    loss.backward()
+
+    assert output.embedding.shape == (case.n, cfg.hidden_dim)
+    assert output.precedence_logits.shape == (case.n, case.n, 5)
+    assert output.btree_edge_logits is not None
+    assert output.contact_logits is not None
+    assert model.encoder.transformer[0].qkv.weight.grad is not None
+    assert model.btree.edge.weight.grad is not None
+
+
+def test_graph_transformer_requires_divisible_head_width() -> None:
+    try:
+        ModelConfig(
+            hidden_dim=24,
+            encoder_kind="graph_transformer",
+            attention_heads=5,
+        )
+    except ValueError as error:
+        assert "divisible" in str(error)
+    else:
+        raise AssertionError("invalid Transformer head width was accepted")
 
 
 def test_constraint_heads_are_optional_and_candidate_independent() -> None:
@@ -106,13 +171,18 @@ def test_model_takes_one_optimizer_step() -> None:
     loss.backward()
     optimizer.step()
 
-    assert any(not torch.equal(before[name], value.detach()) for name, value in model.named_parameters())
+    assert any(
+        not torch.equal(before[name], value.detach())
+        for name, value in model.named_parameters()
+    )
 
 
 def test_constraint_heads_receive_gradients_when_enabled() -> None:
     torch.manual_seed(17)
     case = _case()
-    model = HCFPModel(ModelConfig(hidden_dim=24, encoder_layers=1, constraint_enabled=True))
+    model = HCFPModel(
+        ModelConfig(hidden_dim=24, encoder_layers=1, constraint_enabled=True)
+    )
     output = model(case, population=2)
     assert output.contact_logits is not None
     assert output.boundary_order_scores is not None
@@ -136,7 +206,9 @@ def test_constraint_heads_receive_gradients_when_enabled() -> None:
 
 def test_legacy_state_loads_into_constraint_model_with_only_missing_head_keys() -> None:
     legacy = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1))
-    upgraded = HCFPModel(ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True))
+    upgraded = HCFPModel(
+        ModelConfig(hidden_dim=16, encoder_layers=1, constraint_enabled=True)
+    )
 
     incompatible = upgraded.load_state_dict(legacy.state_dict(), strict=False)
 
@@ -191,7 +263,9 @@ def test_collective_head_is_optional_neutral_and_honors_hard_masks() -> None:
     assert output.force_gates.shape == (2, case.n, 7)
     assert torch.equal(output.velocity, torch.zeros_like(output.velocity))
     assert torch.equal(output.force_gates, torch.ones_like(output.force_gates))
-    assert torch.equal(output.velocity[:, case.preplaced_mask, :2], torch.zeros(2, 1, 2))
+    assert torch.equal(
+        output.velocity[:, case.preplaced_mask, :2], torch.zeros(2, 1, 2)
+    )
     assert torch.equal(
         output.velocity[:, case.fixed_mask | case.preplaced_mask, 2],
         torch.zeros(2, 2),
@@ -240,6 +314,9 @@ def test_collective_message_and_gate_parameters_receive_gradients() -> None:
         if name.startswith("collective.")
     }
     assert gradients
-    assert all(gradient is not None and torch.isfinite(gradient).all() for gradient in gradients.values())
+    assert all(
+        gradient is not None and torch.isfinite(gradient).all()
+        for gradient in gradients.values()
+    )
     assert gradients["collective.pair.weight"].abs().sum() > 0.0
     assert gradients["collective.force_gates.3.weight"].abs().sum() > 0.0

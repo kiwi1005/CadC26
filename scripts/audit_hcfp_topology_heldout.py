@@ -78,6 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--population", type=int, default=8)
     parser.add_argument("--topology-seeds", type=int, default=16)
     parser.add_argument(
+        "--allow-missing-topology",
+        action="store_true",
+        help="diagnostic only: retain cases whose topology decode was rejected",
+    )
+    parser.add_argument(
         "--constraint-seeds",
         type=int,
         default=0,
@@ -170,6 +175,7 @@ def main(argv: list[str] | None = None) -> int:
             args.population,
             args.topology_seeds,
             args.constraint_seeds,
+            args.allow_missing_topology,
         )
         for index, (sample, _source) in enumerate(heldout)
     ]
@@ -191,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_blocks": args.max_blocks,
             "population": args.population,
             "topology_seeds": args.topology_seeds,
+            "allow_missing_topology": args.allow_missing_topology,
             "constraint_seeds": args.constraint_seeds,
             "device": str(device),
             "sampling": training_sampling,
@@ -614,6 +621,7 @@ def _audit_sample(
     population: int,
     topology_seeds: int,
     constraint_seeds: int,
+    allow_missing_topology: bool = False,
 ) -> dict[str, Any]:
     case = sample.case.to(device=device, dtype=torch.float32)
     analysis = analyze_case_with_checkpoint(case, checkpoint, config)
@@ -623,7 +631,10 @@ def _audit_sample(
         checkpoint_hash,
         topology_seeds,
         constraint_seeds,
+        allow_missing=allow_missing_topology,
     )
+    topology_seeds = int(analysis.result.topology_seed_count)
+    constraint_seeds = int(getattr(analysis.result, "constraint_seed_count", 0))
     learned_count = analysis.result.candidate_count - population
     sources = candidate_source_layout(population, learned_count)
     raw = analysis.analytic.raw_candidates
@@ -729,6 +740,8 @@ def _validate_topology_result(
     checkpoint_hash: str,
     requested_count: int,
     requested_constraint_count: int = 0,
+    *,
+    allow_missing: bool = False,
 ) -> None:
     if (
         not analysis.result.used_checkpoint
@@ -737,7 +750,7 @@ def _validate_topology_result(
         reason = analysis.result.failure_reason or "checkpoint was not used"
         raise RuntimeError(f"sample {sample_id}: {reason}")
     produced = int(analysis.result.topology_seed_count)
-    if produced != requested_count:
+    if produced != requested_count and not allow_missing:
         reason = analysis.analytic.incumbent_snapshot.get(
             "topology_seed_failure_reason",
             "topology decode produced an incomplete candidate set",
@@ -747,7 +760,7 @@ def _validate_topology_result(
             f"produced {produced}: {reason}"
         )
     produced_constraints = int(getattr(analysis.result, "constraint_seed_count", 0))
-    if produced_constraints != requested_constraint_count:
+    if produced_constraints != requested_constraint_count and not allow_missing:
         reason = analysis.analytic.incumbent_snapshot.get(
             "constraint_seed_failure_reason",
             "constraint construction produced an incomplete candidate set",

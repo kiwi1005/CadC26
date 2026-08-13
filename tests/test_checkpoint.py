@@ -12,7 +12,9 @@ from hcfp.checkpoint import SCHEMA_VERSION, load_checkpoint, save_checkpoint
 from hcfp.model import HCFPModel, ModelConfig
 
 
-def test_checkpoint_roundtrip_preserves_config_metadata_and_weights(tmp_path: Path) -> None:
+def test_checkpoint_roundtrip_preserves_config_metadata_and_weights(
+    tmp_path: Path,
+) -> None:
     torch.manual_seed(3)
     model = HCFPModel(ModelConfig(hidden_dim=16))
     path = tmp_path / "model.pt"
@@ -31,8 +33,12 @@ def test_checkpoint_roundtrip_preserves_config_metadata_and_weights(tmp_path: Pa
         },
         "parent_state_hash": "a" * 64,
     }
-    saved_hash = save_checkpoint(model, path, normalization, metadata=checkpoint_metadata)
-    loaded, metadata = load_checkpoint(path, expected_config=model.config, expected_normalization=normalization)
+    saved_hash = save_checkpoint(
+        model, path, normalization, metadata=checkpoint_metadata
+    )
+    loaded, metadata = load_checkpoint(
+        path, expected_config=model.config, expected_normalization=normalization
+    )
 
     assert metadata["schema_version"] == SCHEMA_VERSION == 2
     assert metadata["state_hash"] == saved_hash
@@ -40,11 +46,32 @@ def test_checkpoint_roundtrip_preserves_config_metadata_and_weights(tmp_path: Pa
     assert metadata["capabilities"] == {"flow": True}
     assert metadata["trained_heads"] == ["flow", "structure"]
     assert metadata["training_objective_version"] == "supervised_loss_v1"
-    assert metadata["training_objective_weights"] == checkpoint_metadata["training_objective_weights"]
+    assert (
+        metadata["training_objective_weights"]
+        == checkpoint_metadata["training_objective_weights"]
+    )
     assert metadata["parent_state_hash"] == "a" * 64
     assert loaded.config == model.config
     for key, value in model.state_dict().items():
         assert torch.equal(value, loaded.state_dict()[key])
+
+
+def test_graph_transformer_checkpoint_roundtrip(tmp_path: Path) -> None:
+    config = ModelConfig(
+        hidden_dim=24,
+        encoder_layers=2,
+        encoder_kind="graph_transformer",
+        attention_heads=4,
+        transformer_ffn_multiplier=2,
+    )
+    model = HCFPModel(config)
+    path = tmp_path / "transformer.pt"
+
+    save_checkpoint(model, path)
+    loaded, _ = load_checkpoint(path, expected_config=config)
+
+    assert loaded.config == config
+    assert hasattr(loaded.encoder, "transformer")
 
 
 def test_checkpoint_fails_closed_on_hash_and_config_mismatch(tmp_path: Path) -> None:
@@ -58,11 +85,19 @@ def test_checkpoint_fails_closed_on_hash_and_config_mismatch(tmp_path: Path) -> 
     torch.save(payload, broken)
 
     with pytest.raises(ValueError, match="hash mismatch"):
-        load_checkpoint(broken, expected_config=model.config, expected_normalization={"scale": 1.0})
+        load_checkpoint(
+            broken, expected_config=model.config, expected_normalization={"scale": 1.0}
+        )
     with pytest.raises(ValueError, match="config mismatch"):
-        load_checkpoint(path, expected_config=ModelConfig(hidden_dim=24), expected_normalization={"scale": 1.0})
+        load_checkpoint(
+            path,
+            expected_config=ModelConfig(hidden_dim=24),
+            expected_normalization={"scale": 1.0},
+        )
     with pytest.raises(ValueError, match="normalization mismatch"):
-        load_checkpoint(path, expected_config=model.config, expected_normalization={"scale": 2.0})
+        load_checkpoint(
+            path, expected_config=model.config, expected_normalization={"scale": 2.0}
+        )
 
 
 @pytest.mark.parametrize(
@@ -168,13 +203,17 @@ def test_checkpoint_rejects_invalid_objective_weights(tmp_path: Path) -> None:
         )
 
 
-def test_schema_v1_load_preserves_legacy_hash_and_disables_capabilities(tmp_path: Path) -> None:
+def test_schema_v1_load_preserves_legacy_hash_and_disables_capabilities(
+    tmp_path: Path,
+) -> None:
     model = HCFPModel(ModelConfig(hidden_dim=16))
     payload = {
         "schema_version": 1,
         "config": asdict(model.config),
         "normalization": {"scale": 1.0},
-        "state_dict": {key: value.detach().cpu() for key, value in model.state_dict().items()},
+        "state_dict": {
+            key: value.detach().cpu() for key, value in model.state_dict().items()
+        },
     }
     payload["state_hash"] = _legacy_hash(payload)
     path = tmp_path / "legacy.pt"
@@ -193,9 +232,13 @@ def test_schema_v1_load_preserves_legacy_hash_and_disables_capabilities(tmp_path
 
 def _legacy_hash(payload: dict[str, object]) -> str:
     digest = hashlib.sha256()
-    digest.update(json.dumps(payload["config"], sort_keys=True, separators=(",", ":")).encode())
     digest.update(
-        json.dumps(payload.get("normalization", {}), sort_keys=True, separators=(",", ":")).encode()
+        json.dumps(payload["config"], sort_keys=True, separators=(",", ":")).encode()
+    )
+    digest.update(
+        json.dumps(
+            payload.get("normalization", {}), sort_keys=True, separators=(",", ":")
+        ).encode()
     )
     state_dict = payload["state_dict"]
     assert isinstance(state_dict, dict)
