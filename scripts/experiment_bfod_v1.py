@@ -78,6 +78,7 @@ class Config:
     runtime_ceiling: float
     patch_sizes: tuple[int, ...]
     contact_only: bool = False
+    group_first: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,7 @@ class Context:
     b2b_edges: list[Any]
     contact_policy: ContactPolicy | None
     contact_policy_metadata: dict[str, Any] | None
+    group_first: bool = False
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -127,6 +129,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="disable S1/S2/S4 and the sparse route; run S0 -> S3 -> S5 only",
     )
+    parser.add_argument(
+        "--group-first",
+        action="store_true",
+        help=(
+            "generator v2: rank disconnected-group obligations first and drop "
+            "joint/MIB/HPWL obligation rows (removes wasted expert attempts)"
+        ),
+    )
     args = parser.parse_args(argv)
     cases = _parse_cases(args.cases)
     patch_sizes = _parse_positive_ints(args.patch_sizes, "--patch-sizes")
@@ -140,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
         exact_decode_cap=_positive(args.exact_decode_cap, "--exact-decode-cap"),
         runtime_ceiling=_positive_float(args.runtime_ceiling, "--runtime-ceiling"),
         patch_sizes=patch_sizes,
-        contact_only=bool(args.contact_only),
+        contact_only=bool(args.contact_only) or bool(args.group_first),
+        group_first=bool(args.group_first),
     )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -219,6 +230,7 @@ def _run_case(
         b2b_edges=b2b_edges,
         contact_policy=contact_policy,
         contact_policy_metadata=contact_policy_metadata,
+        group_first=config.group_first,
     )
     baseline_positions = torch.as_tensor(
         incumbent["positions"], dtype=torch.float64, device="cpu"
@@ -231,6 +243,8 @@ def _run_case(
     route = _route(raw_case, baseline_positions, baseline_metrics)
     if config.contact_only:
         route = {**route, "name": "dense_common_loop"}
+    if config.group_first:
+        route = {**route, "group_first": True}
     skeleton = _perimeter_skeleton(case, raw_case, baseline_positions)
     base_state = _state(baseline_positions, baseline_metrics, history=())
 
@@ -581,6 +595,13 @@ def _common_loop(
                         config,
                         limit=min(config.proposals_per_operator, remaining),
                     )
+                    # Never score the same placement twice in one search: a
+                    # fallback chain can re-enter an already-tried operator.
+                    raw_candidates = [
+                        item
+                        for item in raw_candidates
+                        if _placement_sha256(item["positions"]) not in seen
+                    ]
                     records = _score_raw_candidates(context, raw_candidates)
                     if records:
                         break
@@ -690,7 +711,7 @@ def _operator_candidates(
     budget = config.proposals_per_operator if limit is None else limit
     if budget <= 0:
         return []
-    if config.contact_only and expert != "contact":
+    if (config.contact_only or config.group_first) and expert != "contact":
         return []
     if expert == "mib":
         return [
@@ -1094,7 +1115,7 @@ def _residual_obligations(context: Context, positions: Any) -> list[dict[str, An
             )
         )
         joint_sides = int(missing[obligation.bridge_member] | missing[obligation.anchor_member])
-        if joint_sides:
+        if joint_sides and not context.group_first:
             rows.append(
                 _obligation(
                     "joint",
@@ -1107,6 +1128,8 @@ def _residual_obligations(context: Context, positions: Any) -> list[dict[str, An
                 )
             )
     for group_index, membership in enumerate(context.case.mib_membership):
+        if context.group_first:
+            break
         members = torch.nonzero(membership, as_tuple=False).reshape(-1).tolist()
         shapes = {
             tuple(round(float(value), 4) for value in boxes[member, 2:4].tolist())
@@ -1123,7 +1146,7 @@ def _residual_obligations(context: Context, positions: Any) -> list[dict[str, An
                 )
             )
     high = _high_weight_edge(boxes, context.raw_case["b2b_weight"])
-    if high is not None:
+    if high is not None and not context.group_first:
         first, second, weighted_distance = high
         rows.append(
             _obligation(
@@ -1154,6 +1177,10 @@ def _choose_experts(
 ) -> list[str]:
     if route["name"] == "sparse_region":
         return ["region"]
+    if route.get("group_first"):
+        # Generator v2: only the contact operator is allowed; boundary/MIB/tree
+        # expert attempts are removed entirely (they produced no winners).
+        return ["contact"]
     mapping = {
         "joint": "joint",
         "mib": "mib",

@@ -58,3 +58,21 @@ Source: `artifacts/experiments/bfod_v1_contact_only_c30/`.
 
 Generator v2 (Group-first, patch 2/4) must keep QoR >= these numbers
 (case70 ~7.29) with significantly fewer generator repack attempts / runtime.
+
+### v2 result (2026-08-14)
+
+`artifacts/experiments/bfod_v2_groupfirst_fixed/` — group-first routing
+(experts = [contact] only; joint/MIB/boundary attempts removed) + duplicate
+placements skipped before scoring. Patch sizes unchanged (4,8,12,16);
+the patch {2,4} restriction was REJECTED (worse QoR on 70/94/97 because the
+heuristic top-4 slice is pool-sensitive).
+
+| Case | v1 cost | v2 cost | v1 G | v2 G | v1 decodes | v2 decodes | winner |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 70 | 7.2916 | 7.2916 | 13 | 13 | 72 | 70 | identical |
+| 89 | 9.3338 | 9.3338 | 17 | 17 | 0 | 0 | identical |
+| 90 | 7.7116 | 7.7116 | 29 | 29 | 0 | 0 | identical |
+| 94 | 6.2509 | 5.6939 | 17 | 14 | 96 | 79 | better |
+| 97 | 4.2802 | 4.2802 | 5 | 5 | 70 | 55 | identical |
+
+Gate: PASS (QoR never worse, case70 7.2916 exact, decodes down).
