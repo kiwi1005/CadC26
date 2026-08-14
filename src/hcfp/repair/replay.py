@@ -20,7 +20,7 @@ from hcfp.repair.schema import (
 from hcfp.repair.state import state_from_payload, state_to_payload
 
 
-REPAIR_REPLAY_SCHEMA_VERSION = 1
+REPAIR_REPLAY_SCHEMA_VERSION = 2
 REPAIR_GENERATION_SCHEMA_VERSION = 1
 
 
@@ -49,6 +49,7 @@ def repair_replay_to_payload(record: RepairReplayRecord) -> dict[str, Any]:
         "source_split": record.source_split,
         "split_version": record.split_version,
         "state": state_to_payload(record.state),
+        "decoder_placement": record.decoder_placement.tolist(),
         "obligation": {
             "expert": record.obligation.expert.value,
             "obligation_id": record.obligation.obligation_id,
@@ -103,6 +104,9 @@ def repair_replay_from_payload(payload: dict[str, Any]) -> RepairReplayRecord:
         source_split=str(payload["source_split"]),
         split_version=str(payload["split_version"]),
         state=state_from_payload(payload["state"]),
+        decoder_placement=torch.as_tensor(
+            payload["decoder_placement"], dtype=torch.float64
+        ),
         obligation=obligation,
         action=action,
         candidate=candidate,

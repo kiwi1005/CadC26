@@ -244,6 +244,7 @@ class RepairReplayRecord:
     source_split: str
     split_version: str
     state: RepairState
+    decoder_placement: Tensor
     obligation: RepairObligation
     action: RepairAction
     candidate: RepairCandidate
@@ -260,6 +261,18 @@ class RepairReplayRecord:
             raise ValueError("obligation and action IDs must match")
         if self.candidate.action != self.action:
             raise ValueError("candidate action must match replay action")
+        _shape("decoder placement", self.decoder_placement, (self.state.case.n, 4))
+        if (
+            self.decoder_placement.dtype != torch.float64
+            or self.decoder_placement.device.type != "cpu"
+        ):
+            raise ValueError("decoder placement must be a CPU float64 tensor")
+        if not bool(torch.isfinite(self.decoder_placement).all()) or not bool(
+            (self.decoder_placement[:, 2:4] > 0).all()
+        ):
+            raise ValueError(
+                "decoder placement must be finite with positive dimensions"
+            )
         if self.candidate.placement.shape[0] != self.state.case.n:
             raise ValueError("candidate placement block count must match state")
         if any(

@@ -24,7 +24,9 @@ from test_repair_schema import repair_fixture
 
 def _record() -> RepairReplayRecord:
     case, placement = repair_fixture()
-    state = build_repair_state(case, placement, repair_target=(False, False, True, False))
+    state = build_repair_state(
+        case, placement, repair_target=(False, False, True, False)
+    )
     obligation = RepairObligation(ExpertKind.CONTACT, "group:1", (0, 1, 2), debt=1)
     action = RepairAction(
         ExpertKind.CONTACT,
@@ -51,6 +53,7 @@ def _record() -> RepairReplayRecord:
         "train",
         "ccrl-source-v1",
         state,
+        placement.double(),
         obligation,
         action,
         candidate,
@@ -65,6 +68,8 @@ def test_repair_replay_round_trip_and_sha256_are_deterministic() -> None:
 
     assert repair_replay_dumps(loaded) == encoded
     assert state_to_payload(loaded.state) == state_to_payload(record.state)
+    assert loaded.decoder_placement.dtype == record.decoder_placement.dtype
+    assert loaded.decoder_placement.tolist() == record.decoder_placement.tolist()
     assert loaded.action == record.action
     assert len(repair_replay_to_payload(record)["record_sha256"]) == 64
 
@@ -75,6 +80,11 @@ def test_repair_replay_round_trip_and_sha256_are_deterministic() -> None:
 def test_repair_replay_rejects_tampering() -> None:
     payload = repair_replay_to_payload(_record())
     payload["outcome"]["debt_after"] = 2
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        repair_replay_loads(json.dumps(payload))
+
+    payload = repair_replay_to_payload(_record())
+    payload["decoder_placement"][0][0] += 1.0
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         repair_replay_loads(json.dumps(payload))
 
