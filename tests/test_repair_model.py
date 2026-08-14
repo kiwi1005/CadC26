@@ -51,7 +51,7 @@ def _c1_fixture():
 
 
 def test_dynamic_encoder_sees_state_and_mobility_masks() -> None:
-    sample, _source, _corruption, clean, corrupt, obligation = _c1_fixture()
+    sample, _source, corruption, clean, corrupt, obligation = _c1_fixture()
     torch.manual_seed(5090)
     model = ContactRepairModel(RepairModelConfig())
 
@@ -65,6 +65,9 @@ def test_dynamic_encoder_sees_state_and_mobility_masks() -> None:
     fixed = int(sample.case.fixed_mask.nonzero()[0])
     assert masks.target[fixed]
     assert not bool(masks.anchor[int(sample.case.preplaced_mask.nonzero()[0])].any())
+    target = corruption.inverse_action.target_ids[0]
+    anchor = corruption.inverse_action.anchor_ids[0]
+    assert bool(masks.patch_budget[target, anchor].all())
     assert torch.all(corrupt_output.side_logits[~masks.side] < -1.0e20)
 
 

@@ -190,13 +190,9 @@ def contact_action_masks(
     target = members & movable & observed
     anchor = target[:, None] & members[None, :] & observed[None, :]
     anchor &= ~torch.eye(n, dtype=torch.bool, device=target_device)
-    component_size = _obligation_component_sizes(
-        state, obligation, device=target_device
-    )
-    budgets = torch.tensor(PATCH_BUDGETS, dtype=torch.long, device=target_device)
-    patch = anchor[..., None] & (
-        budgets.reshape(1, 1, -1) >= component_size.reshape(n, 1, 1) + 1
-    )
+    # Exact component size is decoder-owned: float32 state contacts can differ at
+    # a zero-gap boundary from the float64 placement the exact decoder verifies.
+    patch = anchor[..., None].expand(-1, -1, len(PATCH_BUDGETS)).clone()
     target &= patch.any(dim=(1, 2))
     anchor &= target[:, None]
     patch &= target[:, None, None]
@@ -365,36 +361,6 @@ def _component_sizes(component_id: Tensor) -> Tensor:
     for component in torch.unique(component_id[component_id >= 0]).tolist():
         mask = component_id == component
         result[mask] = int(mask.sum())
-    return result
-
-
-def _obligation_component_sizes(
-    state: RepairState,
-    obligation: RepairObligation,
-    *,
-    device: torch.device,
-) -> Tensor:
-    n = state.case.n
-    result = torch.zeros(n, dtype=torch.long, device=device)
-    members = set(obligation.target_ids)
-    adjacency = {member: set() for member in members}
-    for first, second in state.contact_edges[:, :2].tolist():
-        if first in members and second in members:
-            adjacency[first].add(second)
-            adjacency[second].add(first)
-    unseen = set(members)
-    while unseen:
-        start = min(unseen)
-        component = {start}
-        stack = [start]
-        unseen.remove(start)
-        while stack:
-            current = stack.pop()
-            neighbors = adjacency[current].intersection(unseen)
-            component.update(neighbors)
-            unseen.difference_update(neighbors)
-            stack.extend(sorted(neighbors, reverse=True))
-        result[list(component)] = len(component)
     return result
 
 
