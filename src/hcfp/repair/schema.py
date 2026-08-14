@@ -62,10 +62,16 @@ class RepairState:
             self.case.fixed_mask.detach().cpu().bool()
             | self.case.preplaced_mask.detach().cpu().bool()
         )
-        if not torch.equal(self.position_mobility.detach().cpu().bool(), expected_position):
-            raise ValueError("position mobility must be false exactly for preplaced blocks")
+        if not torch.equal(
+            self.position_mobility.detach().cpu().bool(), expected_position
+        ):
+            raise ValueError(
+                "position mobility must be false exactly for preplaced blocks"
+            )
         if not torch.equal(self.shape_mobility.detach().cpu().bool(), expected_shape):
-            raise ValueError("shape mobility must be false exactly for fixed/preplaced blocks")
+            raise ValueError(
+                "shape mobility must be false exactly for fixed/preplaced blocks"
+            )
         if self.round_index < 0 or self.corruption_level < 0:
             raise ValueError("round and corruption level must be non-negative")
 
@@ -113,7 +119,9 @@ class RepairAction:
             raise ValueError("score must be finite")
         if self.shape_spec is not None:
             shape = tuple(float(value) for value in self.shape_spec)
-            if len(shape) != 2 or any(not math.isfinite(value) or value <= 0 for value in shape):
+            if len(shape) != 2 or any(
+                not math.isfinite(value) or value <= 0 for value in shape
+            ):
                 raise ValueError("shape_spec must contain two finite positive values")
             object.__setattr__(self, "shape_spec", shape)
 
@@ -133,7 +141,9 @@ class RepairCandidate:
         if not bool(torch.isfinite(self.placement).all()) or not bool(
             (self.placement[:, 2:4] > 0).all()
         ):
-            raise ValueError("candidate placement must be finite with positive dimensions")
+            raise ValueError(
+                "candidate placement must be finite with positive dimensions"
+            )
 
 
 @dataclass(frozen=True)
@@ -163,6 +173,72 @@ class RepairOutcome:
 
 
 @dataclass(frozen=True)
+class RepairGenerationRecord:
+    """One requested structured corruption, including generation failures."""
+
+    source_id: str
+    source_split: str
+    split_version: str
+    corruption_kind: str
+    corruption_requested: bool
+    corruption_generated: bool
+    generation_failure_reason: str | None
+    inverse_action: RepairAction | None = None
+    inverse_decode_success: bool | None = None
+    acceptable_actions: tuple[RepairAction, ...] = ()
+    oracle_best_actions: tuple[RepairAction, ...] = ()
+    oracle_action_count: int = 0
+    oracle_best_gain: float | None = None
+
+    def __post_init__(self) -> None:
+        kind = self.corruption_kind.strip().upper()
+        object.__setattr__(self, "corruption_kind", kind)
+        object.__setattr__(self, "acceptable_actions", tuple(self.acceptable_actions))
+        object.__setattr__(self, "oracle_best_actions", tuple(self.oracle_best_actions))
+        if not self.source_id or not self.split_version or not kind:
+            raise ValueError(
+                "source_id, split_version, and corruption_kind must be non-empty"
+            )
+        if self.source_split not in {"train", "heldout"}:
+            raise ValueError("source_split must be train or heldout")
+        if not self.corruption_requested:
+            raise ValueError("generation records must describe a requested corruption")
+        if self.corruption_generated:
+            if (
+                self.generation_failure_reason is not None
+                or self.inverse_action is None
+            ):
+                raise ValueError(
+                    "generated corruption requires inverse action and no failure"
+                )
+            if self.inverse_decode_success is None:
+                raise ValueError("generated corruption requires inverse decode status")
+        elif not self.generation_failure_reason:
+            raise ValueError("un-generated corruption requires a failure reason")
+        if (
+            self.inverse_action is not None
+            and self.inverse_action.expert != ExpertKind.CONTACT
+        ):
+            raise ValueError(
+                "Contact generation records require Contact inverse actions"
+            )
+        if any(
+            action.expert != ExpertKind.CONTACT for action in self.acceptable_actions
+        ):
+            raise ValueError("acceptable actions must be Contact actions")
+        if any(
+            action.expert != ExpertKind.CONTACT for action in self.oracle_best_actions
+        ):
+            raise ValueError("oracle best actions must be Contact actions")
+        if self.oracle_action_count < 0:
+            raise ValueError("oracle_action_count must be non-negative")
+        if self.oracle_best_gain is not None and not math.isfinite(
+            self.oracle_best_gain
+        ):
+            raise ValueError("oracle_best_gain must be finite when present")
+
+
+@dataclass(frozen=True)
 class RepairReplayRecord:
     source_id: str
     source_split: str
@@ -186,7 +262,10 @@ class RepairReplayRecord:
             raise ValueError("candidate action must match replay action")
         if self.candidate.placement.shape[0] != self.state.case.n:
             raise ValueError("candidate placement block count must match state")
-        if any(index >= self.state.case.n for index in self.action.target_ids + self.action.anchor_ids):
+        if any(
+            index >= self.state.case.n
+            for index in self.action.target_ids + self.action.anchor_ids
+        ):
             raise ValueError("action block index is outside the repair state")
 
 

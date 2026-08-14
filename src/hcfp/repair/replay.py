@@ -12,6 +12,7 @@ from hcfp.repair.actions import action_from_payload, action_sha256, action_to_pa
 from hcfp.repair.schema import (
     ExpertKind,
     RepairCandidate,
+    RepairGenerationRecord,
     RepairObligation,
     RepairOutcome,
     RepairReplayRecord,
@@ -20,6 +21,7 @@ from hcfp.repair.state import state_from_payload, state_to_payload
 
 
 REPAIR_REPLAY_SCHEMA_VERSION = 1
+REPAIR_GENERATION_SCHEMA_VERSION = 1
 
 
 def candidate_to_payload(candidate: RepairCandidate) -> dict[str, Any]:
@@ -119,6 +121,91 @@ def repair_replay_dumps(record: RepairReplayRecord) -> str:
 
 def repair_replay_loads(data: str) -> RepairReplayRecord:
     return repair_replay_from_payload(json.loads(data))
+
+
+def repair_generation_to_payload(record: RepairGenerationRecord) -> dict[str, Any]:
+    payload = {
+        "schema_version": REPAIR_GENERATION_SCHEMA_VERSION,
+        "source_id": record.source_id,
+        "source_split": record.source_split,
+        "split_version": record.split_version,
+        "corruption_kind": record.corruption_kind,
+        "corruption_requested": record.corruption_requested,
+        "corruption_generated": record.corruption_generated,
+        "generation_failure_reason": record.generation_failure_reason,
+        "inverse_action": (
+            action_to_payload(record.inverse_action)
+            if record.inverse_action is not None
+            else None
+        ),
+        "inverse_decode_success": record.inverse_decode_success,
+        "acceptable_actions": [
+            action_to_payload(action) for action in record.acceptable_actions
+        ],
+        "oracle_best_actions": [
+            action_to_payload(action) for action in record.oracle_best_actions
+        ],
+        "oracle_action_count": record.oracle_action_count,
+        "oracle_best_gain": record.oracle_best_gain,
+    }
+    payload["record_sha256"] = _sha256(payload)
+    return payload
+
+
+def repair_generation_from_payload(payload: dict[str, Any]) -> RepairGenerationRecord:
+    if int(payload.get("schema_version", -1)) != REPAIR_GENERATION_SCHEMA_VERSION:
+        raise ValueError("unsupported repair generation schema version")
+    expected = payload.get("record_sha256")
+    raw = {key: value for key, value in payload.items() if key != "record_sha256"}
+    if expected != _sha256(raw):
+        raise ValueError("repair generation SHA-256 mismatch")
+    inverse = payload.get("inverse_action")
+    return RepairGenerationRecord(
+        source_id=str(payload["source_id"]),
+        source_split=str(payload["source_split"]),
+        split_version=str(payload["split_version"]),
+        corruption_kind=str(payload["corruption_kind"]),
+        corruption_requested=bool(payload["corruption_requested"]),
+        corruption_generated=bool(payload["corruption_generated"]),
+        generation_failure_reason=(
+            str(payload["generation_failure_reason"])
+            if payload.get("generation_failure_reason") is not None
+            else None
+        ),
+        inverse_action=action_from_payload(inverse) if inverse is not None else None,
+        inverse_decode_success=(
+            bool(payload["inverse_decode_success"])
+            if payload.get("inverse_decode_success") is not None
+            else None
+        ),
+        acceptable_actions=tuple(
+            action_from_payload(action)
+            for action in payload.get("acceptable_actions", ())
+        ),
+        oracle_best_actions=tuple(
+            action_from_payload(action)
+            for action in payload.get("oracle_best_actions", ())
+        ),
+        oracle_action_count=int(payload.get("oracle_action_count", 0)),
+        oracle_best_gain=(
+            float(payload["oracle_best_gain"])
+            if payload.get("oracle_best_gain") is not None
+            else None
+        ),
+    )
+
+
+def repair_generation_dumps(record: RepairGenerationRecord) -> str:
+    return json.dumps(
+        repair_generation_to_payload(record),
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def repair_generation_loads(data: str) -> RepairGenerationRecord:
+    return repair_generation_from_payload(json.loads(data))
 
 
 def _sha256(payload: dict[str, Any]) -> str:

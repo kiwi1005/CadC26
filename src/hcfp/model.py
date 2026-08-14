@@ -19,7 +19,8 @@ from hcfp.topology import DualPermutationHead
 
 
 Tensor = torch.Tensor
-_NODE_FEATURES = 22
+SCENE_NODE_FEATURES = 22
+_NODE_FEATURES = SCENE_NODE_FEATURES
 
 
 @dataclass(frozen=True)
@@ -375,6 +376,12 @@ class SceneEncoder(nn.Module):
             ),
             dim=1,
         )
+
+
+def scene_node_features(case: FloorplanCase) -> Tensor:
+    """Return the stable static node features used by :class:`SceneEncoder`."""
+
+    return SceneEncoder._features(case)
 
 
 class StructureHeads(nn.Module):
