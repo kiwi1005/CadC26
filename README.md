@@ -180,6 +180,9 @@ The P8 dense contact patch, boundary witness, obstacle-region and
 connectivity-aware B*-Tree experiments, including the guarded full100 result,
 are recorded in
 [`docs/research/hcfp5090_p8_constraint_topology_results_2026-08-13.md`](docs/research/hcfp5090_p8_constraint_topology_results_2026-08-13.md).
+The follow-on Case70 BFOD/P10 sidecar, learned contact-ranker experiment, and
+plan-versus-implementation status are recorded in
+[`docs/research/hcfp5090_bfod_v1_p10_progress_2026-08-14.md`](docs/research/hcfp5090_bfod_v1_p10_progress_2026-08-14.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,
