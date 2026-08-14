@@ -337,11 +337,18 @@ def case_from_payload(payload: dict[str, Any]) -> FloorplanCase:
             continue
         value = payload[field.name]
         if field.name in bools:
-            values[field.name] = torch.as_tensor(value, dtype=torch.bool)
+            tensor = torch.as_tensor(value, dtype=torch.bool)
         elif field.name in longs:
-            values[field.name] = torch.as_tensor(value, dtype=torch.long)
+            tensor = torch.as_tensor(value, dtype=torch.long)
         else:
-            values[field.name] = torch.as_tensor(value, dtype=torch.float32)
+            tensor = torch.as_tensor(value, dtype=torch.float32)
+        if field.name == "pins":
+            tensor = tensor.reshape(-1, 2)
+        elif field.name == "p2b_edges":
+            tensor = tensor.reshape(-1, 3)
+        elif field.name in {"group_membership", "mib_membership"}:
+            tensor = tensor.reshape(-1, values["n"])
+        values[field.name] = tensor
     return FloorplanCase(**values)
 
 

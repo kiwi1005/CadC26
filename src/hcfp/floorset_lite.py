@@ -127,6 +127,7 @@ def sample_with_source_from_lite_tensors(
     source = {
         "normalized": False,
         "block_count": block_count,
+        "fp_sol_xywh": rectangles,
         "area_targets": area,
         "b2b_connectivity": torch.as_tensor(b2b_connectivity),
         "p2b_connectivity": torch.as_tensor(p2b_connectivity),

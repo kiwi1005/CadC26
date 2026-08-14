@@ -265,6 +265,13 @@ def _edge_connected(a: torch.Tensor, b: torch.Tensor, tol: float = 0.0) -> bool:
     return x_overlap > tol and y_overlap > tol
 
 
+def edge_connected(a: Any, b: Any, *, tol: float = 0.0) -> bool:
+    """Return the connectivity predicate used by grouping verification."""
+
+    boxes = as_xywh(torch.stack((torch.as_tensor(a), torch.as_tensor(b))))
+    return _edge_connected(boxes[0], boxes[1], tol=tol)
+
+
 def connected_components_for_group(xywh: Any, members: Any, *, tol: float = 0.0) -> int:
     boxes = as_xywh(xywh)
     member_idx = [int(i) for i in torch.nonzero(torch.as_tensor(members, dtype=torch.bool).reshape(-1), as_tuple=False).reshape(-1).tolist()]
