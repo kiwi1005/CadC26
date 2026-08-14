@@ -1,15 +1,17 @@
-"""Contact C0/C1 corruptions with decoder-verifiable inverse actions."""
+"""Contact C0-C2 corruptions with decoder-verifiable inverse actions."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+from itertools import permutations
 from typing import Any
 
 import torch
 
 from hcfp.constraints.contact_tree import Contact, extract_contacts
 from hcfp.repair.decoders.contact import decode_contact_action
+from hcfp.repair.decoders.packing import closed_patch, strip_reslice
 from hcfp.repair.schema import ExpertKind, RepairAction
 from hcfp.verify import grouping_violation, verify_feasible
 
@@ -52,14 +54,19 @@ def generate_contact_corruptions(
     if not verify_feasible(verifier, boxes):
         return ()
     requested = tuple(dict.fromkeys(kind.upper() for kind in kinds))
-    if any(kind not in _RATIOS for kind in requested):
-        raise ValueError("Contact corruption kind must be C0 or C1")
+    if any(kind not in {"C0", "C1", "C2"} for kind in requested):
+        raise ValueError("Contact corruption kind must be C0, C1, or C2")
     before = grouping_violation(case, boxes)
     contacts = extract_contacts(boxes, tolerance=0.0)
     preplaced = torch.as_tensor(case.preplaced_mask, dtype=torch.bool, device="cpu")
     choices = _choices(case, contacts, preplaced)
     found: list[ContactCorruption] = []
     for kind in requested:
+        if kind == "C2":
+            corruption = _generate_c2(case, boxes, verifier, before, contacts)
+            if corruption is not None:
+                found.append(corruption)
+            continue
         for group_index, degree, contact, target, anchor, toward_side in choices:
             if kind == "C0" and degree[target] != 1:
                 continue
@@ -67,9 +74,7 @@ def generate_contact_corruptions(
             scale = min(float(boxes[target, 2]), float(boxes[target, 3]))
             for ratio in _RATIOS[kind]:
                 gap = max(1.0e-3, scale * ratio)
-                for moving, dx, dy in _mutations(
-                    boxes, target, anchor, relation, gap
-                ):
+                for moving, dx, dy in _mutations(boxes, target, anchor, relation, gap):
                     if bool(preplaced[list(moving)].any()):
                         continue
                     candidate = boxes.clone()
@@ -82,7 +87,7 @@ def generate_contact_corruptions(
                         continue
                     decoded = None
                     action = None
-                    for patch_budget in ((2,) if kind == "C0" else (2, 4, 8, 16)):
+                    for patch_budget in (2,) if kind == "C0" else (2, 4, 8, 16):
                         proposed = RepairAction(
                             expert=ExpertKind.CONTACT,
                             obligation_id=f"contact-group:{group_index}",
@@ -127,13 +132,164 @@ def generate_contact_corruptions(
     return tuple(found)
 
 
+def contact_c2_eligible(case: Any, placement: Any) -> bool:
+    boxes = torch.as_tensor(placement, dtype=torch.float64, device="cpu")
+    contacts = extract_contacts(boxes, tolerance=0.0)
+    return bool(_c2_choices(case, boxes, contacts))
+
+
+def _generate_c2(case, boxes, verifier, before, contacts) -> ContactCorruption | None:
+    for group_index, target, anchor, members in _c2_choices(case, boxes, contacts):
+        for order in permutations(members):
+            target_slot, anchor_slot = order.index(target), order.index(anchor)
+            if abs(target_slot - anchor_slot) != 1:
+                continue
+            first = target if target_slot < anchor_slot else anchor
+            for axis in ("x", "y"):
+                relation = (
+                    ("LEFT" if target_slot < anchor_slot else "RIGHT")
+                    if axis == "x"
+                    else ("BOTTOM" if target_slot < anchor_slot else "TOP")
+                )
+                candidate = strip_reslice(
+                    boxes,
+                    members,
+                    order,
+                    axis=axis,
+                    whitespace_after=first,
+                )
+                if candidate is None or not verify_feasible(verifier, candidate):
+                    continue
+                after = grouping_violation(case, candidate)
+                if after <= before:
+                    continue
+                for patch_budget in (2, 4, 8, 16):
+                    action = RepairAction(
+                        ExpertKind.CONTACT,
+                        f"contact-group:{group_index}",
+                        (target,),
+                        (anchor,),
+                        relation,
+                        patch_budget=patch_budget,
+                    )
+                    action = replace(
+                        action,
+                        corruption_id=_corruption_id(
+                            "C2",
+                            action,
+                            0.0,
+                            order,
+                            float(axis == "y"),
+                            0.0,
+                        ),
+                    )
+                    decoded = decode_contact_action(
+                        case,
+                        candidate,
+                        action,
+                        verify_case=verifier,
+                    )
+                    if decoded.succeeded and decoded.debt_after is not None:
+                        return ContactCorruption(
+                            "C2",
+                            candidate,
+                            action,
+                            before,
+                            after,
+                            decoded.debt_after,
+                        )
+    return None
+
+
+def _c2_choices(case, boxes, contacts):
+    groups = torch.as_tensor(case.group_membership, dtype=torch.bool, device="cpu")
+    preplaced = torch.as_tensor(case.preplaced_mask, dtype=torch.bool, device="cpu")
+    fixed = torch.as_tensor(case.fixed_mask, dtype=torch.bool, device="cpu")
+    mib = torch.as_tensor(case.mib_membership, dtype=torch.bool, device="cpu")
+    shape_locked = preplaced | fixed | (mib.any(0) if mib.numel() else False)
+    centers = boxes[:, :2] + 0.5 * boxes[:, 2:4]
+    bridges = _group_bridges(groups, contacts)
+    choices = set()
+    for group_index, row in enumerate(groups):
+        group_members = set(torch.nonzero(row, as_tuple=False).reshape(-1).tolist())
+        for contact in contacts:
+            if (
+                contact.first not in group_members
+                or contact.second not in group_members
+            ):
+                continue
+            edge = (
+                group_index,
+                min(contact.first, contact.second),
+                max(contact.first, contact.second),
+            )
+            if edge not in bridges:
+                continue
+            for target, anchor in (
+                (contact.first, contact.second),
+                (contact.second, contact.first),
+            ):
+                distance = torch.abs(
+                    centers - 0.5 * (centers[target] + centers[anchor])
+                ).sum(1)
+                nearest = [
+                    index
+                    for index in torch.argsort(distance, stable=True).tolist()
+                    if index not in {target, anchor}
+                ]
+                for extra in range(3):
+                    seeds = (target, anchor, *nearest[:extra])
+                    members = closed_patch(boxes, seeds, max_blocks=4)
+                    if members is None or bool(shape_locked[list(members)].any()):
+                        continue
+                    order = (
+                        target,
+                        anchor,
+                        *(m for m in members if m not in {target, anchor}),
+                    )
+                    if any(
+                        strip_reslice(
+                            boxes,
+                            members,
+                            order,
+                            axis=axis,
+                            whitespace_after=target,
+                        )
+                        is not None
+                        for axis in ("x", "y")
+                    ):
+                        choices.add((group_index, target, anchor, members))
+    return tuple(sorted(choices))
+
+
+def _group_bridges(groups: torch.Tensor, contacts: tuple[Contact, ...]):
+    bridges = set()
+    for group_index, row in enumerate(groups):
+        members = set(torch.nonzero(row, as_tuple=False).reshape(-1).tolist())
+        edges = {
+            (min(contact.first, contact.second), max(contact.first, contact.second))
+            for contact in contacts
+            if contact.first in members and contact.second in members
+        }
+        for edge in edges:
+            adjacency = {member: set() for member in members}
+            for first, second in edges - {edge}:
+                adjacency[first].add(second)
+                adjacency[second].add(first)
+            if not _connected(members, adjacency):
+                bridges.add((group_index, *edge))
+    return bridges
+
+
 def _choices(case: Any, contacts: tuple[Contact, ...], preplaced: torch.Tensor):
     groups = torch.as_tensor(case.group_membership, dtype=torch.bool, device="cpu")
     choices = []
     for group_index, row in enumerate(groups):
         members = set(torch.nonzero(row, as_tuple=False).reshape(-1).tolist())
         group_contacts = tuple(
-            edge for edge in contacts if edge.first in members and edge.second in members
+            edge
+            for edge in contacts
+            if edge.first in members and edge.second in members
         )
         degree = {member: 0 for member in members}
         adjacency = {member: set() for member in members}

@@ -4,8 +4,12 @@ from itertools import permutations
 
 import torch
 
+from hcfp.case import from_official
 from hcfp.repair.actions import action_sha256
-from hcfp.repair.corruption.contact import generate_contact_corruptions
+from hcfp.repair.corruption.contact import (
+    contact_c2_eligible,
+    generate_contact_corruptions,
+)
 from hcfp.repair.decoders.base import DecodeFailure
 from hcfp.repair.decoders.contact import (
     decode_contact_action,
@@ -54,4 +58,62 @@ def test_contact_decoder_rejects_preplaced_target_and_rank_is_order_stable() -> 
     )
     expected = tuple(action_sha256(action) for action in rank_contact_actions(actions))
     for order in permutations(actions):
-        assert tuple(action_sha256(action) for action in rank_contact_actions(order)) == expected
+        assert (
+            tuple(action_sha256(action) for action in rank_contact_actions(order))
+            == expected
+        )
+
+
+def test_contact_c2_reslices_closed_patch_and_repairs_without_clean_geometry() -> None:
+    constraints = torch.tensor(((0, 0, 0, 1, 0), (0, 0, 0, 1, 0), (0, 0, 0, 0, 0)))
+    case = from_official(3, torch.ones(3), [], [], [], constraints)
+    clean = torch.tensor(
+        ((0.0, 0.0, 1.0, 1.0), (1.0, 0.0, 1.0, 1.0), (0.0, 2.0, 1.0, 1.0)),
+        dtype=torch.float64,
+    )
+    verify_case = {
+        "normalized": False,
+        "area_targets": torch.ones(3),
+        "constraints": constraints,
+        "fixed_mask": case.fixed_mask,
+        "preplaced_mask": case.preplaced_mask,
+        "group_membership": case.group_membership,
+        "mib_membership": case.mib_membership,
+    }
+
+    assert contact_c2_eligible(case, clean)
+    corruption = generate_contact_corruptions(
+        case,
+        clean,
+        verify_case=verify_case,
+        kinds=("C2",),
+    )[0]
+
+    assert corruption.kind == "C2"
+    assert corruption.debt_after > corruption.debt_before
+    assert corruption.decoded_debt < corruption.debt_after
+    assert not torch.equal(corruption.placement, clean)
+    decoded = decode_contact_action(
+        case,
+        corruption.placement,
+        corruption.inverse_action,
+        verify_case=verify_case,
+    )
+    assert decoded.succeeded
+    assert not torch.equal(decoded.placement, clean)
+
+
+def test_contact_c2_requires_a_bridge_contact() -> None:
+    constraints = torch.tensor(((0, 0, 0, 1, 0),) * 3 + ((0, 0, 0, 0, 0),))
+    case = from_official(4, torch.tensor((2.0, 1.0, 1.0, 1.0)), [], [], [], constraints)
+    clean = torch.tensor(
+        (
+            (0.0, 0.0, 1.0, 2.0),
+            (1.0, 0.0, 1.0, 1.0),
+            (1.0, 1.0, 1.0, 1.0),
+            (3.0, 0.0, 1.0, 1.0),
+        ),
+        dtype=torch.float64,
+    )
+
+    assert not contact_c2_eligible(case, clean)

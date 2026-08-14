@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure held-out Contact C0/C1 corruption and inverse-decoder yield."""
+"""Measure held-out Contact C0-C2 corruption and inverse-decoder yield."""
 
 from __future__ import annotations
 
@@ -15,7 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from hcfp.floorset_lite import iter_floorset_lite_with_source  # noqa: E402
-from hcfp.repair.corruption.contact import generate_contact_corruptions  # noqa: E402
+from hcfp.repair.corruption.contact import (  # noqa: E402
+    contact_c2_eligible,
+    generate_contact_corruptions,
+)
 from hcfp.repair.dataset import (  # noqa: E402
     audit_clean_sample,
     sha256_lines,
@@ -59,11 +62,16 @@ def main(argv: list[str] | None = None) -> int:
             sample.case,
             boxes,
             verify_case=source,
+            kinds=("C0", "C1", "C2"),
         )
         by_kind = {corruption.kind: corruption for corruption in corruptions}
         row = {"sample_id": sample.sample_id, "kinds": {}}
-        for kind in ("C0", "C1"):
-            eligible = clean["eligibility"][f"contact_{kind.lower()}_structural"]
+        for kind in ("C0", "C1", "C2"):
+            eligible = (
+                contact_c2_eligible(sample.case, boxes)
+                if kind == "C2"
+                else clean["eligibility"][f"contact_{kind.lower()}_structural"]
+            )
             corruption = by_kind.get(kind)
             if corruption is None:
                 row["kinds"][kind] = {"eligible": eligible, "generated": False}
@@ -89,7 +97,9 @@ def main(argv: list[str] | None = None) -> int:
                     mib_before[index] == mib_after[index]
                     for index in torch.nonzero(
                         sample.case.mib_membership.any(0), as_tuple=False
-                    ).reshape(-1).tolist()
+                    )
+                    .reshape(-1)
+                    .tolist()
                 ),
                 "debt_before": corruption.debt_before,
                 "debt_after": corruption.debt_after,
@@ -118,14 +128,16 @@ def main(argv: list[str] | None = None) -> int:
     }
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 
 
 def _summary(records: list[dict]) -> dict:
     by_kind = {}
-    for kind in ("C0", "C1"):
+    for kind in ("C0", "C1", "C2"):
         rows = [
             record["kinds"][kind]
             for record in records
@@ -146,6 +158,7 @@ def _summary(records: list[dict]) -> dict:
     gates = {
         "c0_generation": by_kind["C0"]["generation_rate"] >= 0.95,
         "c1_generation": by_kind["C1"]["generation_rate"] >= 0.95,
+        "c2_generation": by_kind["C2"]["generation_rate"] >= 0.80,
         "hard_feasible": all(
             by_kind[kind]["hard_feasible_rate"] >= 0.99 for kind in by_kind
         ),
@@ -164,7 +177,6 @@ def _summary(records: list[dict]) -> dict:
                 "mib_shape_preservation_rate",
             )
         ),
-        "c2_generation": "DEFERRED_UNTIL_C0_C1_KEEP",
     }
     return {
         "source_count": len(records),
@@ -172,7 +184,7 @@ def _summary(records: list[dict]) -> dict:
         "by_kind": by_kind,
         "gates": gates,
         "decision": "KEEP"
-        if all(value is True for key, value in gates.items() if key != "c2_generation")
+        if all(value is True for value in gates.values())
         else "MODIFY",
     }
 
