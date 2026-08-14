@@ -77,6 +77,7 @@ class Config:
     exact_decode_cap: int
     runtime_ceiling: float
     patch_sizes: tuple[int, ...]
+    contact_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,16 @@ def main(argv: list[str] | None = None) -> int:
         "--contact-policy",
         help="experiment-only learned contact-patch ranker checkpoint",
     )
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="record every scored candidate per round into case{id}/audit.json",
+    )
+    parser.add_argument(
+        "--contact-only",
+        action="store_true",
+        help="disable S1/S2/S4 and the sparse route; run S0 -> S3 -> S5 only",
+    )
     args = parser.parse_args(argv)
     cases = _parse_cases(args.cases)
     patch_sizes = _parse_positive_ints(args.patch_sizes, "--patch-sizes")
@@ -129,6 +140,7 @@ def main(argv: list[str] | None = None) -> int:
         exact_decode_cap=_positive(args.exact_decode_cap, "--exact-decode-cap"),
         runtime_ceiling=_positive_float(args.runtime_ceiling, "--runtime-ceiling"),
         patch_sizes=patch_sizes,
+        contact_only=bool(args.contact_only),
     )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -151,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
                 config,
                 contact_policy,
                 contact_policy_metadata,
+                audit=bool(args.audit),
             )
         )
     summary = {
@@ -177,6 +190,8 @@ def _run_case(
     config: Config,
     contact_policy: ContactPolicy | None,
     contact_policy_metadata: dict[str, Any] | None,
+    *,
+    audit: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     (
@@ -214,12 +229,36 @@ def _run_case(
     if not baseline_metrics["hard_feasible"]:
         raise RuntimeError(f"P8 incumbent for case{case_id} is not hard feasible")
     route = _route(raw_case, baseline_positions, baseline_metrics)
+    if config.contact_only:
+        route = {**route, "name": "dense_common_loop"}
     skeleton = _perimeter_skeleton(case, raw_case, baseline_positions)
     base_state = _state(baseline_positions, baseline_metrics, history=())
 
-    mib_state, mib_report = _mib_stage(context, base_state, config)
-    contact_state, contact_report = _bootstrap_contact(context, mib_state, route, config)
-    tree_state, tree_report = _topology_stage(context, contact_state, route, config)
+    audit_log: list[dict[str, Any]] = [] if audit else None  # type: ignore[assignment]
+    if config.contact_only:
+        mib_state, mib_report = base_state, {
+            "decision": "SKIP",
+            "reason": "contact-only mode",
+            "before": _metrics_brief(base_state["metrics"]),
+            "after": _metrics_brief(base_state["metrics"]),
+            "rounds": [],
+        }
+    else:
+        mib_state, mib_report = _mib_stage(context, base_state, config, audit_log)
+    contact_state, contact_report = _bootstrap_contact(
+        context, mib_state, route, config, audit_log
+    )
+    if config.contact_only:
+        tree_state, tree_report = contact_state, {
+            "decision": "SKIP",
+            "reason": "contact-only mode",
+            "expert": "tree",
+            "candidate_count": 0,
+        }
+    else:
+        tree_state, tree_report = _topology_stage(
+            context, contact_state, route, config, audit_log
+        )
     remaining_runtime = max(0.0, config.runtime_ceiling - (time.perf_counter() - started))
     loop_state, loop_report = _common_loop(
         context,
@@ -227,12 +266,15 @@ def _run_case(
         route,
         config,
         runtime_ceiling=remaining_runtime,
+        audit=audit_log,
     )
     winner = min(
         (base_state, mib_state, contact_state, tree_state, loop_state), key=_state_key
     )
     case_dir = output_dir / f"case{case_id}"
     case_dir.mkdir(parents=True, exist_ok=True)
+    if audit_log:
+        _dump(case_dir / "audit.json", {"case_id": case_id, "stages": audit_log})
     _render_png(
         case_dir / "baseline.png",
         base_state["positions"],
@@ -295,7 +337,10 @@ def _run_case(
 
 
 def _mib_stage(
-    context: Context, state: dict[str, Any], config: Config
+    context: Context,
+    state: dict[str, Any],
+    config: Config,
+    audit: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if state["metrics"]["mib_violations"] == 0:
         return state, {
@@ -307,6 +352,7 @@ def _mib_stage(
         }
     current = state
     rounds = []
+    audit_rounds = [] if audit is not None else None
     for step in range(1, max(1, current["metrics"]["mib_violations"]) + 1):
         candidates = mib_anchor_patch_candidates(
             context.raw_case,
@@ -328,6 +374,17 @@ def _mib_stage(
                 "accepted": None if accepted is None else _candidate_summary(accepted),
             }
         )
+        if audit_rounds is not None:
+            audit_rounds.append(
+                _audit_round(
+                    context,
+                    current,
+                    ("mib",),
+                    records,
+                    require_soft="mib",
+                    round_label=step,
+                )
+            )
         if accepted is None:
             break
         current = _state(
@@ -337,6 +394,8 @@ def _mib_stage(
         )
         if current["metrics"]["mib_violations"] == 0:
             break
+    if audit is not None and audit_rounds is not None:
+        audit.append({"stage": "s2_mib", "rounds": audit_rounds})
     return current, {
         "decision": "KEEP" if _state_key(current) < _state_key(state) else "REJECT",
         "before": _metrics_brief(state["metrics"]),
@@ -350,6 +409,7 @@ def _bootstrap_contact(
     state: dict[str, Any],
     route: dict[str, Any],
     config: Config,
+    audit: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     obligations = _residual_obligations(context, state["positions"])
     experts = [
@@ -361,13 +421,37 @@ def _bootstrap_contact(
         return state, {"decision": "SKIP", "reason": "no residual boundary/group obligation"}
     candidates = []
     attempted = []
+    produced_counts: list[int] = []
     for expert in _fallback_experts(experts[:1]):
         attempted.append(expert)
         produced = _operator_candidates(context, state, expert, config)
         candidates.extend(produced)
+        produced_counts.append(len(produced))
         if produced:
             break
     records = _score_raw_candidates(context, candidates)
+    if audit is not None:
+        runs = []
+        cursor = 0
+        for expert, count in zip(attempted, produced_counts):
+            runs.append({"expert": expert, "records": records[cursor : cursor + count]})
+            cursor += count
+        audit.append(
+            {
+                "stage": "s3_contact_bootstrap",
+                "rounds": [
+                    _audit_round(
+                        context,
+                        state,
+                        attempted,
+                        records,
+                        require_soft="boundary_or_group",
+                        round_label=0,
+                        runs=runs,
+                    )
+                ],
+            }
+        )
     accepted = _best_admitted(state, records, require_soft="boundary_or_group")
     if accepted is None:
         return state, {
@@ -395,11 +479,28 @@ def _topology_stage(
     state: dict[str, Any],
     route: dict[str, Any],
     config: Config,
+    audit: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     expert = "region" if route["name"] == "sparse_region" else "tree"
     records = _score_raw_candidates(
         context, _operator_candidates(context, state, expert, config)
     )
+    if audit is not None:
+        audit.append(
+            {
+                "stage": "s4_topology",
+                "rounds": [
+                    _audit_round(
+                        context,
+                        state,
+                        (expert,),
+                        records,
+                        require_soft=None,
+                        round_label=0,
+                    )
+                ],
+            }
+        )
     accepted = _best_admitted(state, records, require_soft=None)
     if accepted is None:
         return state, {"decision": "REJECT", "expert": expert, "candidate_count": len(records)}
@@ -423,6 +524,7 @@ def _common_loop(
     config: Config,
     *,
     runtime_ceiling: float,
+    audit: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     started = time.perf_counter()
     if runtime_ceiling <= 0.0:
@@ -445,11 +547,13 @@ def _common_loop(
     decoded = 0
     stagnant = 0
     rounds = []
+    audit_rounds = [] if audit is not None else None
     seen = {_placement_sha256(initial["positions"])}
 
     for round_index in range(1, config.max_rounds + 1):
         proposals = []
         round_detail = {"round": round_index, "states": []}
+        audit_round_states = [] if audit is not None else None
         for state in beam:
             if decoded >= config.exact_decode_cap or time.perf_counter() - started >= search_budget:
                 break
@@ -462,6 +566,7 @@ def _common_loop(
                 "candidate_count": 0,
                 "accepted": 0,
             }
+            audit_runs = [] if audit is not None else None
             for expert in experts:
                 remaining = config.exact_decode_cap - decoded
                 if remaining <= 0:
@@ -481,9 +586,15 @@ def _common_loop(
                         break
                 decoded += len(records)
                 state_detail["candidate_count"] += len(records)
+                if audit_runs is not None:
+                    audit_runs.append({"expert": attempted, "records": records})
                 for record in records:
                     digest = record["placement_sha256"]
-                    if digest in seen or not _admitted(state["metrics"], record["metrics"], None):
+                    if digest in seen:
+                        if audit is not None:
+                            record["_audit_duplicate"] = True
+                        continue
+                    if not _admitted(state["metrics"], record["metrics"], None):
                         continue
                     seen.add(digest)
                     proposals.append(
@@ -497,10 +608,50 @@ def _common_loop(
                 if time.perf_counter() - started >= search_budget:
                     break
             round_detail["states"].append(state_detail)
+            if audit is not None:
+                audit_round_states.append(
+                    _audit_round(
+                        context,
+                        state,
+                        experts,
+                        [record for run in audit_runs for record in run["records"]],
+                        require_soft=None,
+                        round_label=round_index,
+                        runs=audit_runs,
+                    )
+                )
         proposals.sort(key=_state_key)
         beam = proposals[: config.beam_width]
         round_detail["beam"] = [_state_record(item) for item in beam]
         rounds.append(round_detail)
+        if audit_round_states is not None:
+            accepted = None
+            for state_index, entry in enumerate(audit_round_states):
+                selected = entry["selected"]
+                if selected is None:
+                    continue
+                key = (
+                    selected["uncapped_cost"],
+                    selected["metrics"]["total_soft_violations"],
+                    selected["bbox_area"],
+                    selected["hpwl_total"],
+                    selected["candidate_index"],
+                )
+                if accepted is None or key < accepted[0]:
+                    accepted = (key, state_index, selected)
+            audit_rounds.append(
+                {
+                    "round": round_index,
+                    "states": audit_round_states,
+                    "accepted": None
+                    if accepted is None
+                    else {
+                        "state_index": accepted[1],
+                        "selected": accepted[2],
+                        "state": audit_round_states[accepted[1]]["state"],
+                    },
+                }
+            )
         if not beam:
             break
         if _state_key(beam[0]) < _state_key(best):
@@ -510,6 +661,8 @@ def _common_loop(
             stagnant += 1
         if stagnant >= 2 or decoded >= config.exact_decode_cap:
             break
+    if audit is not None and audit_rounds is not None:
+        audit.append({"stage": "s5_common_loop", "rounds": audit_rounds})
     return best, {
         "decision": "KEEP" if _state_key(best) < _state_key(initial) else "REJECT",
         "beam_width": config.beam_width,
@@ -536,6 +689,8 @@ def _operator_candidates(
 ) -> list[dict[str, Any]]:
     budget = config.proposals_per_operator if limit is None else limit
     if budget <= 0:
+        return []
+    if config.contact_only and expert != "contact":
         return []
     if expert == "mib":
         return [
@@ -1260,6 +1415,193 @@ def _history(candidate: dict[str, Any]) -> dict[str, Any]:
         "family": candidate["family"],
         "details": candidate["details"],
         "metrics": _metrics_brief(candidate["metrics"]),
+    }
+
+
+def _audit_state_detail(state: dict[str, Any]) -> dict[str, Any]:
+    boxes = torch.as_tensor(state["positions"], dtype=torch.float64)
+    left, bottom, right, top = bbox(boxes)
+    return {
+        "metrics": _metrics_brief(state["metrics"]),
+        "bbox": [float(left), float(bottom), float(right), float(top)],
+        "bbox_area": float(state["metrics"]["bbox_area"]),
+        "hpwl_total": float(state["metrics"]["hpwl_total"]),
+        "uncapped_cost": float(state["metrics"]["uncapped_cost"]),
+    }
+
+
+def _audit_reject_reason(
+    before: dict[str, Any], record: dict[str, Any], require_soft: str | None
+) -> str | None:
+    """Mirror _admitted and label why a record would not be admitted."""
+
+    after = record["metrics"]
+    if not after["hard_feasible"]:
+        return "hard_infeasible"
+    for name in ("boundary_violations", "grouping_violations", "mib_violations"):
+        if after[name] > before[name]:
+            return f"{name}_regression"
+    if require_soft == "mib" and not after["mib_violations"] < before["mib_violations"]:
+        return "mib_not_reduced"
+    if require_soft == "boundary_or_group" and not (
+        after["boundary_violations"] < before["boundary_violations"]
+        or after["grouping_violations"] < before["grouping_violations"]
+    ):
+        return "soft_not_reduced"
+    if not after["uncapped_cost"] < before["uncapped_cost"] - 1.0e-10:
+        return "cost_not_lower"
+    return None
+
+
+def _audit_components(
+    context: Context, positions: Any
+) -> dict[tuple[int, int, int], dict[str, Any]]:
+    """Deterministic re-derivation of the synthesis table the generator used."""
+
+    synthesis = synthesize_contact_obligations(context.case, positions)
+    output: dict[tuple[int, int, int], dict[str, Any]] = {}
+    for obligation in synthesis.obligations + synthesis.candidate_edges:
+        key = (
+            int(obligation.group_index),
+            int(obligation.bridge_member),
+            int(obligation.anchor_member),
+        )
+        if key not in output:
+            output[key] = {
+                "component_a": list(obligation.component_a),
+                "component_b": list(obligation.component_b),
+                "component_a_size": len(obligation.component_a),
+                "component_b_size": len(obligation.component_b),
+                "moving_component": list(obligation.moving_component),
+                "moving_component_size": len(obligation.moving_component),
+                "member_a": int(obligation.member_a),
+                "member_b": int(obligation.member_b),
+                "side": obligation.side,
+                "move_distance": float(obligation.move_distance),
+                "bbox_expansion": float(obligation.bbox_expansion),
+                "net_incident": float(obligation.net_incident),
+            }
+    return output
+
+
+def _audit_record(
+    context: Context,
+    components: dict[tuple[int, int, int], dict[str, Any]],
+    state: dict[str, Any],
+    record: dict[str, Any],
+    require_soft: str | None,
+) -> dict[str, Any]:
+    details = record["details"]
+    base = (
+        details.get("contact")
+        if isinstance(details.get("contact"), dict)
+        else details
+    )
+    key = (
+        base.get("group_index"),
+        base.get("bridge_member"),
+        base.get("anchor_member"),
+    )
+    enriched = details
+    if (
+        key[0] is not None
+        and key[1] is not None
+        and key[2] is not None
+        and key in components
+    ):
+        enriched = {**details, "obligation": components[key]}
+    boxes = torch.as_tensor(record["positions"], dtype=torch.float64)
+    left, bottom, right, top = bbox(boxes)
+    return {
+        "family": record["family"],
+        "candidate_index": record["candidate_index"],
+        "details": enriched,
+        "metrics": _metrics_brief(record["metrics"]),
+        "bbox": [float(left), float(bottom), float(right), float(top)],
+        "bbox_area": float(record["metrics"]["bbox_area"]),
+        "hpwl_total": float(record["metrics"]["hpwl_total"]),
+        "uncapped_cost": float(record["metrics"]["uncapped_cost"]),
+        "reject_reason": _audit_reject_reason(state["metrics"], record, require_soft),
+        "duplicate": bool(record.get("_audit_duplicate", False)),
+    }
+
+
+def _audit_best(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not entries:
+        return None
+    best = min(
+        entries,
+        key=lambda entry: (
+            entry["uncapped_cost"],
+            entry["metrics"]["total_soft_violations"],
+            entry["bbox_area"],
+            entry["hpwl_total"],
+            entry["candidate_index"],
+        ),
+    )
+    return {
+        "family": best["family"],
+        "candidate_index": best["candidate_index"],
+        "details": best["details"],
+        "uncapped_cost": best["uncapped_cost"],
+        "bbox_area": best["bbox_area"],
+        "hpwl_total": best["hpwl_total"],
+        "reject_reason": best["reject_reason"],
+        "duplicate": best["duplicate"],
+        "metrics": _metrics_brief(best["metrics"]),
+    }
+
+
+def _audit_round(
+    context: Context,
+    state: dict[str, Any],
+    experts: Iterable[str],
+    records: list[dict[str, Any]],
+    *,
+    require_soft: str | None,
+    round_label: int,
+    runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Per-state round audit: every scored candidate + oracle vs selected."""
+
+    obligations = _residual_obligations(context, state["positions"])
+    components = _audit_components(context, state["positions"])
+    entries = [
+        _audit_record(context, components, state, record, require_soft)
+        for record in records
+    ]
+    if runs is None:
+        runs = [{"expert": "all", "records": entries}]
+    else:
+        cursor = 0
+        rebuilt = []
+        for run in runs:
+            count = len(run["records"])
+            rebuilt.append(
+                {"expert": run["expert"], "records": entries[cursor : cursor + count]}
+            )
+            cursor += count
+        runs = rebuilt
+    feasible = [entry for entry in entries if entry["metrics"]["hard_feasible"]]
+    admitted = [entry for entry in entries if entry["reject_reason"] is None]
+    oracle = _audit_best(feasible)
+    selected = _audit_best(admitted)
+    if selected is None:
+        classification = "generation_failure"
+    elif oracle is not None and oracle["duplicate"]:
+        classification = "duplicate_gap"
+    elif oracle is not None and oracle["uncapped_cost"] < selected["uncapped_cost"] - 1.0e-12:
+        classification = "ranking_failure"
+    else:
+        classification = "success"
+    return {
+        "state": _audit_state_detail(state),
+        "obligations": obligations[:2],
+        "experts": list(experts),
+        "runs": runs,
+        "oracle": oracle,
+        "selected": selected,
+        "classification": classification,
     }
 
 
