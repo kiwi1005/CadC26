@@ -157,8 +157,10 @@ direct-generation 的唯一勝場在 106–120（analytic 全 cap → learned 8/
 2. CCRL 也證明了 repair-ordering 紅利在真 solver states 不存在（P11.5c）。
 3. Direct lane 的零件全在：heads、one-shot decoder、verifier、trainer、
    outline 推論。
-4. 資料紅利未開採：incumbent checkpoint 只消費了 3K samples（1M 的 0.3%）。
-   in-flight：pool 100K / 10K steps 的 structure 訓練正在跑（見 §7）。
+4. 資料紅利已開始兌現：Phase 1 pool-100K 訓練 KEEP——large15 weighted
+   `8.822391 → 8.720192`、uncapped `8 → 10`（見
+   `phase1_data_scaling_decision_2026-08-15.md`）；此 checkpoint 為 G1
+   起點。
 
 ## 6. 訓練總規劃（四相，每相有 gate）
 
@@ -184,10 +186,10 @@ G1（10K, 106–120 主桶）
 
 ## 7. 進行中與立即下一步
 
-- in-flight：`hcfp5090-q2-structure-large-s10000-pool100k-seed6501.pt`
-  （同 parent、structure stage、pool 100K、10K steps；完成後跑同一條
-  large15 exact 命令對比 8.822391 / 8-of-15）。此實驗屬 Phase 1 資料
-  scaling，結果直接餵 G1 的起點 checkpoint 選擇。
+- ~~in-flight：pool 100K / 10K steps structure 訓練~~ → **完成，KEEP**：
+  large15 weighted `8.822391 → 8.720192`、uncapped `8 → 10`、15/15
+  hard-feasible（詳見 `phase1_data_scaling_decision_2026-08-15.md`）。
+  此 checkpoint 即 G1 起點。
 - 立即下一步（G1 實作面）：
   1. `src/hcfp/generation_state.py`：anchor-only masked state builder
      （複用 `build_repair_state` 的 exact-contact 慣例：continuous 特徵
@@ -225,6 +227,6 @@ placement prior，直接生成、精確編譯」。**
 
 ```text
 G1:      held-out 106–120 direct generation ≥ analytic incumbent
-Phase 3: K=4 exact-score 選優後，large15 uncapped cost < 8.822391
+Phase 3: K=4 exact-score 選優後，large15 uncapped cost < 8.720192
 終局:    full100 加權成本 < 6.414040（P8 guarded）且 runtime 可接受
 ```
