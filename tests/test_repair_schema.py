@@ -66,6 +66,45 @@ def test_state_reproduces_dynamic_constraints_and_mobility() -> None:
     assert state.repair_target.tolist() == [False, False, True, False]
 
 
+def test_state_uses_exact_contact_geometry_without_cross_group_id_collisions() -> None:
+    case = from_official(
+        4,
+        torch.tensor((288.0, 308.0, 1.0, 1.0)),
+        [],
+        [],
+        [],
+        torch.tensor(
+            (
+                (0, 0, 0, 1, 0),
+                (0, 0, 0, 1, 0),
+                (0, 0, 0, 2, 0),
+                (0, 0, 0, 2, 0),
+            )
+        ),
+        torch.full((4, 4), -1.0),
+    )
+    exact = torch.tensor(
+        (
+            (42.0, 130.0, 16.0, 18.0),
+            (42.0, 116.0, 22.0, 14.0),
+            (80.0, 0.0, 1.0, 1.0),
+            (81.0, 0.0, 1.0, 1.0),
+        ),
+        dtype=torch.float64,
+    )
+    normalized = normalize_xywh(case, exact)
+
+    assert not extract_contacts(normalized, tolerance=0.0)
+    state = build_repair_state(
+        case,
+        normalized,
+        exact_contact_placement=exact,
+    )
+
+    assert state.contact_edges[:, :2].tolist() == [[0, 1], [2, 3]]
+    assert state.group_component_id.tolist() == [0, 0, 1, 1]
+
+
 def test_action_identity_and_d4_round_trip_are_canonical() -> None:
     action = RepairAction(
         expert=ExpertKind.CONTACT,
@@ -101,7 +140,9 @@ def test_action_identity_and_d4_round_trip_are_canonical() -> None:
         "transpose",
         "antitranspose",
     ):
-        restored = transform_action(transform_action(action, name), inverse_transform(name))
+        restored = transform_action(
+            transform_action(action, name), inverse_transform(name)
+        )
         assert action_sha256(restored) == action_sha256(action)
     rotated = transform_action(action, "rot90")
     assert rotated.relation == "LEFT"

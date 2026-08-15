@@ -33,11 +33,13 @@ def _c1_fixture():
     clean_state = build_repair_state(
         sample.case,
         normalize_xywh(sample.case, clean),
+        exact_contact_placement=clean,
         corruption_kind="clean",
     )
     corrupt_state = build_repair_state(
         sample.case,
         normalize_xywh(sample.case, corruption.placement),
+        exact_contact_placement=corruption.placement,
         corruption_kind=corruption.kind.lower(),
         corruption_level=1,
     )

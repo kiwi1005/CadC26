@@ -211,6 +211,7 @@ def _write_source(
         state = build_repair_state(
             sample.case,
             normalize_xywh(sample.case, corruption.placement),
+            exact_contact_placement=corruption.placement,
             corruption_kind=kind.lower(),
             corruption_level=int(kind[-1]),
         )

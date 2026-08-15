@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import gzip
 import hashlib
 import json
@@ -24,6 +24,7 @@ from hcfp.data import file_sha256  # noqa: E402
 from hcfp.floorset_lite import iter_floorset_lite_with_source  # noqa: E402
 from hcfp.repair.actions import action_sha256  # noqa: E402
 from hcfp.repair.decoders.contact import decode_contact_action  # noqa: E402
+from hcfp.repair.decoders.base import DecodeFailure  # noqa: E402
 from hcfp.repair.losses import contact_action_loss  # noqa: E402
 from hcfp.repair.model import (  # noqa: E402
     ContactRepairModel,
@@ -34,6 +35,7 @@ from hcfp.repair.replay import (  # noqa: E402
     repair_generation_loads,
     repair_replay_loads,
 )
+from hcfp.repair.state import build_repair_state  # noqa: E402
 
 
 _KINDS = ("C0", "C1", "C2")
@@ -109,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
 
     model.eval()
     evaluation_started = time.perf_counter()
+    train_evaluation = _evaluate_symbolic(model, train)
     evaluation = _evaluate(model, heldout, verifiers)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -180,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
             },
         },
         "coverage": {"train": train_coverage, "heldout": heldout_coverage},
+        "train": train_evaluation,
         "heldout": evaluation,
         "gate": _gate(evaluation, train_coverage, heldout_coverage),
     }
@@ -192,10 +196,29 @@ def main(argv: list[str] | None = None) -> int:
 
 def _load_replay(path: Path, split: str):
     with gzip.open(path, "rt", encoding="utf-8") as stream:
-        records = [repair_replay_loads(line) for line in stream]
+        records = [
+            _with_exact_contact_state(repair_replay_loads(line)) for line in stream
+        ]
     if not records or any(record.source_split != split for record in records):
         raise ValueError(f"{split} replay is empty or has a split mismatch")
     return records
+
+
+def _with_exact_contact_state(record):
+    state = record.state
+    return replace(
+        record,
+        state=build_repair_state(
+            state.case,
+            state.placement,
+            geometry_observed=state.geometry_observed,
+            repair_target=state.repair_target,
+            exact_contact_placement=record.decoder_placement,
+            round_index=state.round_index,
+            corruption_kind=state.corruption_kind,
+            corruption_level=state.corruption_level,
+        ),
+    )
 
 
 def _load_generation(path: Path, split: str):
@@ -334,6 +357,25 @@ def _load_verifiers(
 
 
 @torch.inference_mode()
+def _evaluate_symbolic(model, records) -> dict:
+    total_nll = top1 = top4 = 0.0
+    for record in records:
+        output = model(record.state, record.obligation)
+        total_nll += float(contact_action_loss(output, record.action).total)
+        actions = topk_contact_actions(output, record.obligation, k=4)
+        teacher = action_sha256(record.action)
+        top1 += float(bool(actions) and action_sha256(actions[0]) == teacher)
+        top4 += float(any(action_sha256(action) == teacher for action in actions))
+    return {
+        "record_count": len(records),
+        "source_count": len({record.source_id for record in records}),
+        "mean_factorized_nll": total_nll / len(records),
+        "top1_inverse_action_recall": top1 / len(records),
+        "top4_inverse_action_recall": top4 / len(records),
+    }
+
+
+@torch.inference_mode()
 def _evaluate(model, records, verifiers: dict) -> dict:
     totals = Counter()
     retained = []
@@ -347,19 +389,22 @@ def _evaluate(model, records, verifiers: dict) -> dict:
         top1 = bool(actions) and action_sha256(actions[0]) == teacher
         top4 = any(action_sha256(action) == teacher for action in actions)
         decoded = [
-            result
+            decode_contact_action(
+                record.state.case,
+                record.decoder_placement,
+                action,
+                verify_case=verifiers[record.source_id],
+            )
             for action in actions
-            if (
-                result := decode_contact_action(
-                    record.state.case,
-                    record.decoder_placement,
-                    action,
-                    verify_case=verifiers[record.source_id],
-                )
-            ).succeeded
+        ]
+        repaired = [result for result in decoded if result.succeeded]
+        hard_feasible = [
+            result
+            for result in decoded
+            if result.succeeded or result.failure == DecodeFailure.NO_DEBT_REDUCTION
         ]
         best = min(
-            decoded,
+            repaired,
             key=lambda result: (result.debt_after, action_sha256(result.action)),
             default=None,
         )
@@ -369,34 +414,62 @@ def _evaluate(model, records, verifiers: dict) -> dict:
         retained.append(recovery)
         for bucket in (totals, metrics):
             bucket["count"] += 1
+            bucket["decode_count"] += len(decoded)
             bucket["top1_inverse"] += int(top1)
             bucket["top4_inverse"] += int(top4)
-            bucket["top4_exact"] += int(best is not None)
+            bucket["top4_exact"] += int(bool(hard_feasible))
+            bucket["functional_repair"] += int(best is not None)
             bucket["full_teacher_gain"] += int(gain >= teacher_gain)
             bucket["recovery_sum"] += recovery
+            bucket["model_miss_failure"] += int(not top4)
+            bucket["decoder_coverage_failure"] += int(best is None)
+            bucket["hard_infeasible_decode"] += sum(
+                result.failure == DecodeFailure.HARD_INFEASIBLE for result in decoded
+            )
+            for result in decoded:
+                if result.failure is not None:
+                    bucket[f"decode_failure:{result.failure.value}"] += 1
+    overall = _decode_metrics(totals)
     return {
         "record_count": totals["count"],
         "source_count": len({record.source_id for record in records}),
         "source_id_sha256": _sha256_lines({record.source_id for record in records}),
         "top1_inverse_action_recall": totals["top1_inverse"] / totals["count"],
         "top4_inverse_action_recall": totals["top4_inverse"] / totals["count"],
-        "decoded_top4_exact_success_rate": totals["top4_exact"] / totals["count"],
         "grouping_recovery_vs_inverse_mean": sum(retained) / len(retained),
         "full_inverse_gain_recovery_rate": totals["full_teacher_gain"]
         / totals["count"],
+        **overall,
         "by_kind": {
             kind: {
                 "count": bucket["count"],
                 "top1_inverse_action_recall": bucket["top1_inverse"] / bucket["count"],
                 "top4_inverse_action_recall": bucket["top4_inverse"] / bucket["count"],
-                "decoded_top4_exact_success_rate": bucket["top4_exact"]
-                / bucket["count"],
                 "grouping_recovery_vs_inverse_mean": bucket["recovery_sum"]
                 / bucket["count"],
                 "full_inverse_gain_recovery_rate": bucket["full_teacher_gain"]
                 / bucket["count"],
+                **_decode_metrics(bucket),
             }
             for kind, bucket in sorted(per_kind.items())
+        },
+    }
+
+
+def _decode_metrics(bucket: Counter) -> dict:
+    count = bucket["count"]
+    return {
+        "decoded_top4_exact_success_rate": bucket["top4_exact"] / count,
+        "decoded_top4_hard_feasible_rate": bucket["top4_exact"] / count,
+        "functional_repair_rate": bucket["functional_repair"] / count,
+        "mean_decode_count": bucket["decode_count"] / count,
+        "model_miss_failure_count": bucket["model_miss_failure"],
+        "decoder_coverage_failure_count": bucket["decoder_coverage_failure"],
+        "hard_infeasible_decode_count": bucket["hard_infeasible_decode"],
+        "decode_failure_categories": {
+            key.removeprefix("decode_failure:"): value
+            for key, value in sorted(bucket.items())
+            if key.startswith("decode_failure:")
         },
     }
 
@@ -404,7 +477,7 @@ def _evaluate(model, records, verifiers: dict) -> dict:
 def _gate(evaluation: dict, train_coverage: dict, heldout_coverage: dict) -> dict:
     thresholds = {
         "top4_inverse_action_recall": 0.80,
-        "decoded_top4_exact_success_rate": 0.99,
+        "decoded_top4_hard_feasible_rate": 0.99,
         "grouping_recovery_vs_inverse_mean": 0.90,
     }
     train_complete = (

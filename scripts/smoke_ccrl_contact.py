@@ -122,6 +122,7 @@ def _records(root: str, count: int, scan_limit: int, seed: int):
             state = build_repair_state(
                 sample.case,
                 normalize_xywh(sample.case, corruption.placement),
+                exact_contact_placement=corruption.placement,
                 corruption_kind=corruption.kind.lower(),
                 corruption_level=int(corruption.kind[-1]),
             )

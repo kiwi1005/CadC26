@@ -26,23 +26,44 @@ def build_repair_state(
     *,
     geometry_observed: Any | None = None,
     repair_target: Any | None = None,
+    exact_contact_placement: Any | None = None,
     round_index: int = 0,
     corruption_kind: str | None = None,
     corruption_level: int = 0,
 ) -> RepairState:
-    boxes = torch.as_tensor(placement, dtype=torch.float32, device="cpu").reshape(case.n, 4)
+    boxes = torch.as_tensor(placement, dtype=torch.float32, device="cpu").reshape(
+        case.n, 4
+    )
+    contact_boxes = (
+        boxes
+        if exact_contact_placement is None
+        else torch.as_tensor(
+            exact_contact_placement, dtype=torch.float64, device="cpu"
+        ).reshape(case.n, 4)
+    )
+    if not bool(torch.isfinite(contact_boxes).all()) or not bool(
+        (contact_boxes[:, 2:4] > 0).all()
+    ):
+        raise ValueError(
+            "exact Contact placement must be finite with positive dimensions"
+        )
     observed = _mask(geometry_observed, case.n, default=True)
     target = _mask(repair_target, case.n, default=False)
     preplaced = case.preplaced_mask.detach().cpu().bool()
     fixed = case.fixed_mask.detach().cpu().bool()
     contacts = extract_contacts(
-        boxes,
+        contact_boxes,
         net_weight=case.b2b_weight,
         tolerance=0.0,
     )
     edges = torch.tensor(
         [
-            (edge.first, edge.second, _SIDE_CODE[edge.first_side], _SIDE_CODE[edge.second_side])
+            (
+                edge.first,
+                edge.second,
+                _SIDE_CODE[edge.first_side],
+                _SIDE_CODE[edge.second_side],
+            )
             for edge in contacts
         ],
         dtype=torch.long,
@@ -55,7 +76,7 @@ def build_repair_state(
         position_mobility=~preplaced,
         shape_mobility=~(fixed | preplaced),
         contact_edges=edges,
-        group_component_id=_group_components(case, boxes),
+        group_component_id=_group_components(case, contact_boxes),
         boundary_missing=boundary_missing(case, boxes).long(),
         mib_shape_class=_mib_shape_classes(case, boxes),
         round_index=round_index,
@@ -90,12 +111,20 @@ def state_from_payload(payload: dict[str, Any]) -> RepairState:
     return RepairState(
         case=case_from_payload(payload["case"]),
         placement=torch.as_tensor(payload["placement"], dtype=torch.float32),
-        geometry_observed=torch.as_tensor(payload["geometry_observed"], dtype=torch.bool),
+        geometry_observed=torch.as_tensor(
+            payload["geometry_observed"], dtype=torch.bool
+        ),
         repair_target=torch.as_tensor(payload["repair_target"], dtype=torch.bool),
-        position_mobility=torch.as_tensor(payload["position_mobility"], dtype=torch.bool),
+        position_mobility=torch.as_tensor(
+            payload["position_mobility"], dtype=torch.bool
+        ),
         shape_mobility=torch.as_tensor(payload["shape_mobility"], dtype=torch.bool),
-        contact_edges=torch.as_tensor(payload["contact_edges"], dtype=torch.long).reshape(-1, 4),
-        group_component_id=torch.as_tensor(payload["group_component_id"], dtype=torch.long),
+        contact_edges=torch.as_tensor(
+            payload["contact_edges"], dtype=torch.long
+        ).reshape(-1, 4),
+        group_component_id=torch.as_tensor(
+            payload["group_component_id"], dtype=torch.long
+        ),
         boundary_missing=torch.as_tensor(payload["boundary_missing"], dtype=torch.long),
         mib_shape_class=torch.as_tensor(payload["mib_shape_class"], dtype=torch.long),
         round_index=int(payload.get("round_index", 0)),
@@ -116,6 +145,7 @@ def _mask(value: Any | None, n: int, *, default: bool) -> torch.Tensor:
 
 def _group_components(case, boxes: torch.Tensor) -> torch.Tensor:
     result = torch.full((case.n,), -1, dtype=torch.long)
+    component = 0
     for row in case.group_membership.detach().cpu().bool():
         members = set(torch.nonzero(row, as_tuple=False).reshape(-1).tolist())
         adjacency = {member: set() for member in members}
@@ -125,7 +155,6 @@ def _group_components(case, boxes: torch.Tensor) -> torch.Tensor:
                 if edge_connected(boxes[first], boxes[second], tol=0.0):
                     adjacency[first].add(second)
                     adjacency[second].add(first)
-        component = 0
         unseen = set(members)
         while unseen:
             start = min(unseen)
