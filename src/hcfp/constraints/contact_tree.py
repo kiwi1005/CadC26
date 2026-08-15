@@ -73,32 +73,72 @@ def extract_contacts(
     if not all(math.isfinite(float(value)) for value in coeffs):
         raise ValueError("contact scoring weights must be finite")
 
-    contacts: list[Contact] = []
+    n = int(boxes.shape[0])
+    if n < 2:
+        return ()
     left, bottom = boxes[:, 0], boxes[:, 1]
     right, top = left + boxes[:, 2], bottom + boxes[:, 3]
     centers = boxes[:, :2] + 0.5 * boxes[:, 2:4]
-    for first in range(int(boxes.shape[0])):
-        for second in range(first + 1, int(boxes.shape[0])):
-            y_overlap = _overlap(bottom[first], top[first], bottom[second], top[second])
-            x_overlap = _overlap(left[first], right[first], left[second], right[second])
-            horizontal_gap = min(abs(float(right[first] - left[second])), abs(float(right[second] - left[first])))
-            vertical_gap = min(abs(float(top[first] - bottom[second])), abs(float(top[second] - bottom[first])))
-            if y_overlap > 0.0 and horizontal_gap <= tolerance:
-                if abs(float(right[first] - left[second])) <= tolerance:
-                    sides: tuple[Side, Side] = (RIGHT, LEFT)
-                else:
-                    sides = (LEFT, RIGHT)
-                contacts.append(
-                    _contact(first, second, sides, y_overlap, centers, weights, coeffs)
+
+    # Vectorized pair scan over the strict upper triangle (first < second).
+    first_index, second_index = torch.triu_indices(n, n, offset=1)
+    first_left, first_right = left[first_index], right[first_index]
+    first_bottom, first_top = bottom[first_index], top[first_index]
+    second_left, second_right = left[second_index], right[second_index]
+    second_bottom, second_top = bottom[second_index], top[second_index]
+
+    y_overlap = (torch.minimum(first_top, second_top) - torch.maximum(first_bottom, second_bottom)).clamp_min(0.0)
+    x_overlap = (torch.minimum(first_right, second_right) - torch.maximum(first_left, second_left)).clamp_min(0.0)
+    horizontal_gap = torch.minimum(
+        (first_right - second_left).abs(), (second_right - first_left).abs()
+    )
+    vertical_gap = torch.minimum(
+        (first_top - second_bottom).abs(), (second_top - first_bottom).abs()
+    )
+
+    horizontal = (y_overlap > 0.0) & (horizontal_gap <= tolerance)
+    vertical = (x_overlap > 0.0) & (vertical_gap <= tolerance)
+    candidates = horizontal | vertical
+    if not bool(candidates.any()):
+        return ()
+
+    pair_index = torch.nonzero(candidates, as_tuple=False).reshape(-1)
+    contacts: list[Contact] = []
+    for offset in pair_index.tolist():
+        first = int(first_index[offset])
+        second = int(second_index[offset])
+        if bool(horizontal[offset]):
+            if abs(float(right[first] - left[second])) <= tolerance:
+                sides: tuple[Side, Side] = (RIGHT, LEFT)
+            else:
+                sides = (LEFT, RIGHT)
+            contacts.append(
+                _contact(
+                    first,
+                    second,
+                    sides,
+                    float(y_overlap[offset]),
+                    centers,
+                    weights,
+                    coeffs,
                 )
-            if x_overlap > 0.0 and vertical_gap <= tolerance:
-                if abs(float(top[first] - bottom[second])) <= tolerance:
-                    sides = (TOP, BOTTOM)
-                else:
-                    sides = (BOTTOM, TOP)
-                contacts.append(
-                    _contact(first, second, sides, x_overlap, centers, weights, coeffs)
+            )
+        if bool(vertical[offset]):
+            if abs(float(top[first] - bottom[second])) <= tolerance:
+                sides = (TOP, BOTTOM)
+            else:
+                sides = (BOTTOM, TOP)
+            contacts.append(
+                _contact(
+                    first,
+                    second,
+                    sides,
+                    float(x_overlap[offset]),
+                    centers,
+                    weights,
+                    coeffs,
                 )
+            )
     return tuple(sorted(contacts, key=_contact_order))
 
 
