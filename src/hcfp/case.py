@@ -195,19 +195,41 @@ def _prepare_b2b_weight(connectivity: Any, n: int) -> torch.Tensor:
     if tensor.ndim != 2 or tensor.shape[1] < 3:
         raise ValueError("b2b edge list rows must contain [block_i, block_j, weight]")
 
+    rows = tensor[:, :3]
+    finite = torch.isfinite(rows).all(dim=1)
+    padded = (rows[:, 0] < 0.0) & (rows[:, 1] < 0.0) & (rows[:, 2] < 0.0)
+    keep = finite & ~padded
+    if not bool(keep.any()):
+        dense = torch.zeros((n, n), dtype=torch.float32)
+        dense.fill_diagonal_(0.0)
+        return dense
+    selected = rows[keep]
+    if not bool(torch.isfinite(selected).all()):
+        raise ValueError("b2b weights must be finite and non-negative")
+    weights = selected[:, 2]
+    if bool((weights < 0.0).any()):
+        raise ValueError("b2b weights must be finite and non-negative")
+    first = selected[:, 0].round().long()
+    second = selected[:, 1].round().long()
+    in_range = (
+        (selected[:, 0] == first)
+        & (selected[:, 1] == second)
+        & (first >= 0)
+        & (first < n)
+        & (second >= 0)
+        & (second < n)
+    )
+    if not bool(in_range.all()):
+        raise ValueError(
+            f"b2b index {float(selected[~in_range][0, 0]):g} outside [0, {n})"
+            if bool((~in_range).any())
+            else "b2b index outside range"
+        )
+    if bool((first == second).any()):
+        raise ValueError("b2b self-edges are not allowed")
     dense = torch.zeros((n, n), dtype=torch.float32)
-    for row in tensor:
-        i_raw, j_raw, weight = row[:3]
-        if _is_padded_edge(i_raw, j_raw, weight):
-            continue
-        i = _checked_index(i_raw, n, "b2b block_i")
-        j = _checked_index(j_raw, n, "b2b block_j")
-        if i == j:
-            raise ValueError("b2b self-edges are not allowed")
-        if not torch.isfinite(weight) or float(weight) < 0.0:
-            raise ValueError("b2b weights must be finite and non-negative")
-        dense[i, j] += float(weight)
-        dense[j, i] += float(weight)
+    dense.index_put_((first, second), weights, accumulate=True)
+    dense.index_put_((second, first), weights, accumulate=True)
     dense.fill_diagonal_(0.0)
     return dense
 
