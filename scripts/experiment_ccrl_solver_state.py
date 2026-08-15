@@ -7,16 +7,18 @@ own placements (safe_shelf incumbents over training-root FloorSet sources,
 same qualifying rule as the frozen P8.2 bucket). Model, masks, decoder,
 action set, decode-cache semantics, and budgets are identical.
 
-Per state: pick the worst grouping-debt group, build RepairState from the
-solver placement (no corruption kind), enumerate the full mask-legal action
-set, then rank it two ways (canonical index order vs model Top-K) and
-measure recovered oracle grouping-gain at budgets 1/2/4/8/16/32.
+Parallel layout (same pattern as experiment_bfod_heldout.py): the parent
+streams FloorSet sources; a worker pool runs safe_shelf, qualification, the
+full decode scan, and the model ranking per state. Workers pin torch to one
+thread; pool.map preserves examination order, so results are identical to
+the serial run apart from wall-clock fields.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -40,14 +42,25 @@ from hcfp.repair.model import (  # noqa: E402
     RepairModelConfig,
     topk_contact_actions,
 )
-from hcfp.repair.schema import ExpertKind, RepairObligation, RepairAction  # noqa: E402
+from hcfp.repair.schema import (  # noqa: E402
+    ExpertKind,
+    RepairAction,
+    RepairObligation,
+)
 from hcfp.repair.state import build_repair_state  # noqa: E402
 from hcfp.verify import grouping_violation, verify_feasible  # noqa: E402
 
 
 BUDGETS = (1, 2, 4, 8, 16, 32)
 FORBIDDEN_ROOT_TOKENS = ("litetensordatatest", "validation", "visible", "test")
-DENSE_UTILIZATION = 0.90
+
+_MODEL: "ContactRepairModel | None" = None
+
+
+def _init_worker(checkpoint: str) -> None:
+    global _MODEL
+    torch.set_num_threads(1)
+    _MODEL = _load_model(Path(checkpoint))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -56,6 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--floorset-lite-root", default="artifacts/floorset-v10")
     parser.add_argument("--states", type=int, default=180)
     parser.add_argument("--seed", type=int, default=5090)
+    parser.add_argument(
+        "--jobs",
+        type=_positive,
+        default=max(1, min((os.cpu_count() or 2) - 2, 16)),
+    )
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
 
@@ -65,47 +83,32 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError(f"visible validation/test tokens in root: {forbidden}")
 
     started = time.perf_counter()
-    model = _load_model(Path(args.checkpoint))
-    examined = qualifying = 0
     rows: list[dict] = []
-    for sample, source in iter_floorset_lite_with_source(
-        layout_root, limit=None, seed=args.seed, max_layouts_per_file=2
-    ):
-        examined += 1
-        case = sample.case
-        try:
-            positions = safe_shelf(source)
-        except (RuntimeError, ValueError):
-            continue
-        if not verify_feasible(source, positions):
-            continue
-        debt_before = grouping_violation(case, positions)
-        if debt_before <= 0:
-            continue
-        groups = torch.as_tensor(case.group_membership, dtype=torch.bool)
-        if not groups.any():
-            continue
-        # worst grouping-debt group as the repair obligation;
-        # debt metric is the global grouping violation, matching the decoder
-        debt_global = int(grouping_violation(case, positions))
-        best_group, best_group_debt = None, -1
-        for gi in range(groups.shape[0]):
-            members = torch.nonzero(groups[gi]).reshape(-1).tolist()
-            if len(members) < 2:
-                continue
-            comp = _group_debt(case, positions, set(members))
-            if comp > best_group_debt:
-                best_group, best_group_debt = gi, comp
-        if best_group is None or best_group_debt <= 0:
-            continue
-        qualifying += 1
-        rows.append(
-            _battle_one(
-                case, source, positions, best_group, debt_global, model
-            )
-        )
-        if qualifying >= args.states:
-            break
+    examined = 0
+    qualifying = 0
+
+    from multiprocessing import Pool
+
+    with Pool(
+        args.jobs,
+        initializer=_init_worker,
+        initargs=(str(Path(args.checkpoint).resolve()),),
+    ) as pool:
+        batch: list[tuple[object, dict]] = []
+        done = False
+        for sample, source in iter_floorset_lite_with_source(
+            layout_root, limit=None, seed=args.seed, max_layouts_per_file=2
+        ):
+            examined += 1
+            batch.append((sample, source))
+            if len(batch) >= args.jobs * 4:
+                qualifying = _drain(pool, batch, rows, qualifying, args.states)
+                batch = []
+                if qualifying >= args.states:
+                    done = True
+                    break
+        if batch and not done:
+            _drain(pool, batch, rows, qualifying, args.states)
 
     if not rows:
         raise RuntimeError("no qualifying solver states found")
@@ -115,6 +118,12 @@ def main(argv: list[str] | None = None) -> int:
         "purpose": "P11.5b CCRL vs deterministic ordering on real solver states",
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "checkpoint_sha256": file_sha256(args.checkpoint),
+        "floorset_lite_root": str(layout_root),
+        "states": len(rows),
+        "examined": examined,
+        "seed": args.seed,
+        "jobs": args.jobs,
+        "state_source": "deterministic safe_shelf incumbent on training root",
         "elapsed_seconds": time.perf_counter() - started,
         "overall": _aggregate(rows),
         "rows": rows,
@@ -128,7 +137,48 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _battle_one(case, source, positions, group_index, group_debt, model) -> dict:
+def _drain(pool, batch, rows: list[dict], qualifying: int, limit: int) -> int:
+    for row in pool.map(_process_one, batch):
+        if row is None:
+            continue
+        rows.append(row)
+        qualifying += 1
+        if qualifying >= limit:
+            break
+    return qualifying
+
+
+def _process_one(args: tuple[object, dict]) -> dict | None:
+    sample, source = args
+    case = sample.case
+    try:
+        positions = safe_shelf(source)
+    except (RuntimeError, ValueError):
+        return None
+    if not verify_feasible(source, positions):
+        return None
+    debt_global = int(grouping_violation(case, positions))
+    if debt_global <= 0:
+        return None
+    groups = torch.as_tensor(case.group_membership, dtype=torch.bool)
+    if not groups.any():
+        return None
+    # worst grouping-debt group as the repair obligation;
+    # debt metric is the global grouping violation, matching the decoder
+    best_group, best_group_debt = None, -1
+    for gi in range(groups.shape[0]):
+        members = torch.nonzero(groups[gi]).reshape(-1).tolist()
+        if len(members) < 2:
+            continue
+        comp = _group_debt(case, positions, set(members))
+        if comp > best_group_debt:
+            best_group, best_group_debt = gi, comp
+    if best_group is None or best_group_debt <= 0:
+        return None
+    return _battle_one(case, source, positions, best_group, debt_global)
+
+
+def _battle_one(case, source, positions, group_index, debt_global) -> dict:
     members = (
         torch.nonzero(
             torch.as_tensor(case.group_membership, dtype=torch.bool)[group_index]
@@ -140,14 +190,14 @@ def _battle_one(case, source, positions, group_index, group_debt, model) -> dict
         ExpertKind.CONTACT,
         f"contact-group:{group_index}",
         tuple(members),
-        debt=group_debt,
+        debt=debt_global,
     )
     state = build_repair_state(
         case,
         normalize_xywh(case, positions),
         exact_contact_placement=positions,
     )
-    state_debt = int(group_debt)
+    state_debt = int(debt_global)
 
     movable = (~case.preplaced_mask).tolist()
     triples = [
@@ -212,7 +262,7 @@ def _battle_one(case, source, positions, group_index, group_debt, model) -> dict
 
     forward_started = time.perf_counter()
     actions = topk_contact_actions(
-        model(state, obligation), obligation, k=max(BUDGETS)
+        _MODEL(state, obligation), obligation, k=max(BUDGETS)
     )
     forward_seconds = time.perf_counter() - forward_started
     ccrl_seq = []
@@ -227,7 +277,7 @@ def _battle_one(case, source, positions, group_index, group_debt, model) -> dict
         )
 
     row = {
-        "source_id": sample_id_of(case, positions),
+        "source_id": _state_id(case, positions),
         "block_count": int(case.n),
         "group_index": group_index,
         "state_debt": state_debt,
@@ -251,8 +301,7 @@ def _battle_one(case, source, positions, group_index, group_debt, model) -> dict
     return row
 
 
-def sample_id_of(case, positions) -> str:
-    # stable per-state id: reuse the case n + placement digest
+def _state_id(case, positions) -> str:
     import hashlib
 
     payload = json.dumps(
@@ -276,7 +325,9 @@ def _group_debt(case, positions, members: set[int]) -> int:
 
 
 def _case_fields(case) -> dict:
-    return {f.name: getattr(case, f.name) for f in __import__("dataclasses").fields(case)}
+    import dataclasses
+
+    return {f.name: getattr(case, f.name) for f in dataclasses.fields(case)}
 
 
 def _recovered(seq, state_debt, oracle_gain) -> float | None:
@@ -355,6 +406,13 @@ def _median(values):
     if len(values) % 2:
         return values[mid]
     return (values[mid - 1] + values[mid]) / 2
+
+
+def _positive(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 if __name__ == "__main__":
