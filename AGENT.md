@@ -69,20 +69,23 @@ Every experiment ends with `KEEP`, `MODIFY`, or `REJECT` based on metrics. Stop 
 
 ## Research priorities
 
-### Current scope lock: P12.1 -> P12.2 Model-First Direct Generation Gate
+### Current scope lock: P12 G1 Model-First Direct Generation Gate
 
 This is the only intentionally time-sensitive section of `AGENT.md`. Update it when the active decisive experiment changes.
 
-目前只回答一個問題：在沒有 solver initial placement 的情況下，小型模型能否只根據 FloorSet instance 與 hard shape/anchor information，直接產生完整 Sequence-Pair + shape program，並由一次性 exact compiler 得到比 canonical/random topology 更好的合法 placement。
+目前只回答一個問題：在沒有 solver initial placement 的情況下，既有 learned structure model 能否只根據 FloorSet case、preplaced anchors、fixed shapes 與 constraints，直接產生 K=4 完整 Sequence-Pair / aspect / outline programs，並以一次性 exact compile 在 source-held-out 106–120 block cases 至少打平 analytic incumbent 且產生 cap crossing。
 
 執行順序：
 
-1. P12.1 只建立最小 `FloorplanProgram`、clean labels 與不搜尋的 one-shot compiler parity。
-2. P12.2 固定 10K train / 2K source-held-out、40–80 blocks、preplaced=0，測 one-shot K=1/4/8 direct generation。
-3. P12.2 結束前，不加入 iterative diffusion、Boundary/MIB/Contact residual heads、HPWL critic、learned router、DAgger、offline RL、1M scaling、production integration 或 larger-than-192x4x6 model。
-4. 若 learned program 不能明顯勝過相同 compiler 下的 canonical/random Sequence-Pair，直接 REJECT P12，不靠更多資料或演算法 tail 搶救。
+1. 先完成並評估進行中的 `hcfp5090-q2-structure-large-s10000-pool100k-seed6501.pt`，不要重跑同一個 scaling 實驗。
+2. #25 只把既有 `SceneEncoder`、`StructureHeads`、`DualPermutationHead`、aspect/outline outputs 接成 anchor-only full-mask direct path，重用 `pack_sequence_pair_with_anchors`、`exact_shape_projection` 與 verifier。
+3. #26 固定 10K train / 2K source-held-out，106–120 blocks 為主桶、40–80 為對照桶，測 K=4 one-shot direct generation。
+4. G1 結束前，不建立第二套模型、generic generative framework、iterative diffusion、Boundary/MIB/Contact residual heads、HPWL critic、router、DAgger、offline RL、1M scaling 或 production integration。
+5. PASS：held-out large model compile hard-feasible >=95%，weighted uncapped cost <= analytic incumbent，且 K=4 至少一個 below-cap case。
+6. MODIFY：hard feasibility 通過但 cost 輸 analytic，只檢查一個已量測的 aspect / outline / program 表示問題，不先加容量。
+7. REJECT：model compile hard-feasible <80%，回到 partial reconstruction 約 `t=0.6`；不靠更多資料、大模型或 post-model solver 搶救。
 
-目前 P11 結論：structured corruption 可教會 Contact ordering，但在 P8 single-block bridge action space 中 canonical order 已中位數兩個 decodes 命中，因此停止 repair-ranker integration。P11 code可作為 residual-learning evidence與後續 auxiliary工具，但不是 P12 的正常 initial solution。
+目前 P11 結論：structured corruption 可教會 Contact ordering，但在 P8 single-block bridge action space 中 canonical order 已中位數兩個 decodes 命中，因此停止 repair-ranker integration。P11 code 可作為後續 residual-learning evidence與 auxiliary工具，但不是 P12 的正常 initial solution。
 
 ## Solver boundary invariants
 
