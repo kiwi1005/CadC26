@@ -183,6 +183,10 @@ are recorded in
 The follow-on Case70 BFOD/P10 sidecar, learned contact-ranker experiment, and
 plan-versus-implementation status are recorded in
 [`docs/research/hcfp5090_bfod_v1_p10_progress_2026-08-14.md`](docs/research/hcfp5090_bfod_v1_p10_progress_2026-08-14.md).
+The pivot from CCRL repair-ordering (converged: no ordering premium on real
+solver states) to Model-First Structured E2E Floorplanning, including the
+frozen G1 Direct Generation Gate, is tracked in
+[`docs/research/model_first_e2e_floorplanning_plan_2026-08-15.md`](docs/research/model_first_e2e_floorplanning_plan_2026-08-15.md).
 
 Local development targets the RTX 5090. The contest-safe path targets the
 official A100 environment and does not depend on FP8, persistent workers,
